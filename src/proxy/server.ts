@@ -260,24 +260,51 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         })
         .join("\n\n") || ""
 
-      // Build PreToolUse hook to fix agent names before SDK processes them
-      const taskHook = validAgentNames.length > 0 ? {
-        PreToolUse: [{
-          matcher: "Task",
-          hooks: [async (input: any) => ({
-            hookSpecificOutput: {
-              hookEventName: "PreToolUse" as const,
-              updatedInput: {
-                ...input.tool_input,
-                subagent_type: fuzzyMatchAgentName(
-                  String(input.tool_input?.subagent_type || ""),
-                  validAgentNames
-                ),
-              },
-            },
-          })],
-        }],
-      } : undefined
+      // --- Passthrough mode ---
+      // When enabled, ALL tool execution is forwarded to OpenCode instead of
+      // being handled internally. This enables multi-model agent delegation
+      // (e.g., oracle on GPT-5.2, explore on Gemini via oh-my-opencode).
+      const passthrough = Boolean(process.env.CLAUDE_PROXY_PASSTHROUGH)
+      const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
+
+      // In passthrough mode: block ALL tools, capture them for forwarding
+      // In normal mode: only fix agent names on Task tool
+      const sdkHooks = passthrough
+        ? {
+            PreToolUse: [{
+              matcher: "",  // Match ALL tools
+              hooks: [async (input: any) => {
+                capturedToolUses.push({
+                  id: input.tool_use_id,
+                  name: input.tool_name,
+                  input: input.tool_input,
+                })
+                return {
+                  decision: "block" as const,
+                  reason: "Forwarding to client for execution",
+                }
+              }],
+            }],
+          }
+        : validAgentNames.length > 0
+          ? {
+              PreToolUse: [{
+                matcher: "Task",
+                hooks: [async (input: any) => ({
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse" as const,
+                    updatedInput: {
+                      ...input.tool_input,
+                      subagent_type: fuzzyMatchAgentName(
+                        String(input.tool_input?.subagent_type || ""),
+                        validAgentNames
+                      ),
+                    },
+                  },
+                })],
+              }],
+            }
+          : undefined
 
       // Combine system context with conversation
       const prompt = systemContext
@@ -297,22 +324,24 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
             const response = query({
               prompt,
               options: {
-                maxTurns: 100,
+                maxTurns: passthrough ? 1 : 100,
                 cwd: workingDirectory,
                 model,
                 pathToClaudeCodeExecutable: claudeExecutable,
                 permissionMode: "bypassPermissions",
                 allowDangerouslySkipPermissions: true,
-                disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
-                allowedTools: [...ALLOWED_MCP_TOOLS],
-                mcpServers: {
-                  [MCP_SERVER_NAME]: opencodeMcpServer
-                },
-                plugins: [], // Prevent external plugins (e.g., oh-my-claudecode) from interfering
-                env: cleanEnv,
+                // In passthrough mode: no MCP tools, no blocked tools (Claude uses its native tools)
+                // In normal mode: block built-ins, use MCP replacements
+                ...(passthrough ? {} : {
+                  disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
+                  allowedTools: [...ALLOWED_MCP_TOOLS],
+                  mcpServers: { [MCP_SERVER_NAME]: opencodeMcpServer },
+                }),
+                plugins: [],
+                env: { ...cleanEnv, ENABLE_TOOL_SEARCH: "false" },
                 ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
                 ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-                ...(taskHook ? { hooks: taskHook } : {}),
+                ...(sdkHooks ? { hooks: sdkHooks } : {}),
               }
             })
 
@@ -354,6 +383,22 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               error: error instanceof Error ? error.message : String(error)
             })
             throw error
+          }
+
+          // In passthrough mode, add captured tool_use blocks from the hook
+          // (the SDK may not include them in content after blocking)
+          if (passthrough && capturedToolUses.length > 0) {
+            for (const tu of capturedToolUses) {
+              // Only add if not already in contentBlocks
+              if (!contentBlocks.some((b) => b.type === "tool_use" && (b as any).id === tu.id)) {
+                contentBlocks.push({
+                  type: "tool_use",
+                  id: tu.id,
+                  name: tu.name,
+                  input: tu.input,
+                })
+              }
+            }
           }
 
           // Determine stop_reason based on content: tool_use if any tool blocks, else end_turn
@@ -440,23 +485,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               const response = query({
                 prompt,
                 options: {
-                  maxTurns: 100,
+                  maxTurns: passthrough ? 1 : 100,
                   cwd: workingDirectory,
                   model,
                   pathToClaudeCodeExecutable: claudeExecutable,
                   includePartialMessages: true,
                   permissionMode: "bypassPermissions",
                   allowDangerouslySkipPermissions: true,
-                  disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
-                  allowedTools: [...ALLOWED_MCP_TOOLS],
-                  mcpServers: {
-                    [MCP_SERVER_NAME]: opencodeMcpServer
-                  },
-                  plugins: [], // Prevent external plugins from interfering
-                  env: cleanEnv,
+                  ...(passthrough ? {} : {
+                    disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
+                    allowedTools: [...ALLOWED_MCP_TOOLS],
+                    mcpServers: { [MCP_SERVER_NAME]: opencodeMcpServer },
+                  }),
+                  plugins: [],
+                  env: { ...cleanEnv, ENABLE_TOOL_SEARCH: "false" },
                   ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
                   ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-                  ...(taskHook ? { hooks: taskHook } : {}),
+                  ...(sdkHooks ? { hooks: sdkHooks } : {}),
                 }
               })
 
@@ -588,6 +633,49 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               }
 
               if (!streamClosed) {
+                // In passthrough mode, emit captured tool_use blocks as stream events
+                if (passthrough && capturedToolUses.length > 0 && messageStartEmitted) {
+                  for (let i = 0; i < capturedToolUses.length; i++) {
+                    const tu = capturedToolUses[i]!
+                    const blockIndex = eventsForwarded + i
+
+                    // content_block_start
+                    safeEnqueue(encoder.encode(
+                      `event: content_block_start\ndata: ${JSON.stringify({
+                        type: "content_block_start",
+                        index: blockIndex,
+                        content_block: { type: "tool_use", id: tu.id, name: tu.name, input: {} }
+                      })}\n\n`
+                    ), "passthrough_tool_block_start")
+
+                    // input_json_delta with the full input
+                    safeEnqueue(encoder.encode(
+                      `event: content_block_delta\ndata: ${JSON.stringify({
+                        type: "content_block_delta",
+                        index: blockIndex,
+                        delta: { type: "input_json_delta", partial_json: JSON.stringify(tu.input) }
+                      })}\n\n`
+                    ), "passthrough_tool_input")
+
+                    // content_block_stop
+                    safeEnqueue(encoder.encode(
+                      `event: content_block_stop\ndata: ${JSON.stringify({
+                        type: "content_block_stop",
+                        index: blockIndex
+                      })}\n\n`
+                    ), "passthrough_tool_block_stop")
+                  }
+
+                  // Emit message_delta with stop_reason: "tool_use"
+                  safeEnqueue(encoder.encode(
+                    `event: message_delta\ndata: ${JSON.stringify({
+                      type: "message_delta",
+                      delta: { stop_reason: "tool_use", stop_sequence: null },
+                      usage: { output_tokens: 0 }
+                    })}\n\n`
+                  ), "passthrough_message_delta")
+                }
+
                 // Emit the final message_stop (we skipped all intermediate ones)
                 if (messageStartEmitted) {
                   safeEnqueue(encoder.encode(`event: message_stop\ndata: {"type":"message_stop"}\n\n`), "final_message_stop")

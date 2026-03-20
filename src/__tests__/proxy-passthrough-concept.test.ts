@@ -89,15 +89,15 @@ describe("Passthrough: tool_use detection", () => {
     const content = toolUseMessage.message.content
     const toolUses = content.filter((b: any) => b.type === "tool_use")
     expect(toolUses).toHaveLength(1)
-    expect(toolUses[0].name).toBe("Read")
+    expect((toolUses[0] as any).name).toBe("Read")
   })
 
   it("should detect Task tool_use for agent delegation", () => {
     const content = taskToolUseMessage.message.content
     const toolUses = content.filter((b: any) => b.type === "tool_use")
     expect(toolUses).toHaveLength(1)
-    expect(toolUses[0].name).toBe("Task")
-    expect(toolUses[0].input.subagent_type).toBe("oracle")
+    expect((toolUses[0] as any).name).toBe("Task")
+    expect((toolUses[0] as any).input.subagent_type).toBe("oracle")
   })
 
   it("should detect text-only messages (no forwarding needed)", () => {
@@ -140,7 +140,7 @@ describe("Passthrough: response formatting", () => {
 
     const taskBlock = response.content.find((b: any) => b.type === "tool_use" && b.name === "Task")
     expect(taskBlock).toBeDefined()
-    expect(taskBlock.input.subagent_type).toBe("oracle")
+    expect((taskBlock as any).input.subagent_type).toBe("oracle")
   })
 
   it("should format end_turn response normally", () => {
@@ -175,7 +175,7 @@ describe("Passthrough: tool_result acceptance", () => {
       },
     ]
 
-    const toolResult = followUpMessages[0].content[0]
+    const toolResult: any = followUpMessages[0]!.content[0]!
     expect(toolResult.type).toBe("tool_result")
     expect(toolResult.tool_use_id).toBe("toolu_read1")
   })
@@ -199,10 +199,10 @@ describe("Passthrough: tool_result acceptance", () => {
       },
     ]
 
-    const taskResult = followUpMessages[0].content[0]
+    const taskResult: any = followUpMessages[0]!.content[0]!
     expect(taskResult.type).toBe("tool_result")
     expect(taskResult.tool_use_id).toBe("toolu_task1")
-    const parsed = JSON.parse(taskResult.content)
+    const parsed: any = JSON.parse(taskResult.content)
     expect(parsed.status).toBe("completed")
   })
 })
@@ -240,6 +240,6 @@ describe("Passthrough: multi-tool in single response", () => {
 
     expect(tasks).toHaveLength(1)
     expect(regular).toHaveLength(1)
-    expect(tasks[0].input.subagent_type).toBe("oracle")
+    expect((tasks[0] as any).input.subagent_type).toBe("oracle")
   })
 })
