@@ -1,5 +1,7 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
+import { serve } from "@hono/node-server"
+import type { Server } from "node:http"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
 import type { ProxyConfig } from "./types"
@@ -324,7 +326,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
       activeSessions++
       return
     }
-    // Wait for a slot
     return new Promise<void>((resolve) => {
       sessionQueue.push({ resolve })
     })
@@ -1087,19 +1088,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
     })
   }
 
-  app.post("/v1/messages", async (c) => {
+  const handleWithQueue = async (c: Context, endpoint: string) => {
     const requestId = c.req.header("x-request-id") || randomUUID()
-    const startedAt = Date.now()
-    claudeLog("request.enter", { requestId, endpoint: "/v1/messages" })
-    return handleMessages(c, { requestId, endpoint: "/v1/messages", queueEnteredAt: startedAt, queueStartedAt: startedAt })
-  })
+    const queueEnteredAt = Date.now()
+    claudeLog("request.enter", { requestId, endpoint })
+    await acquireSession()
+    const queueStartedAt = Date.now()
+    try {
+      return await handleMessages(c, { requestId, endpoint, queueEnteredAt, queueStartedAt })
+    } finally {
+      releaseSession()
+    }
+  }
 
-  app.post("/messages", async (c) => {
-    const requestId = c.req.header("x-request-id") || randomUUID()
-    const startedAt = Date.now()
-    claudeLog("request.enter", { requestId, endpoint: "/messages" })
-    return handleMessages(c, { requestId, endpoint: "/messages", queueEnteredAt: startedAt, queueStartedAt: startedAt })
-  })
+  app.post("/v1/messages", (c) => handleWithQueue(c, "/v1/messages"))
+  app.post("/messages", (c) => handleWithQueue(c, "/messages"))
 
   // Health check endpoint — verifies auth status
   app.get("/health", (c) => {
@@ -1143,30 +1146,32 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 export async function startProxyServer(config: Partial<ProxyConfig> = {}) {
   const { app, config: finalConfig } = createProxyServer(config)
 
-  let server
-  try {
-    server = Bun.serve({
-      port: finalConfig.port,
-      hostname: finalConfig.host,
-      idleTimeout: finalConfig.idleTimeoutSeconds,
-      fetch: app.fetch
-    })
-  } catch (error: unknown) {
-    if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") {
+  const server = serve({
+    fetch: app.fetch,
+    port: finalConfig.port,
+    hostname: finalConfig.host,
+  }, (info) => {
+    console.log(`Claude Max Proxy (Anthropic API) running at http://${finalConfig.host}:${info.port}`)
+    console.log(`\nTo use with OpenCode, run:`)
+    console.log(`  ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port} opencode`)
+  }) as Server
+
+  const idleMs = finalConfig.idleTimeoutSeconds * 1000
+  server.keepAliveTimeout = idleMs
+  server.headersTimeout = idleMs + 1000
+
+  server.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
       console.error(`\nError: Port ${finalConfig.port} is already in use.`)
       console.error(`\nIs another instance of the proxy already running?`)
       console.error(`  Check with: lsof -i :${finalConfig.port}`)
       console.error(`  Kill it with: kill $(lsof -ti :${finalConfig.port})`)
       console.error(`\nOr use a different port:`)
-      console.error(`  CLAUDE_PROXY_PORT=4567 bun run proxy`)
+      console.error(`  CLAUDE_PROXY_PORT=4567 claude-max-proxy`)
       process.exit(1)
     }
     throw error
-  }
-
-  console.log(`Claude Max Proxy (Anthropic API) running at http://${finalConfig.host}:${finalConfig.port}`)
-  console.log(`\nTo use with OpenCode, run:`)
-  console.log(`  ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://${finalConfig.host}:${finalConfig.port} opencode`)
+  })
 
   return server
 }
