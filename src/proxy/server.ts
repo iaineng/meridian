@@ -837,6 +837,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               }, 15_000)
 
               const skipBlockIndices = new Set<number>()
+              const streamedToolUseIds = new Set<string>() // Track tool_use IDs already forwarded in stream
               let messageStartEmitted = false // Track if we've sent a message_start to the client
 
               try {
@@ -890,6 +891,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                         if (passthrough && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
                           // Passthrough mode: strip prefix and forward to OpenCode
                           block.name = stripMcpPrefix(block.name)
+                          // Track this tool_use ID so we don't emit it again from capturedToolUses
+                          if (block.id) streamedToolUseIds.add(block.id)
                         } else if (block.name.startsWith("mcp__")) {
                           // Internal mode: skip all MCP tool blocks (internal execution)
                           if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
@@ -948,9 +951,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
               if (!streamClosed) {
                 // In passthrough mode, emit captured tool_use blocks as stream events
-                if (passthrough && capturedToolUses.length > 0 && messageStartEmitted) {
-                  for (let i = 0; i < capturedToolUses.length; i++) {
-                    const tu = capturedToolUses[i]!
+                // Skip any that were already forwarded during the stream (dedup by ID)
+                const unseenToolUses = capturedToolUses.filter(tu => !streamedToolUseIds.has(tu.id))
+                if (passthrough && unseenToolUses.length > 0 && messageStartEmitted) {
+                  for (let i = 0; i < unseenToolUses.length; i++) {
+                    const tu = unseenToolUses[i]!
                     const blockIndex = eventsForwarded + i
 
                     // content_block_start
