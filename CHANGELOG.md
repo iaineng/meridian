@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.4](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.3...v1.13.4) (2026-03-23)
+
+
+### Bug Fixes
+
+* pass systemContext to storeSession for consistent fingerprinting ([055b025](https://github.com/rynfar/opencode-claude-max-proxy/commit/055b02571c985c979c90deb491894b863fa9832d))
+* pass systemContext to storeSession for consistent fingerprinting ([617530d](https://github.com/rynfar/opencode-claude-max-proxy/commit/617530daa216daa916d72c5a612c8ee574ceff74))
+
 ## [1.13.3](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.2...v1.13.3) (2026-03-23)
 
 
