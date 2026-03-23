@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.14.0](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.6...v1.14.0) (2026-03-23)
+
+
+### Features
+
+* export TypeScript declarations from dist ([cd06761](https://github.com/rynfar/opencode-claude-max-proxy/commit/cd06761b761b3196df2db47c12e32956c4f82e4c))
+
+
+### Bug Fixes
+
+* export TypeScript declaration files from distFix/types export ([3a50c93](https://github.com/rynfar/opencode-claude-max-proxy/commit/3a50c93ce55ccd40e9554f061ac0b852ec916df6))
+* remove Hono type leak from public API and fix exports ([1764596](https://github.com/rynfar/opencode-claude-max-proxy/commit/17645967e0bfa993c118206b1cb672ac53cc77b0))
+
 ## [1.13.6](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.13.5...v1.13.6) (2026-03-23)
 
 
