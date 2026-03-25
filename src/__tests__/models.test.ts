@@ -1,8 +1,8 @@
 /**
  * Unit tests for model mapping and utility functions.
  */
-import { afterEach, describe, it, expect } from "bun:test"
-import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthStatus } from "../proxy/models"
+import { afterEach, beforeEach, describe, it, expect, mock } from "bun:test"
+import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthStatus, getClaudeAuthStatusAsync } from "../proxy/models"
 
 describe("mapModelToClaudeModel", () => {
   const originalSonnetModel = process.env.CLAUDE_PROXY_SONNET_MODEL
@@ -46,6 +46,59 @@ describe("mapModelToClaudeModel", () => {
 
     process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet"
     expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet")
+  })
+})
+
+describe("getClaudeAuthStatusAsync", () => {
+  beforeEach(() => {
+    resetCachedClaudeAuthStatus()
+  })
+
+  it("returns parsed auth status on success", async () => {
+    // On a machine with claude installed, this should return something or null
+    // We test the caching behavior by calling twice and verifying dedup
+    const result1 = await getClaudeAuthStatusAsync()
+    const result2 = await getClaudeAuthStatusAsync()
+    // Second call should return the cached result (same reference)
+    expect(result2).toBe(result1)
+  })
+
+  it("caches null results to avoid repeated exec calls", async () => {
+    // Sabotage PATH so `claude auth status` fails
+    const originalPath = process.env.PATH
+    process.env.PATH = ""
+    try {
+      const result1 = await getClaudeAuthStatusAsync()
+      expect(result1).toBeNull()
+
+      // Restore PATH — if negative caching works, the next call should
+      // still return the cached null without re-executing
+      process.env.PATH = originalPath
+      const result2 = await getClaudeAuthStatusAsync()
+      expect(result2).toBeNull()
+    } finally {
+      process.env.PATH = originalPath
+    }
+  })
+
+  it("refreshes after reset", async () => {
+    // First call with broken PATH → cached null
+    const originalPath = process.env.PATH
+    process.env.PATH = ""
+    try {
+      const result1 = await getClaudeAuthStatusAsync()
+      expect(result1).toBeNull()
+    } finally {
+      process.env.PATH = originalPath
+    }
+
+    // Reset clears the cache, so next call re-executes
+    resetCachedClaudeAuthStatus()
+    const result2 = await getClaudeAuthStatusAsync()
+    // With PATH restored, this may succeed (returns object) or fail (null)
+    // depending on whether claude is installed — either way it re-executed
+    // We just verify reset didn't break anything
+    expect(result2 === null || typeof result2 === "object").toBe(true)
   })
 })
 

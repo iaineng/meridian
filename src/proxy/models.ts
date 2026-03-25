@@ -32,7 +32,8 @@ export function mapModelToClaudeModel(model: string, subscriptionType?: string |
 }
 
 export async function getClaudeAuthStatusAsync(): Promise<ClaudeAuthStatus | null> {
-  if (cachedAuthStatus && Date.now() - cachedAuthStatusAt < AUTH_STATUS_CACHE_TTL_MS) return cachedAuthStatus
+  // Return cached result (positive or negative) if within TTL
+  if (cachedAuthStatusAt > 0 && Date.now() - cachedAuthStatusAt < AUTH_STATUS_CACHE_TTL_MS) return cachedAuthStatus
   if (cachedAuthStatusPromise) return cachedAuthStatusPromise
 
   cachedAuthStatusPromise = (async () => {
@@ -43,6 +44,9 @@ export async function getClaudeAuthStatusAsync(): Promise<ClaudeAuthStatus | nul
       cachedAuthStatusAt = Date.now()
       return parsed
     } catch {
+      // Negative cache: avoid re-exec on every request when command fails
+      cachedAuthStatus = null
+      cachedAuthStatusAt = Date.now()
       return null
     }
   })()
