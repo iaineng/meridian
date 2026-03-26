@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "b
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { storeSharedSession, lookupSharedSession, clearSharedSessions } from "../proxy/sessionStore"
+import { storeSharedSession, lookupSharedSession, clearSharedSessions, setSessionStoreDir } from "../proxy/sessionStore"
 
 describe("Session store count-based pruning", () => {
   let tmpDir: string
@@ -24,13 +24,14 @@ describe("Session store count-based pruning", () => {
     let now = 1_000_000
     dateSpy = spyOn(Date, "now").mockImplementation(() => now++)
     tmpDir = mkdtempSync(join(tmpdir(), "session-pruning-test-"))
-    process.env.CLAUDE_PROXY_SESSION_DIR = tmpDir
+    setSessionStoreDir(tmpDir)
     process.env.CLAUDE_PROXY_MAX_STORED_SESSIONS = "5"
     clearSharedSessions()
   })
 
   afterEach(() => {
     dateSpy.mockRestore()
+    setSessionStoreDir(null)
     rmSync(tmpDir, { recursive: true, force: true })
     if (originalDir === undefined) delete process.env.CLAUDE_PROXY_SESSION_DIR
     else process.env.CLAUDE_PROXY_SESSION_DIR = originalDir

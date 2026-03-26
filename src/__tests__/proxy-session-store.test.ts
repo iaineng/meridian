@@ -5,19 +5,24 @@
  * session resume when running per-terminal proxies.
  */
 
-import { describe, it, expect, beforeEach } from "bun:test"
-import { lookupSharedSession, storeSharedSession, clearSharedSessions } from "../proxy/sessionStore"
-import { join } from "path"
-import { mkdtempSync, rmSync } from "fs"
-import { tmpdir } from "os"
+import { describe, it, expect, beforeEach, afterEach } from "bun:test"
+import { lookupSharedSession, storeSharedSession, clearSharedSessions, setSessionStoreDir } from "../proxy/sessionStore"
+import { join } from "node:path"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 
 describe("Shared session store", () => {
   let tmpDir: string
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "session-store-test-"))
-    process.env.CLAUDE_PROXY_SESSION_DIR = tmpDir
+    tmpDir = mkdtempSync(join(tmpdir(), "session-store-basic-"))
+    setSessionStoreDir(tmpDir)
     clearSharedSessions()
+  })
+
+  afterEach(() => {
+    setSessionStoreDir(null)
+    try { rmSync(tmpDir, { recursive: true }) } catch {}
   })
 
   it("should store and retrieve a session", () => {
@@ -89,7 +94,6 @@ describe("Shared session store", () => {
   })
 
   it("should handle corrupted file gracefully", () => {
-    const { writeFileSync } = require("fs")
     writeFileSync(join(tmpDir, "sessions.json"), "not json{{{")
     const result = lookupSharedSession("anything")
     expect(result).toBeUndefined()

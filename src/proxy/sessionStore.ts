@@ -88,8 +88,18 @@ function releaseLock(lockPath: string): void {
   }
 }
 
+/** Override for testing — avoids env var race when test files run in parallel */
+let sessionDirOverride: string | null = null
+
+/** Set an explicit session store directory. Takes priority over env var.
+ *  Pass null to clear. For testing only. */
+export function setSessionStoreDir(dir: string | null): void {
+  sessionDirOverride = dir
+}
+
 function getStorePath(): string {
-  const dir = process.env.CLAUDE_PROXY_SESSION_DIR
+  const dir = sessionDirOverride
+    || process.env.CLAUDE_PROXY_SESSION_DIR
     || join(homedir(), ".cache", "opencode-claude-max-proxy")
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
