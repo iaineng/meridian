@@ -116,3 +116,12 @@ export function isRateLimitError(errMsg: string): boolean {
   const lower = errMsg.toLowerCase()
   return lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")
 }
+
+/**
+ * Detect the SDK "Reached maximum number of turns" error.
+ * In passthrough mode maxTurns=1 is intentional — the SDK hitting this
+ * limit is expected completion, not an error.
+ */
+export function isMaxTurnsError(errMsg: string): boolean {
+  return errMsg.includes("Reached maximum number of turns")
+}

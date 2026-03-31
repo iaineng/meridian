@@ -17,7 +17,7 @@ import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASST
 
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
-import { classifyError, isStaleSessionError, isRateLimitError } from "./errors"
+import { classifyError, isStaleSessionError, isRateLimitError, isMaxTurnsError } from './errors'
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext } from "./models"
 import { getLastUserMessage } from "./messages"
 import { detectAdapter } from "./adapters/detect"
@@ -52,6 +52,32 @@ const exec = promisify(execCallback)
 let claudeExecutable = ""
 
 /**
+ * URL-encode the content inside <system-reminder> tags to prevent
+ * the model from misinterpreting embedded tags or special characters.
+ */
+function encodeSystemReminders(text: string): string {
+  return text.replace(
+    /<system-reminder>([\s\S]*?)<\/system-reminder>/g,
+    (_match, content) => `<system-reminder encoding="url">${encodeURIComponent(content)}</system-reminder>`
+  )
+}
+
+function encodeMessageContent(content: any): any {
+  if (typeof content === "string") {
+    return encodeSystemReminders(content)
+  }
+  if (Array.isArray(content)) {
+    return content.map((block: any) => {
+      if (block.type === "text" && typeof block.text === "string") {
+        return { ...block, text: encodeSystemReminders(block.text) }
+      }
+      return block
+    })
+  }
+  return content
+}
+
+/**
  * Build a prompt from all messages for a fresh (non-resume) session.
  * Used when retrying after a stale session UUID error.
  */
@@ -59,6 +85,7 @@ function buildFreshPrompt(
   messages: Array<{ role: string; content: any }>,
   stripCacheControl: (content: any) => any
 ): string | AsyncIterable<any> {
+  messages = messages.map(m => ({ ...m, content: encodeMessageContent(m.content) }))
   const MULTIMODAL_TYPES = new Set(["image", "document", "file"])
   const hasMultimodal = messages.some((m) =>
     Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
@@ -181,7 +208,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const body = await c.req.json()
         const authStatus = await getClaudeAuthStatusAsync()
         let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
-        const stream = body.stream ?? true
+        const stream = body.stream ?? false
+        const outputFormat = body.output_config?.format
+        const thinking = body.thinking ?? { type: "disabled" }
         const adapter = detectAdapter(c)
         const workingDirectory = (process.env.MERIDIAN_WORKDIR ?? process.env.CLAUDE_PROXY_WORKDIR) || adapter.extractWorkingDirectory(body) || process.cwd()
 
@@ -247,6 +276,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         claudeLog("debug.agents", { names: validAgentNames, count: validAgentNames.length })
       }
       systemContext += adapter.buildSystemContextAddendum?.(body, sdkAgents) ?? ""
+      // Wrap system context with URL encoding so the model sees it as
+      // a structured system-level instruction, not raw text
+      if (systemContext) {
+        systemContext = `<system encoding="url">${encodeURIComponent(systemContext)}</system>`
+      }
 
 
 
@@ -274,6 +308,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       } else {
         messagesToConvert = allMessages
       }
+
+      // Encode <system-reminder> blocks in message content
+      messagesToConvert = messagesToConvert.map((m: any) => ({
+        ...m,
+        content: encodeMessageContent(m.content)
+      }))
 
       // Check if any messages contain multimodal content (images, documents, files)
       const MULTIMODAL_TYPES = new Set(["image", "document", "file"])
@@ -397,6 +437,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         ? adapterPassthrough
         : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
+      const fileChangesEnabled = !["false", "0"].includes(
+        (process.env.MERIDIAN_FILE_CHANGES ?? "").toLowerCase()
+      )
       const fileChanges: FileChange[] = []
 
       // In passthrough mode, register OpenCode's tools as MCP tools so Claude
@@ -434,7 +477,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           }
         : {
             ...(adapter.buildSdkHooks?.(body, sdkAgents) ?? {}),
-            PostToolUse: [fileChangeHook],
+            ...(fileChangesEnabled ? { PostToolUse: [fileChangeHook] } : {}),
           }
 
         if (!stream) {
@@ -443,6 +486,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           const upstreamStartAt = Date.now()
           let firstChunkAt: number | undefined
           let currentSessionId: string | undefined
+
+          // Accumulate usage across multi-turn tool cycles.
+          // Each assistant turn reports its own usage; we sum them to give the
+          // client a single aggregate (matching what streaming clients see
+          // across message_start + message_delta events).
+          const aggregatedUsage: Record<string, unknown> = {}
 
           // Build SDK UUID map: start with previously stored UUIDs (if resuming),
           // then capture new ones from the response. Declared outside try so
@@ -483,7 +532,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   for await (const event of query(buildQueryOptions({
                     prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
-                    resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+                    resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
                   }))) {
                     if ((event as any).type === "assistant") {
                       didYieldContent = true
@@ -493,6 +542,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   return
                 } catch (error) {
                   const errMsg = error instanceof Error ? error.message : String(error)
+
+                  // maxTurns=1 in passthrough mode is expected — treat as normal completion
+                  if (passthrough && isMaxTurnsError(errMsg)) return
 
                   // Never retry after response content was yielded — response is committed
                   if (didYieldContent) throw error
@@ -512,7 +564,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       prompt: buildFreshPrompt(allMessages, stripCacheControl),
                       model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
-                      resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter,
+                      resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
                     }))
                     return
                   }
@@ -572,6 +624,33 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   })
                 }
 
+                // Capture usage from the SDK assistant message.
+                // The SDK's message.message is a full Anthropic Message object
+                // that includes usage (input_tokens, output_tokens, cache tokens, etc.).
+                // For multi-turn (tool cycles), sum numeric fields across turns.
+                const turnUsage = (message.message as Record<string, unknown>).usage
+                if (turnUsage && typeof turnUsage === "object") {
+                  for (const [key, val] of Object.entries(turnUsage as Record<string, unknown>)) {
+                    if (typeof val === "number") {
+                      aggregatedUsage[key] = ((aggregatedUsage[key] as number) || 0) + val
+                    } else if (typeof val === "object" && val !== null) {
+                      // Nested objects like cache_creation: merge numeric sub-fields
+                      const existing = (aggregatedUsage[key] ?? {}) as Record<string, unknown>
+                      for (const [sk, sv] of Object.entries(val as Record<string, unknown>)) {
+                        if (typeof sv === "number") {
+                          existing[sk] = ((existing[sk] as number) || 0) + sv
+                        } else {
+                          existing[sk] = sv
+                        }
+                      }
+                      aggregatedUsage[key] = existing
+                    } else {
+                      // Non-numeric fields (service_tier, inference_geo) — keep latest
+                      aggregatedUsage[key] = val
+                    }
+                  }
+                }
+
                 // Preserve ALL content blocks (text, tool_use, thinking, etc.)
                 for (const block of message.message.content) {
                   const b = block as unknown as Record<string, unknown>
@@ -604,6 +683,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           // (the SDK may not include them in content after blocking)
           if (passthrough && capturedToolUses.length > 0) {
             for (const tu of capturedToolUses) {
+              // Skip StructuredOutput when outputFormat is set — handled separately
+              if (outputFormat && tu.name === "StructuredOutput") continue
               // Only add if not already in contentBlocks
               if (!contentBlocks.some((b) => b.type === "tool_use" && (b as any).id === tu.id)) {
                 contentBlocks.push({
@@ -616,6 +697,19 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             }
           }
 
+          // When outputFormat is set, the SDK uses a StructuredOutput tool internally.
+          // Convert: extract the tool input as JSON text, discard preamble text blocks.
+          if (outputFormat) {
+            const structuredBlock = contentBlocks.find(
+              (b) => b.type === "tool_use" && b.name === "StructuredOutput"
+            )
+            if (structuredBlock) {
+              const jsonText = JSON.stringify((structuredBlock as Record<string, unknown>).input)
+              contentBlocks.length = 0
+              contentBlocks.push({ type: "text", text: jsonText })
+            }
+          }
+
           // Determine stop_reason based on content: tool_use if any tool blocks, else end_turn
           const hasToolUse = contentBlocks.some((b) => b.type === "tool_use")
           const stopReason = hasToolUse ? "tool_use" : "end_turn"
@@ -623,22 +717,24 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           // Append file change summary:
           // - Internal mode: fileChanges populated by PostToolUse hook
           // - Passthrough mode: scan body.messages for executed tool_use blocks
-          if (passthrough && stopReason === "end_turn" && adapter.extractFileChangesFromToolUse) {
-            const passthroughChanges = extractFileChangesFromMessages(
-              body.messages || [],
-              adapter.extractFileChangesFromToolUse.bind(adapter)
-            )
-            fileChanges.push(...passthroughChanges)
-          }
-          const fileChangeSummary = formatFileChangeSummary(fileChanges)
-          if (fileChangeSummary) {
-            const lastTextBlock = [...contentBlocks].reverse().find((b) => b.type === "text")
-            if (lastTextBlock) {
-              lastTextBlock.text = (lastTextBlock.text as string) + fileChangeSummary
-            } else {
-              contentBlocks.push({ type: "text", text: fileChangeSummary.trimStart() })
+          if (fileChangesEnabled) {
+            if (passthrough && stopReason === "end_turn" && adapter.extractFileChangesFromToolUse) {
+              const passthroughChanges = extractFileChangesFromMessages(
+                body.messages || [],
+                adapter.extractFileChangesFromToolUse.bind(adapter)
+              )
+              fileChanges.push(...passthroughChanges)
             }
-            claudeLog("response.file_changes", { mode: "non_stream", count: fileChanges.length })
+            const fileChangeSummary = formatFileChangeSummary(fileChanges)
+            if (fileChangeSummary) {
+              const lastTextBlock = [...contentBlocks].reverse().find((b) => b.type === "text")
+              if (lastTextBlock) {
+                lastTextBlock.text = (lastTextBlock.text as string) + fileChangeSummary
+              } else {
+                contentBlocks.push({ type: "text", text: fileChangeSummary.trimStart() })
+              }
+              claudeLog("response.file_changes", { mode: "non_stream", count: fileChanges.length })
+            }
           }
 
           // If no content at all, add a fallback text block
@@ -697,7 +793,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             content: contentBlocks,
             model: body.model,
             stop_reason: stopReason,
-            usage: { input_tokens: 0, output_tokens: 0 }
+            usage: Object.keys(aggregatedUsage).length > 0
+              ? aggregatedUsage
+              : { input_tokens: 0, output_tokens: 0 }
           }), {
             headers: {
               "Content-Type": "application/json",
@@ -771,7 +869,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     for await (const event of query(buildQueryOptions({
                       prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
-                      resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+                      resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
                     }))) {
                       if ((event as any).type === "stream_event") {
                         didYieldClientEvent = true
@@ -781,6 +879,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     return
                   } catch (error) {
                     const errMsg = error instanceof Error ? error.message : String(error)
+
+                    // maxTurns=1 in passthrough mode is expected — treat as normal completion
+                    if (passthrough && isMaxTurnsError(errMsg)) return
 
                     // Never retry after client-visible SSE events — response is committed
                     if (didYieldClientEvent) throw error
@@ -800,7 +901,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         prompt: buildFreshPrompt(allMessages, stripCacheControl),
                         model, workingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
-                        resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter,
+                        resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
                       }))
                       return
                     }
@@ -863,6 +964,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               const skipBlockIndices = new Set<number>()
               const streamedToolUseIds = new Set<string>()
 
+              // outputFormat: track StructuredOutput tool blocks for text conversion
+              const structuredOutputIds = new Set<string>()
+              const structuredOutputIndices = new Set<number>()
+              let lastOutputFormatDelta: unknown = null
+
               // Block index remapping: the SDK resets indices on each turn, but
               // we skip intermediate message_start/stop so the client sees one
               // message. Without remapping, turn 2's index=0 collides with turn 1's.
@@ -920,6 +1026,27 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                     if (eventType === "content_block_start") {
                       const block = (event as any).content_block
+
+                      // When outputFormat is set: convert StructuredOutput to text, skip original text.
+                      if (outputFormat) {
+                        if (block?.type === "tool_use" && block.name === "StructuredOutput") {
+                          if (structuredOutputIds.size > 0 || (block.id && structuredOutputIds.has(block.id))) {
+                            // Duplicate StructuredOutput from subsequent SDK turn — skip
+                            if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                            continue
+                          }
+                          if (block.id) structuredOutputIds.add(block.id)
+                          if (eventIndex !== undefined) structuredOutputIndices.add(eventIndex)
+                          // Rewrite as text block
+                          ;(event as any).content_block = { type: "text", text: "" }
+                          // Fall through to assign client index and forward
+                        } else if (block?.type === "text") {
+                          // Skip text blocks — outputFormat expects structured output only
+                          if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                          continue
+                        }
+                      }
+
                       if (block?.type === "tool_use" && typeof block.name === "string") {
                         if (passthrough && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
                           // Passthrough mode: strip prefix and forward to OpenCode
@@ -943,6 +1070,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       continue
                     }
 
+                    // Convert StructuredOutput input_json_delta to text_delta
+                    if (outputFormat && eventIndex !== undefined && structuredOutputIndices.has(eventIndex) && eventType === "content_block_delta") {
+                      const delta = (event as any).delta
+                      if (delta?.type === "input_json_delta") {
+                        delta.type = "text_delta"
+                        delta.text = delta.partial_json
+                        delete delta.partial_json
+                      }
+                    }
+
                     // Remap block index to monotonic client index
                     if (eventIndex !== undefined && sdkToClientIndex.has(eventIndex)) {
                       (event as any).index = sdkToClientIndex.get(eventIndex)
@@ -951,6 +1088,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     // Skip intermediate message_delta with stop_reason: tool_use
                     // (SDK is about to execute MCP tools and continue)
                     if (eventType === "message_delta") {
+                      // When outputFormat is set, skip ALL message_delta events —
+                      // the SDK emits multiple across internal turns. We emit one
+                      // final end_turn delta after the loop (like message_stop).
+                      if (outputFormat) {
+                        // Capture usage from the last delta for the final synthetic emit
+                        lastOutputFormatDelta = event
+                        continue
+                      }
+
                       const stopReason = (event as any).delta?.stop_reason
                       if (stopReason === "tool_use" && skipBlockIndices.size > 0) {
                         // All tool_use blocks in this turn were MCP — skip this delta
@@ -994,7 +1140,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               if (!streamClosed) {
                 // In passthrough mode, emit captured tool_use blocks as stream events
                 // Skip any that were already forwarded during the stream (dedup by ID)
-                const unseenToolUses = capturedToolUses.filter(tu => !streamedToolUseIds.has(tu.id))
+                const unseenToolUses = capturedToolUses.filter(tu =>
+                  !streamedToolUseIds.has(tu.id) && !(outputFormat && tu.name === "StructuredOutput")
+                )
                 if (passthrough && unseenToolUses.length > 0 && messageStartEmitted) {
                   for (let i = 0; i < unseenToolUses.length; i++) {
                     const tu = unseenToolUses[i]!
@@ -1038,7 +1186,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
 
                 // Passthrough mode: scan body.messages for file changes on end_turn
-                if (passthrough && adapter.extractFileChangesFromToolUse) {
+                if (fileChangesEnabled && passthrough && adapter.extractFileChangesFromToolUse) {
                   const passthroughChanges = extractFileChangesFromMessages(
                     body.messages || [],
                     adapter.extractFileChangesFromToolUse.bind(adapter)
@@ -1047,30 +1195,47 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
 
                 // Emit file change summary as a text block before closing
-                const streamFileChangeSummary = formatFileChangeSummary(fileChanges)
-                if (streamFileChangeSummary && messageStartEmitted) {
-                  const fcBlockIndex = nextClientBlockIndex++
+                if (fileChangesEnabled) {
+                  const streamFileChangeSummary = formatFileChangeSummary(fileChanges)
+                  if (streamFileChangeSummary && messageStartEmitted) {
+                    const fcBlockIndex = nextClientBlockIndex++
+                    safeEnqueue(encoder.encode(
+                      `event: content_block_start\ndata: ${JSON.stringify({
+                        type: "content_block_start",
+                        index: fcBlockIndex,
+                        content_block: { type: "text", text: "" },
+                      })}\n\n`
+                    ), "file_changes_block_start")
+                    safeEnqueue(encoder.encode(
+                      `event: content_block_delta\ndata: ${JSON.stringify({
+                        type: "content_block_delta",
+                        index: fcBlockIndex,
+                        delta: { type: "text_delta", text: streamFileChangeSummary },
+                      })}\n\n`
+                    ), "file_changes_text_delta")
+                    safeEnqueue(encoder.encode(
+                      `event: content_block_stop\ndata: ${JSON.stringify({
+                        type: "content_block_stop",
+                        index: fcBlockIndex,
+                      })}\n\n`
+                    ), "file_changes_block_stop")
+                    claudeLog("response.file_changes", { mode: "stream", count: fileChanges.length })
+                  }
+                }
+
+                // When outputFormat is set, emit one final message_delta with end_turn
+                // (all intermediate message_delta events were skipped during the loop)
+                if (outputFormat && messageStartEmitted) {
+                  const usage = lastOutputFormatDelta
+                    ? (lastOutputFormatDelta as Record<string, unknown>).usage ?? { output_tokens: 0 }
+                    : { output_tokens: 0 }
                   safeEnqueue(encoder.encode(
-                    `event: content_block_start\ndata: ${JSON.stringify({
-                      type: "content_block_start",
-                      index: fcBlockIndex,
-                      content_block: { type: "text", text: "" },
+                    `event: message_delta\ndata: ${JSON.stringify({
+                      type: "message_delta",
+                      delta: { stop_reason: "end_turn", stop_sequence: null },
+                      usage,
                     })}\n\n`
-                  ), "file_changes_block_start")
-                  safeEnqueue(encoder.encode(
-                    `event: content_block_delta\ndata: ${JSON.stringify({
-                      type: "content_block_delta",
-                      index: fcBlockIndex,
-                      delta: { type: "text_delta", text: streamFileChangeSummary },
-                    })}\n\n`
-                  ), "file_changes_text_delta")
-                  safeEnqueue(encoder.encode(
-                    `event: content_block_stop\ndata: ${JSON.stringify({
-                      type: "content_block_stop",
-                      index: fcBlockIndex,
-                    })}\n\n`
-                  ), "file_changes_block_stop")
-                  claudeLog("response.file_changes", { mode: "stream", count: fileChanges.length })
+                  ), "outputformat_final_message_delta")
                 }
 
                 // Emit the final message_stop (we skipped all intermediate ones)

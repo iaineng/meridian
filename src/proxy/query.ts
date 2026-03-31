@@ -40,6 +40,10 @@ export interface QueryContext {
   sdkHooks?: any
   /** The agent adapter providing tool configuration */
   adapter: AgentAdapter
+  /** Output format configuration (e.g. json_schema for structured output) */
+  outputFormat?: { type: "json_schema"; schema: Record<string, unknown> }
+  /** Thinking/reasoning configuration */
+  thinking?: { type: "adaptive" } | { type: "enabled"; budgetTokens?: number } | { type: "disabled" }
 }
 
 /**
@@ -52,6 +56,7 @@ export function buildQueryOptions(ctx: QueryContext) {
     prompt, model, workingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv,
     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+    outputFormat, thinking,
   } = ctx
 
   const blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
@@ -73,6 +78,7 @@ export function buildQueryOptions(ctx: QueryContext) {
           ? systemContext
           : { type: "preset" as const, preset: "claude_code" as const, append: systemContext }
       } : {}),
+      effort: "high",
       ...(passthrough
         ? {
             disallowedTools: blockedTools,
@@ -96,6 +102,8 @@ export function buildQueryOptions(ctx: QueryContext) {
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       ...(isUndo ? { forkSession: true, ...(undoRollbackUuid ? { resumeSessionAt: undoRollbackUuid } : {}) } : {}),
       ...(sdkHooks ? { hooks: sdkHooks } : {}),
+      ...(outputFormat ? { outputFormat } : {}),
+      ...(thinking ? { thinking } : {}),
     }
   }
 }

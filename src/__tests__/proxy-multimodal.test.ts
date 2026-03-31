@@ -209,7 +209,7 @@ describe("Multimodal content", () => {
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: "You are a helpful assistant.",
+      append: `<system encoding="url">${encodeURIComponent("You are a helpful assistant.")}</system>`,
     })
 
     const messages: any[] = []
@@ -217,7 +217,7 @@ describe("Multimodal content", () => {
       messages.push(msg)
     }
 
-    // No message should contain the system context (it's in the SDK option now)
+    // No message should contain the raw system context (it's in the SDK option now, URL-encoded)
     const hasSystemMsg = messages.some((m: any) =>
       typeof m.message.content === "string" && m.message.content.includes("You are a helpful assistant.")
     )

@@ -182,9 +182,9 @@ describe("Phase 2: Message format preservation", () => {
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: "You are a helpful assistant.",
+      append: `<system encoding="url">${encodeURIComponent("You are a helpful assistant.")}</system>`,
     })
-    // Prompt text should NOT contain the system context (it's in the SDK option now)
+    // Prompt text should NOT contain the raw system context (it's in the SDK option now, URL-encoded)
     const prompt = capturedQueryParams.prompt
     expect(typeof prompt).toBe("string")
     expect(prompt).not.toContain("You are a helpful assistant.")
