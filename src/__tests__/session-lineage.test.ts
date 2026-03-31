@@ -134,7 +134,7 @@ describe("computeLineageHash", () => {
   it("handles array content (multimodal)", () => {
     const msgs = [{ role: "user", content: [{ type: "text", text: "hello" }] }]
     const hash = computeLineageHash(msgs as any)
-    expect(hash.length).toBe(32)
+    expect(hash.length).toBe(16)
   })
 
   it("produces identical hashes for string vs array content format", () => {

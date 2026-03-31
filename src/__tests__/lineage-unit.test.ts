@@ -40,10 +40,10 @@ describe("computeLineageHash", () => {
     expect(computeLineageHash(undefined as any)).toBe("")
   })
 
-  it("returns a 32-char hex hash", () => {
+  it("returns a 16-char hex hash", () => {
     const hash = computeLineageHash([msg("user", "hello")])
-    expect(hash).toHaveLength(32)
-    expect(hash).toMatch(/^[0-9a-f]{32}$/)
+    expect(hash).toHaveLength(16)
+    expect(hash).toMatch(/^[0-9a-f]{16}$/)
   })
 
   it("is deterministic", () => {
@@ -65,10 +65,10 @@ describe("computeLineageHash", () => {
 })
 
 describe("hashMessage", () => {
-  it("returns a 32-char hex hash", () => {
+  it("returns a 16-char hex hash", () => {
     const hash = hashMessage(msg("user", "test"))
-    expect(hash).toHaveLength(32)
-    expect(hash).toMatch(/^[0-9a-f]{32}$/)
+    expect(hash).toHaveLength(16)
+    expect(hash).toMatch(/^[0-9a-f]{16}$/)
   })
 
   it("is deterministic", () => {

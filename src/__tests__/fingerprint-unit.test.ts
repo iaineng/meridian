@@ -79,14 +79,65 @@ describe("getConversationFingerprint", () => {
     expect(fp).toHaveLength(16)
   })
 
-  it("uses only first user message", () => {
+  it("uses consecutive user messages from start, stops at non-user role", () => {
     const msgs = [
       { role: "user", content: "first" },
       { role: "assistant", content: "reply" },
       { role: "user", content: "second" },
     ]
     const fpAll = getConversationFingerprint(msgs)
+    // Only the first user message is included (assistant breaks the streak)
     const fpFirst = getConversationFingerprint([{ role: "user", content: "first" }])
     expect(fpAll).toBe(fpFirst)
+  })
+
+  it("includes multiple consecutive user messages from start", () => {
+    const msgs = [
+      { role: "user", content: "hello" },
+      { role: "user", content: " world" },
+      { role: "assistant", content: "reply" },
+    ]
+    const fpTwo = getConversationFingerprint(msgs)
+    const fpOne = getConversationFingerprint([{ role: "user", content: "hello" }])
+    // Two consecutive user messages should differ from just one
+    expect(fpTwo).not.toBe(fpOne)
+    // Should be deterministic
+    expect(fpTwo).toBe(getConversationFingerprint(msgs))
+  })
+
+  it("hashes non-text content blocks individually", () => {
+    const msgs = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "describe this" },
+          { type: "image", source: { type: "base64", data: "abc123" } },
+        ],
+      },
+    ]
+    const fp = getConversationFingerprint(msgs)
+    expect(fp).toHaveLength(16)
+    expect(fp).toMatch(/^[0-9a-f]{16}$/)
+
+    // Non-text block change should produce a different fingerprint
+    const msgs2 = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "describe this" },
+          { type: "image", source: { type: "base64", data: "xyz789" } },
+        ],
+      },
+    ]
+    expect(getConversationFingerprint(msgs2)).not.toBe(fp)
+  })
+
+  it("skips leading non-user messages", () => {
+    const msgs = [
+      { role: "assistant", content: "hi" },
+      { role: "user", content: "hello" },
+    ]
+    // assistant is first, so loop breaks immediately — no user content collected
+    expect(getConversationFingerprint(msgs)).toBe("")
   })
 })

@@ -21,7 +21,7 @@
   "scripts": {
     "start": "./bin/claude-proxy-supervisor.sh",
     "proxy": "./bin/claude-proxy-supervisor.sh",
-    "build": "rm -rf dist && bun build bin/cli.ts src/proxy/server.ts --outdir dist --target node --splitting --external @anthropic-ai/claude-agent-sdk --entry-naming '[name].js' && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && bun build bin/cli.ts src/proxy/server.ts --outdir dist --target node --splitting --external @anthropic-ai/claude-agent-sdk --external @node-rs/xxhash --entry-naming '[name].js' && tsc -p tsconfig.build.json",
     "postbuild": "node --check dist/cli.js && node --check dist/server.js && test -f dist/proxy/server.d.ts",
     "prepublishOnly": "bun run build",
     "test": "bun test --path-ignore-patterns '**/*session-store*' && bun test src/__tests__/proxy-session-store.test.ts && bun test src/__tests__/session-store-pruning.test.ts && bun test src/__tests__/proxy-session-store-locking.test.ts",
@@ -29,7 +29,8 @@
     "proxy:direct": "bun run ./bin/cli.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.80"
+    "@anthropic-ai/claude-agent-sdk": "0.2.88",
+    "@node-rs/xxhash": "^1.7.6"
   },
   "devDependencies": {
     "@hono/node-server": "^1.19.11",

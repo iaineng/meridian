@@ -5,9 +5,14 @@
  * (continuation, compaction, undo, diverged).
  */
 
-import { createHash } from "crypto"
+import { xxh64 as xxh64BigInt } from "@node-rs/xxhash"
 import { normalizeContent } from "../messages"
 import { diagnosticLog } from "../../telemetry"
+
+/** 64-bit xxHash → 16-char hex string. */
+function xxh64(data: string): string {
+  return xxh64BigInt(data).toString(16).padStart(16, "0")
+}
 
 // --- Types ---
 
@@ -53,7 +58,7 @@ export type LineageResult =
 export function computeLineageHash(messages: Array<{ role: string; content: any }>): string {
   if (!messages || messages.length === 0) return ""
   const parts = messages.map(m => `${m.role}:${normalizeContent(m.content)}`)
-  return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32)
+  return xxh64(parts.join("\n"))
 }
 
 /**
@@ -61,10 +66,7 @@ export function computeLineageHash(messages: Array<{ role: string; content: any 
  * Used to build per-message hash arrays for precise diff-based verification.
  */
 export function hashMessage(message: { role: string; content: any }): string {
-  return createHash("sha256")
-    .update(`${message.role}:${normalizeContent(message.content)}`)
-    .digest("hex")
-    .slice(0, 32)
+  return xxh64(`${message.role}:${normalizeContent(message.content)}`)
 }
 
 /**
