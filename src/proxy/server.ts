@@ -231,7 +231,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             systemContext = body.system
           } else if (Array.isArray(body.system)) {
             systemContext = body.system
-              .filter((b: any) => b.type === "text" && b.text)
+              .filter((b: any) => b.type === "text" && b.text && !b.text.startsWith("x-anthropic-billing-header"))
               .map((b: any) => b.text)
               .join("\n")
           }
