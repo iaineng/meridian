@@ -44,6 +44,8 @@ export interface QueryContext {
   outputFormat?: { type: "json_schema"; schema: Record<string, unknown> }
   /** Thinking/reasoning configuration */
   thinking?: { type: "adaptive" } | { type: "enabled"; budgetTokens?: number } | { type: "disabled" }
+  /** Whether to enable the SDK's built-in WebSearch (removes it from blocked tools) */
+  useBuiltinWebSearch?: boolean
 }
 
 /**
@@ -59,7 +61,10 @@ export function buildQueryOptions(ctx: QueryContext) {
     outputFormat, thinking,
   } = ctx
 
-  const blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
+  let blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
+  if (ctx.useBuiltinWebSearch) {
+    blockedTools = blockedTools.filter(t => t !== "WebSearch")
+  }
   const mcpServerName = adapter.getMcpServerName()
   const allowedMcpTools = [...adapter.getAllowedMcpTools()]
 

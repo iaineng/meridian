@@ -452,7 +452,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // Adapter can override the global passthrough env var per-agent.
       // Droid always uses internal mode; OpenCode defers to the env var.
       const adapterPassthrough = adapter.usesPassthrough?.()
-      const passthrough = adapterPassthrough !== undefined
+      let passthrough = adapterPassthrough !== undefined
         ? adapterPassthrough
         : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
@@ -460,6 +460,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         (process.env.MERIDIAN_FILE_CHANGES ?? "").toLowerCase()
       )
       const fileChanges: FileChange[] = []
+
+      // --- Tool type filtering (passthrough mode) ---
+      // Filter out non-custom typed tools (API built-ins like web_search, computer_use).
+      // Exception: single web_search tool → switch to internal SDK execution.
+      let useBuiltinWebSearch = false
+      if (passthrough && Array.isArray(body.tools) && body.tools.length > 0) {
+        const hasNonCustomTools = body.tools.some((t: any) => t.type && t.type !== "custom")
+        if (hasNonCustomTools) {
+          if (body.tools.length === 1 && body.tools[0].type?.includes("web_search")) {
+            useBuiltinWebSearch = true
+            passthrough = false
+            body.tools = []
+          } else {
+            body.tools = body.tools.filter((t: any) => !t.type || t.type === "custom")
+          }
+        }
+      }
 
       // In passthrough mode, register OpenCode's tools as MCP tools so Claude
       // can actually call them (not just see them as text descriptions).
@@ -552,6 +569,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
+                    useBuiltinWebSearch,
                   }))) {
                     if ((event as any).type === "assistant") {
                       didYieldContent = true
@@ -584,6 +602,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
+                      useBuiltinWebSearch,
                     }))
                     return
                   }
@@ -889,6 +908,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
+                      useBuiltinWebSearch,
                     }))) {
                       if ((event as any).type === "stream_event") {
                         didYieldClientEvent = true
@@ -921,6 +941,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         model, workingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
+                        useBuiltinWebSearch,
                       }))
                       return
                     }

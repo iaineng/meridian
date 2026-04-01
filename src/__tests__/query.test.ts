@@ -146,4 +146,25 @@ describe("buildQueryOptions", () => {
     const result = buildQueryOptions(makeContext({ sdkHooks: hooks }))
     expect((result.options as any).hooks).toEqual(hooks)
   })
+
+  it("removes WebSearch from disallowedTools when useBuiltinWebSearch is true", () => {
+    const result = buildQueryOptions(makeContext({ useBuiltinWebSearch: true }))
+    const disallowed = (result.options as any).disallowedTools as string[]
+    expect(disallowed).not.toContain("WebSearch")
+    // Other blocked tools should remain
+    expect(disallowed).toContain("Read")
+    expect(disallowed).toContain("Agent")
+  })
+
+  it("keeps WebSearch in disallowedTools when useBuiltinWebSearch is false", () => {
+    const result = buildQueryOptions(makeContext({ useBuiltinWebSearch: false }))
+    const disallowed = (result.options as any).disallowedTools as string[]
+    expect(disallowed).toContain("WebSearch")
+  })
+
+  it("keeps WebSearch in disallowedTools when useBuiltinWebSearch is unset", () => {
+    const result = buildQueryOptions(makeContext())
+    const disallowed = (result.options as any).disallowedTools as string[]
+    expect(disallowed).toContain("WebSearch")
+  })
 })
