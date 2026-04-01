@@ -110,6 +110,16 @@ function buildFreshPrompt(
     Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
   )
 
+  // Build tool_use_id → tool_name map so tool_result blocks can reference their tool
+  const toolNameById = new Map<string, string>()
+  for (const m of messages) {
+    if (Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, b.name)
+      }
+    }
+  }
+
   if (hasMultimodal) {
     const structured: Array<{ type: "user"; message: { role: string; content: any }; parent_tool_use_id: null }> = []
     for (const m of messages) {
@@ -122,16 +132,16 @@ function buildFreshPrompt(
       } else {
         let text: string
         if (typeof m.content === "string") {
-          text = `[Assistant: ${m.content}]`
+          text = `<prior_assistant_response>${m.content}</prior_assistant_response>`
         } else if (Array.isArray(m.content)) {
           text = m.content.map((b: any) => {
-            if (b.type === "text" && b.text) return `[Assistant: ${b.text}]`
-            if (b.type === "tool_use") return `[Tool Use: ${b.name}(${JSON.stringify(b.input)})]`
-            if (b.type === "tool_result") return `[Tool Result: ${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}]`
+            if (b.type === "text" && b.text) return `<prior_assistant_response>${b.text}</prior_assistant_response>`
+            if (b.type === "tool_use") return `<prior_tool_invocation tool="${b.name}">${JSON.stringify(b.input)}</prior_tool_invocation>`
+            if (b.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(b.tool_use_id) ?? "unknown"}">${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}</prior_tool_output>`
             return ""
           }).filter(Boolean).join("\n")
         } else {
-          text = `[Assistant: ${String(m.content)}]`
+          text = `<prior_assistant_response>${String(m.content)}</prior_assistant_response>`
         }
         structured.push({
           type: "user" as const,
@@ -153,11 +163,11 @@ function buildFreshPrompt(
         content = m.content
           .map((block: any) => {
             if (block.type === "text" && block.text) return block.text
-            if (block.type === "tool_use") return `[Tool Use: ${block.name}(${JSON.stringify(block.input)})]`
-            if (block.type === "tool_result") return `[Tool Result for ${block.tool_use_id}: ${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}]`
-            if (block.type === "image") return "[Image attached]"
-            if (block.type === "document") return "[Document attached]"
-            if (block.type === "file") return "[File attached]"
+            if (block.type === "tool_use") return `<prior_tool_invocation tool="${block.name}">${JSON.stringify(block.input)}</prior_tool_invocation>`
+            if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</prior_tool_output>`
+            if (block.type === "image") return "(image was attached)"
+            if (block.type === "document") return "(document was attached)"
+            if (block.type === "file") return "(file was attached)"
             return ""
           })
           .filter(Boolean)
@@ -340,6 +350,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
       )
 
+      // Build tool_use_id → tool_name map so tool_result blocks can reference their tool
+      const toolNameById = new Map<string, string>()
+      for (const m of messagesToConvert) {
+        if (Array.isArray(m.content)) {
+          for (const b of m.content as any[]) {
+            if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, b.name)
+          }
+        }
+      }
+
       // Strip cache_control from content blocks — the SDK manages its own caching
       // and OpenCode's ttl='1h' blocks conflict with the SDK's ttl='5m' blocks
       function stripCacheControl(content: any): any {
@@ -388,16 +408,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               // Convert assistant messages to text summaries
               let text: string
               if (typeof m.content === "string") {
-                text = `[Assistant: ${m.content}]`
+                text = `<prior_assistant_response>${m.content}</prior_assistant_response>`
               } else if (Array.isArray(m.content)) {
                 text = m.content.map((b: any) => {
-                  if (b.type === "text" && b.text) return `[Assistant: ${b.text}]`
-                  if (b.type === "tool_use") return `[Tool Use: ${b.name}(${JSON.stringify(b.input)})]`
-                  if (b.type === "tool_result") return `[Tool Result: ${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}]`
+                  if (b.type === "text" && b.text) return `<prior_assistant_response>${b.text}</prior_assistant_response>`
+                  if (b.type === "tool_use") return `<prior_tool_invocation tool="${b.name}">${JSON.stringify(b.input)}</prior_tool_invocation>`
+                  if (b.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(b.tool_use_id) ?? "unknown"}">${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}</prior_tool_output>`
                   return ""
                 }).filter(Boolean).join("\n")
               } else {
-                text = `[Assistant: ${String(m.content)}]`
+                text = `<prior_assistant_response>${String(m.content)}</prior_assistant_response>`
               }
               structuredMessages.push({
                 type: "user" as const,
@@ -419,11 +439,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               content = m.content
                 .map((block: any) => {
                   if (block.type === "text" && block.text) return block.text
-                  if (block.type === "tool_use") return `[Tool Use: ${block.name}(${JSON.stringify(block.input)})]`
-                  if (block.type === "tool_result") return `[Tool Result for ${block.tool_use_id}: ${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}]`
-                  if (block.type === "image") return "[Image attached]"
-                  if (block.type === "document") return "[Document attached]"
-                  if (block.type === "file") return "[File attached]"
+                  if (block.type === "tool_use") return `<prior_tool_invocation tool="${block.name}">${JSON.stringify(block.input)}</prior_tool_invocation>`
+                  if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</prior_tool_output>`
+                  if (block.type === "image") return "(image was attached)"
+                  if (block.type === "document") return "(document was attached)"
+                  if (block.type === "file") return "(file was attached)"
                   return ""
                 })
                 .filter(Boolean)
@@ -695,6 +715,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   // In passthrough mode, strip MCP prefix from tool names
                   if (passthrough && b.type === "tool_use" && typeof b.name === "string") {
                     b.name = stripMcpPrefix(b.name as string)
+                  }
+                  // SDK built-in tool executed internally — mark as server_tool_use
+                  if (useBuiltinWebSearch && b.type === "tool_use" && typeof b.name === "string" && !(b.name as string).startsWith("mcp__")) {
+                    b.type = "server_tool_use"
                   }
                   contentBlocks.push(b)
                 }
@@ -1097,6 +1121,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           // Internal mode: skip all MCP tool blocks (internal execution)
                           if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
                           continue
+                        } else if (useBuiltinWebSearch) {
+                          // SDK built-in tool executed internally — mark as server_tool_use
+                          // so the client doesn't try to execute it
+                          block.type = "server_tool_use"
                         }
                       }
                       // Assign a monotonic client index for this forwarded block
@@ -1138,8 +1166,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       }
 
                       const stopReason = (event as any).delta?.stop_reason
-                      if (stopReason === "tool_use" && skipBlockIndices.size > 0) {
-                        // All tool_use blocks in this turn were MCP — skip this delta
+                      if (stopReason === "tool_use" && (skipBlockIndices.size > 0 || useBuiltinWebSearch)) {
+                        // All tool_use blocks in this turn were internal (MCP or built-in) — skip this delta
                         continue
                       }
                     }
