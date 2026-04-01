@@ -79,6 +79,6 @@ export function getConversationFingerprint(messages: Array<{ role: string; conte
 
   const text = parts.join("")
   if (!text) return ""
-  const seed = workingDirectory ? `${workingDirectory}\n${text.slice(0, 2000)}` : text.slice(0, 2000)
+  const seed = workingDirectory ? `${workingDirectory}\n${text}` : text
   return xxh64(seed)
 }
