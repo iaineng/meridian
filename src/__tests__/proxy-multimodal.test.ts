@@ -209,7 +209,7 @@ describe("Multimodal content", () => {
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: `<system encoding="url">${encodeURIComponent("You are a helpful assistant.")}</system>`,
+      append: `<system encoding="url">${new URLSearchParams([["", "You are a helpful assistant."]]).toString().slice(1)}</system>`,
     })
 
     const messages: any[] = []

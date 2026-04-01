@@ -52,13 +52,32 @@ const exec = promisify(execCallback)
 let claudeExecutable = ""
 
 /**
+ * URL-encode using URLSearchParams (application/x-www-form-urlencoded),
+ * but preserve non-ASCII characters (e.g. Chinese, emoji) unencoded.
+ */
+function urlEncode(content: string): string {
+  const encoded = new URLSearchParams([["", content]]).toString().slice(1)
+  return encoded.replace(/(%[0-9A-Fa-f]{2})+/g, (match) => {
+    try {
+      const decoded = decodeURIComponent(match)
+      if (/[^\x00-\x7F]/.test(decoded)) {
+        return decoded
+      }
+      return match
+    } catch {
+      return match
+    }
+  })
+}
+
+/**
  * URL-encode the content inside <system-reminder> tags to prevent
  * the model from misinterpreting embedded tags or special characters.
  */
 function encodeSystemReminders(text: string): string {
   return text.replace(
     /<system-reminder>([\s\S]*?)<\/system-reminder>/g,
-    (_match, content) => `<system-reminder encoding="url">${encodeURIComponent(content)}</system-reminder>`
+    (_match, content) => `<system-reminder encoding="url">${urlEncode(content)}</system-reminder>`
   )
 }
 
@@ -279,7 +298,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // Wrap system context with URL encoding so the model sees it as
       // a structured system-level instruction, not raw text
       if (systemContext) {
-        systemContext = `<system encoding="url">${encodeURIComponent(systemContext)}</system>`
+        systemContext = `<system encoding="url">${urlEncode(systemContext)}</system>`
       }
 
 
