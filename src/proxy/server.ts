@@ -476,9 +476,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         ? adapterPassthrough
         : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
-      const fileChangesEnabled = !["false", "0"].includes(
-        (process.env.MERIDIAN_FILE_CHANGES ?? "").toLowerCase()
-      )
       const fileChanges: FileChange[] = []
 
       // --- Tool type filtering (passthrough mode) ---

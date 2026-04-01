@@ -58,7 +58,7 @@ ENV MERIDIAN_PASSTHROUGH=1 \
     MERIDIAN_MAX_CONCURRENT=10 \
     MERIDIAN_SONNET_MODEL=sonnet \
     MERIDIAN_WORKDIR=/app \
-    MERIDIAN_FILE_CHANGES=0
+    MERIDIAN_NO_FILE_CHANGES=1
 
 ENTRYPOINT ["./bin/docker-entrypoint.sh"]
 CMD ["./bin/claude-proxy-supervisor.sh"]

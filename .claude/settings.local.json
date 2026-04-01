@@ -4,7 +4,8 @@
       "Bash(node:*)",
       "Bash(bun install:*)",
       "Bash(grep -E \"\\(package\\\\.json|tsconfig|\\\\.ts$|\\\\.js$\\)\")",
-      "Bash(grep)"
+      "Bash(grep)",
+      "Bash(npx bun:*)"
     ]
   }
 }
