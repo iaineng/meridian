@@ -44,6 +44,19 @@ describe("classifyError", () => {
       expect(result.status).toBe(502)
       expect(result.type).toBe("api_error")
     })
+
+    it("includes captured stderr in exit code 1 message", () => {
+      const result = classifyError("Claude Code process exited with code 1\nSubprocess stderr: --permission-mode: invalid value 'bypassPermissions'")
+      expect(result.status).toBe(401)
+      expect(result.type).toBe("authentication_error")
+      expect(result.message).toContain("permission-mode")
+    })
+
+    it("classifies as auth error when stderr contains authentication keyword", () => {
+      const result = classifyError("Claude Code process exited with code 1\nSubprocess stderr: OAuth token expired")
+      expect(result.status).toBe(401)
+      expect(result.type).toBe("authentication_error")
+    })
   })
 
   describe("rate limiting", () => {

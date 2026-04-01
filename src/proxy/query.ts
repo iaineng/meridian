@@ -46,6 +46,8 @@ export interface QueryContext {
   thinking?: { type: "adaptive" } | { type: "enabled"; budgetTokens?: number } | { type: "disabled" }
   /** Whether to enable the SDK's built-in WebSearch (removes it from blocked tools) */
   useBuiltinWebSearch?: boolean
+  /** Callback to receive stderr lines from the Claude subprocess */
+  onStderr?: (line: string) => void
 }
 
 /**
@@ -58,7 +60,7 @@ export function buildQueryOptions(ctx: QueryContext) {
     prompt, model, workingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv,
     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
-    outputFormat, thinking,
+    outputFormat, thinking, onStderr,
   } = ctx
 
   let blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
@@ -71,7 +73,12 @@ export function buildQueryOptions(ctx: QueryContext) {
   return {
     prompt,
     options: {
-      maxTurns: passthrough ? 1 : 200,
+      // NOTE: agent-specific (passthrough mode) — 2 turns are required, not 1.
+      // Turn 1: model generates tool_use blocks (captured by PreToolUse hook).
+      // Turn 2: SDK processes the blocked-tool handoff before the generator
+      //         returns. maxTurns: 1 throws "Reached maximum number of turns (1)"
+      //         before the response is complete, causing HTTP 500s.
+      maxTurns: passthrough ? 2 : 200,
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
@@ -98,6 +105,7 @@ export function buildQueryOptions(ctx: QueryContext) {
             mcpServers: { [mcpServerName]: createOpencodeMcpServer() },
           }),
       plugins: [],
+      ...(onStderr ? { stderr: onStderr } : {}),
       env: {
         ...cleanEnv,
         ENABLE_TOOL_SEARCH: "false",

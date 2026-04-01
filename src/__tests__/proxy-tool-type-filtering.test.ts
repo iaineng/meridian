@@ -105,8 +105,8 @@ describe("Tool type filtering in passthrough mode", () => {
       { type: "computer_20241022" },
     ]
     const params = await sendRequest(app, tools)
-    // Should still be passthrough (maxTurns=1) with only the custom tool
-    expect(params.options.maxTurns).toBe(1)
+    // Should still be passthrough (maxTurns=2) with only the custom tool
+    expect(params.options.maxTurns).toBe(2)
     // WebSearch should still be blocked (not the single web_search exception)
     const disallowed = params.options.disallowedTools as string[]
     expect(disallowed).toContain("WebSearch")
@@ -138,8 +138,8 @@ describe("Tool type filtering in passthrough mode", () => {
       { name: "my_tool", description: "A tool", input_schema: { type: "object", properties: {} } },
     ]
     const params = await sendRequest(app, tools)
-    // Should remain passthrough
-    expect(params.options.maxTurns).toBe(1)
+    // Should remain passthrough (maxTurns=2 for passthrough to allow SDK handoff)
+    expect(params.options.maxTurns).toBe(2)
   })
 
   it("tools with type: 'custom' are preserved", async () => {
@@ -148,7 +148,7 @@ describe("Tool type filtering in passthrough mode", () => {
       { name: "my_tool", type: "custom", description: "A tool", input_schema: { type: "object", properties: {} } },
     ]
     const params = await sendRequest(app, tools)
-    expect(params.options.maxTurns).toBe(1)
+    expect(params.options.maxTurns).toBe(2)
   })
 
   it("mixed tools: custom + web_search does NOT trigger internal execution", async () => {
@@ -159,7 +159,7 @@ describe("Tool type filtering in passthrough mode", () => {
     ]
     const params = await sendRequest(app, tools)
     // 2 tools total → not the single web_search exception, stays passthrough
-    expect(params.options.maxTurns).toBe(1)
+    expect(params.options.maxTurns).toBe(2)
     const disallowed = params.options.disallowedTools as string[]
     expect(disallowed).toContain("WebSearch")
   })

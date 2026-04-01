@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.23.1](https://github.com/rynfar/meridian/compare/v1.23.0...v1.23.1) (2026-04-01)
+
+
+### Bug Fixes
+
+* capture subprocess stderr to surface real exit-code-1 failures ([#213](https://github.com/rynfar/meridian/issues/213)) ([40eeda7](https://github.com/rynfar/meridian/commit/40eeda7c0219213c29f72ce84b44a2676e7442b3))
+
+## [1.23.0](https://github.com/rynfar/meridian/compare/v1.22.2...v1.23.0) (2026-04-01)
+
+
+### Features
+
+* add env var to disable file change summaries ([#209](https://github.com/rynfar/meridian/issues/209)) ([374293f](https://github.com/rynfar/meridian/commit/374293feab42d554cf7dd41df377ac9e1d6a2c50))
+
+## [1.22.2](https://github.com/rynfar/meridian/compare/v1.22.1...v1.22.2) (2026-04-01)
+
+
+### Bug Fixes
+
+* passthrough mode tool_use broken for multi-turn and streaming ([#207](https://github.com/rynfar/meridian/issues/207)) ([ae2e941](https://github.com/rynfar/meridian/commit/ae2e941d0c47ad35b7dcd4b07c114aabb31be3a1))
+
 ## [1.22.1](https://github.com/rynfar/meridian/compare/v1.22.0...v1.22.1) (2026-03-30)
 
 

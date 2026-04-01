@@ -47,12 +47,27 @@ export function classifyError(errMsg: string): ClassifiedError {
     const codeMatch = errMsg.match(/exited with code (\d+)/)
     const code = codeMatch ? codeMatch[1] : "unknown"
 
-    // Code 1 with no other info is usually auth
-    if (code === "1" && !lower.includes("tool") && !lower.includes("mcp")) {
+    // If stderr was captured it will be appended to the message — use it for classification
+    const hasStderr = lower.includes("subprocess stderr:")
+    const stderrContent = hasStderr ? lower.split("subprocess stderr:")[1]?.trim() ?? "" : ""
+
+    // Explicit auth signal in stderr takes priority
+    if (stderrContent.includes("authentication") || stderrContent.includes("401") || stderrContent.includes("oauth")) {
       return {
         status: 401,
         type: "authentication_error",
-        message: "Claude Code process crashed (exit code 1). This usually means authentication expired. Run 'claude login' in your terminal to re-authenticate, then restart the proxy."
+        message: "Claude authentication expired or invalid. Run 'claude login' in your terminal to re-authenticate, then restart the proxy."
+      }
+    }
+
+    // Code 1 + no stderr: could be auth, but could also be a bad flag combination
+    // or an environment issue. Give a less confident message and include stderr if present.
+    if (code === "1" && !lower.includes("tool") && !lower.includes("mcp")) {
+      const stderrHint = stderrContent ? ` Subprocess output: ${stderrContent.slice(0, 200)}` : " Run with CLAUDE_PROXY_DEBUG=1 for more detail."
+      return {
+        status: 401,
+        type: "authentication_error",
+        message: `Claude Code process exited (code 1). This is often an authentication issue — try 'claude login' and restart the proxy.${stderrHint}`
       }
     }
 

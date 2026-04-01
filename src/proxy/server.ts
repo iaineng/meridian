@@ -512,7 +512,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // PostToolUse hook tracks file changes from MCP tools (internal mode only).
       // Catches write, edit, AND bash redirects (>, >>, tee, sed -i).
       const mcpPrefix = `mcp__${adapter.getMcpServerName()}__`
-      const fileChangeHook = createFileChangeHook(fileChanges, mcpPrefix)
+      const trackFileChanges = !(process.env.MERIDIAN_NO_FILE_CHANGES ?? process.env.CLAUDE_PROXY_NO_FILE_CHANGES)
+      const fileChangeHook = trackFileChanges ? createFileChangeHook(fileChanges, mcpPrefix) : undefined
 
       const sdkHooks = passthrough
         ? {
@@ -533,8 +534,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           }
         : {
             ...(adapter.buildSdkHooks?.(body, sdkAgents) ?? {}),
-            ...(fileChangesEnabled ? { PostToolUse: [fileChangeHook] } : {}),
+            ...(fileChangeHook ? { PostToolUse: [fileChangeHook] } : {}),
           }
+
+        // Capture subprocess stderr for all paths — used to surface the real
+        // failure message when the Claude subprocess exits with a non-zero code.
+        const stderrLines: string[] = []
+        const onStderr = (data: string) => {
+          stderrLines.push(data.trimEnd())
+          claudeLog("subprocess.stderr", { line: data.trimEnd() })
+        }
 
         if (!stream) {
           const contentBlocks: Array<Record<string, unknown>> = []
@@ -589,7 +598,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
-                    useBuiltinWebSearch,
+                    useBuiltinWebSearch, onStderr,
                   }))) {
                     if ((event as any).type === "assistant") {
                       didYieldContent = true
@@ -622,7 +631,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
-                      useBuiltinWebSearch,
+                      useBuiltinWebSearch, onStderr,
                     }))
                     return
                   }
@@ -732,11 +741,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               durationMs: Date.now() - upstreamStartAt
             })
           } catch (error) {
+            const stderrOutput = stderrLines.join("\n").trim()
+            if (stderrOutput && error instanceof Error && !error.message.includes(stderrOutput)) {
+              error.message = `${error.message}\nSubprocess stderr: ${stderrOutput}`
+            }
             claudeLog("upstream.failed", {
               mode: "non_stream",
               model,
               durationMs: Date.now() - upstreamStartAt,
-              error: error instanceof Error ? error.message : String(error)
+              error: error instanceof Error ? error.message : String(error),
+              ...(stderrOutput ? { stderr: stderrOutput } : {})
             })
             throw error
           }
@@ -779,7 +793,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           // Append file change summary:
           // - Internal mode: fileChanges populated by PostToolUse hook
           // - Passthrough mode: scan body.messages for executed tool_use blocks
-          if (fileChangesEnabled) {
+          if (trackFileChanges) {
             if (passthrough && stopReason === "end_turn" && adapter.extractFileChangesFromToolUse) {
               const passthroughChanges = extractFileChangesFromMessages(
                 body.messages || [],
@@ -932,7 +946,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
-                      useBuiltinWebSearch,
+                      useBuiltinWebSearch, onStderr,
                     }))) {
                       if ((event as any).type === "stream_event") {
                         didYieldClientEvent = true
@@ -965,7 +979,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         model, workingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
-                        useBuiltinWebSearch,
+                        useBuiltinWebSearch, onStderr,
                       }))
                       return
                     }
@@ -1179,6 +1193,26 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     }
                     eventsForwarded += 1
 
+                    // NOTE: agent-specific (passthrough mode) — break immediately when
+                    // the model stops for tool_use so the client can execute the tools
+                    // and send results back. Without this the SDK executes the passthrough
+                    // MCP no-op (→ "passthrough"), feeds that back to the model, and the
+                    // model produces an incorrect fallback response which gets forwarded.
+                    if (
+                      passthrough &&
+                      eventType === "message_delta" &&
+                      (event as any).delta?.stop_reason === "tool_use" &&
+                      streamedToolUseIds.size > 0
+                    ) {
+                      safeEnqueue(
+                        encoder.encode(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`),
+                        "passthrough_tool_stream_stop"
+                      )
+                      streamClosed = true
+                      controller.close()
+                      break
+                    }
+
                     if (eventType === "content_block_delta") {
                       const delta = (event as any).delta
                       if (delta?.type === "text_delta") {
@@ -1254,7 +1288,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
 
                 // Passthrough mode: scan body.messages for file changes on end_turn
-                if (fileChangesEnabled && passthrough && adapter.extractFileChangesFromToolUse) {
+                if (trackFileChanges && passthrough && adapter.extractFileChangesFromToolUse) {
                   const passthroughChanges = extractFileChangesFromMessages(
                     body.messages || [],
                     adapter.extractFileChangesFromToolUse.bind(adapter)
@@ -1263,7 +1297,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
 
                 // Emit file change summary as a text block before closing
-                if (fileChangesEnabled) {
+                if (trackFileChanges) {
                   const streamFileChangeSummary = formatFileChangeSummary(fileChanges)
                   if (streamFileChangeSummary && messageStartEmitted) {
                     const fcBlockIndex = nextClientBlockIndex++
@@ -1379,6 +1413,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 return
               }
 
+              const stderrOutput = stderrLines.join("\n").trim()
+              if (stderrOutput && error instanceof Error && !error.message.includes(stderrOutput)) {
+                error.message = `${error.message}\nSubprocess stderr: ${stderrOutput}`
+              }
               const errMsg = error instanceof Error ? error.message : String(error)
               claudeLog("upstream.failed", {
                 mode: "stream",
@@ -1386,7 +1424,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 durationMs: Date.now() - upstreamStartAt,
                 streamEventsSeen,
                 textEventsForwarded,
-                error: errMsg
+                error: errMsg,
+                ...(stderrOutput ? { stderr: stderrOutput } : {})
               })
               const streamErr = classifyError(errMsg)
               claudeLog("proxy.anthropic.error", { error: errMsg, classified: streamErr.type })
