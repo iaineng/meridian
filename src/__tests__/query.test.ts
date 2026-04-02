@@ -38,9 +38,9 @@ describe("buildQueryOptions", () => {
     expect((result.options as any).includePartialMessages).toBe(true)
   })
 
-  it("sets maxTurns to 2 in passthrough mode (needs 2 turns for blocked-tool handoff)", () => {
+  it("sets maxTurns to 1 in passthrough mode", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true }))
-    expect(result.options.maxTurns).toBe(2)
+    expect(result.options.maxTurns).toBe(1)
   })
 
   it("includes system prompt as preset in normal mode", () => {

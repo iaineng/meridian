@@ -97,12 +97,78 @@ function encodeMessageContent(content: any): any {
 }
 
 /**
+ * Extract the text content of a message, serializing tool_use/tool_result
+ * blocks as XML tags. Returns raw content without a role prefix.
+ */
+function extractMessageContent(m: any, toolNameById: Map<string, string>): string {
+  if (typeof m.content === "string") return m.content
+  if (Array.isArray(m.content)) {
+    return m.content
+      .map((block: any) => {
+        if (block.type === "text" && block.text) return block.text
+        if (block.type === "tool_use") return `<prior_tool_invocation tool="${block.name}">${JSON.stringify(block.input)}</prior_tool_invocation>`
+        if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</prior_tool_output>`
+        if (block.type === "image") return "(image was attached)"
+        if (block.type === "document") return "(document was attached)"
+        if (block.type === "file") return "(file was attached)"
+        return ""
+      })
+      .filter(Boolean)
+      .join("\n")
+  }
+  return String(m.content)
+}
+
+/** Convert a message to "Role: content" text (with role prefix). */
+function convertMessageToText(m: any, toolNameById: Map<string, string>): string {
+  const role = m.role === "assistant" ? "Assistant" : "Human"
+  return `${role}: ${extractMessageContent(m, toolNameById)}`
+}
+
+/**
+ * Convert an assistant message's content to a text summary with XML tags.
+ * Used in multimodal paths where assistant messages are flattened into user messages.
+ */
+function convertAssistantContentToText(content: any, toolNameById: Map<string, string>): string {
+  if (typeof content === "string") {
+    return `<prior_assistant_response>${content}</prior_assistant_response>`
+  }
+  if (Array.isArray(content)) {
+    return content.map((b: any) => {
+      if (b.type === "text" && b.text) return `<prior_assistant_response>${b.text}</prior_assistant_response>`
+      if (b.type === "tool_use") return `<prior_tool_invocation tool="${b.name}">${JSON.stringify(b.input)}</prior_tool_invocation>`
+      if (b.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(b.tool_use_id) ?? "unknown"}">${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}</prior_tool_output>`
+      return ""
+    }).filter(Boolean).join("\n")
+  }
+  return `<prior_assistant_response>${String(content)}</prior_assistant_response>`
+}
+
+/**
+ * Build a text prompt from messages, wrapping all but the last user message
+ * in <conversation_history> to separate history from the current request.
+ */
+function buildTextPromptWithHistory(messages: Array<{ role: string; content: any }>, toolNameById: Map<string, string>): string {
+  let lastUserIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") { lastUserIdx = i; break }
+  }
+  if (lastUserIdx > 0) {
+    const historyPart = messages.slice(0, lastUserIdx).map(m => convertMessageToText(m, toolNameById)).join("\n\n")
+    const currentPart = extractMessageContent(messages[lastUserIdx]!, toolNameById)
+    return `IMPORTANT: The following <conversation_history> is flattened from structured multi-turn messages. Use it as context only. Do NOT simulate or role-play as "Human:" — you are the assistant, respond only as yourself.\n\n<conversation_history>\n${historyPart}\n</conversation_history>\n\n${currentPart}`
+  }
+  return messages.map(m => extractMessageContent(m, toolNameById)).join("\n\n") || ""
+}
+
+/**
  * Build a prompt from all messages for a fresh (non-resume) session.
  * Used when retrying after a stale session UUID error.
  */
 function buildFreshPrompt(
   messages: Array<{ role: string; content: any }>,
-  stripCacheControl: (content: any) => any
+  stripCacheControl: (content: any) => any,
+  toolPrefix = ""
 ): string | AsyncIterable<any> {
   messages = messages.map(m => ({ ...m, content: encodeMessageContent(m.content) }))
   const MULTIMODAL_TYPES = new Set(["image", "document", "file"])
@@ -115,7 +181,7 @@ function buildFreshPrompt(
   for (const m of messages) {
     if (Array.isArray(m.content)) {
       for (const b of m.content) {
-        if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, b.name)
+        if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, toolPrefix + b.name)
       }
     }
   }
@@ -130,22 +196,9 @@ function buildFreshPrompt(
           parent_tool_use_id: null,
         })
       } else {
-        let text: string
-        if (typeof m.content === "string") {
-          text = `<prior_assistant_response>${m.content}</prior_assistant_response>`
-        } else if (Array.isArray(m.content)) {
-          text = m.content.map((b: any) => {
-            if (b.type === "text" && b.text) return `<prior_assistant_response>${b.text}</prior_assistant_response>`
-            if (b.type === "tool_use") return `<prior_tool_invocation tool="${b.name}">${JSON.stringify(b.input)}</prior_tool_invocation>`
-            if (b.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(b.tool_use_id) ?? "unknown"}">${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}</prior_tool_output>`
-            return ""
-          }).filter(Boolean).join("\n")
-        } else {
-          text = `<prior_assistant_response>${String(m.content)}</prior_assistant_response>`
-        }
         structured.push({
           type: "user" as const,
-          message: { role: "user" as const, content: text },
+          message: { role: "user" as const, content: convertAssistantContentToText(m.content, toolNameById) },
           parent_tool_use_id: null,
         })
       }
@@ -153,31 +206,7 @@ function buildFreshPrompt(
     return (async function* () { for (const msg of structured) yield msg })()
   }
 
-  return messages
-    .map((m) => {
-      const role = m.role === "assistant" ? "Assistant" : "Human"
-      let content: string
-      if (typeof m.content === "string") {
-        content = m.content
-      } else if (Array.isArray(m.content)) {
-        content = m.content
-          .map((block: any) => {
-            if (block.type === "text" && block.text) return block.text
-            if (block.type === "tool_use") return `<prior_tool_invocation tool="${block.name}">${JSON.stringify(block.input)}</prior_tool_invocation>`
-            if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</prior_tool_output>`
-            if (block.type === "image") return "(image was attached)"
-            if (block.type === "document") return "(document was attached)"
-            if (block.type === "file") return "(file was attached)"
-            return ""
-          })
-          .filter(Boolean)
-          .join("\n")
-      } else {
-        content = String(m.content)
-      }
-      return `${role}: ${content}`
-    })
-    .join("\n\n") || ""
+  return buildTextPromptWithHistory(messages, toolNameById)
 }
 
 export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServer {
@@ -352,13 +381,34 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
       )
 
-      // Build tool_use_id → tool_name map so tool_result blocks can reference their tool
+      // Build tool_use_id → tool_name map so tool_result blocks can reference their tool.
+      // Scan allMessages (not just messagesToConvert) because in undo/fallback paths
+      // messagesToConvert may only contain the last user message with tool_result blocks
+      // whose corresponding tool_use lives in the prefix outside the slice.
       const toolNameById = new Map<string, string>()
-      for (const m of messagesToConvert) {
+      for (const m of allMessages) {
         if (Array.isArray(m.content)) {
           for (const b of m.content as any[]) {
             if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, b.name)
           }
+        }
+      }
+
+      // --- Passthrough mode ---
+      // When enabled, ALL tool execution is forwarded to OpenCode instead of
+      // being handled internally. This enables multi-model agent delegation
+      // (e.g., oracle on GPT-5.2, explore on Gemini via oh-my-opencode).
+      // Adapter can override the global passthrough env var per-agent.
+      // Droid always uses internal mode; OpenCode defers to the env var.
+      const adapterPassthrough = adapter.usesPassthrough?.()
+      let passthrough = adapterPassthrough !== undefined
+        ? adapterPassthrough
+        : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
+
+      // In passthrough mode, prefix tool names so they match the SDK's MCP tool names
+      if (passthrough) {
+        for (const [id, name] of toolNameById) {
+          toolNameById.set(id, PASSTHROUGH_MCP_PREFIX + name)
         }
       }
 
@@ -407,55 +457,47 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 parent_tool_use_id: null,
               })
             } else {
-              // Convert assistant messages to text summaries
-              let text: string
-              if (typeof m.content === "string") {
-                text = `<prior_assistant_response>${m.content}</prior_assistant_response>`
-              } else if (Array.isArray(m.content)) {
-                text = m.content.map((b: any) => {
-                  if (b.type === "text" && b.text) return `<prior_assistant_response>${b.text}</prior_assistant_response>`
-                  if (b.type === "tool_use") return `<prior_tool_invocation tool="${b.name}">${JSON.stringify(b.input)}</prior_tool_invocation>`
-                  if (b.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(b.tool_use_id) ?? "unknown"}">${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}</prior_tool_output>`
-                  return ""
-                }).filter(Boolean).join("\n")
-              } else {
-                text = `<prior_assistant_response>${String(m.content)}</prior_assistant_response>`
-              }
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: text },
+                message: { role: "user" as const, content: convertAssistantContentToText(m.content, toolNameById) },
                 parent_tool_use_id: null,
               })
             }
           }
         }
       } else {
-        // Text prompt — convert messages to string
-        textPrompt = messagesToConvert
-          ?.map((m: { role: string; content: string | Array<{ type: string; text?: string; content?: string; tool_use_id?: string; name?: string; input?: unknown; id?: string }> }) => {
-            const role = m.role === "assistant" ? "Assistant" : "Human"
-            let content: string
-            if (typeof m.content === "string") {
-              content = m.content
-            } else if (Array.isArray(m.content)) {
-              content = m.content
-                .map((block: any) => {
-                  if (block.type === "text" && block.text) return block.text
-                  if (block.type === "tool_use") return `<prior_tool_invocation tool="${block.name}">${JSON.stringify(block.input)}</prior_tool_invocation>`
-                  if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</prior_tool_output>`
-                  if (block.type === "image") return "(image was attached)"
-                  if (block.type === "document") return "(document was attached)"
-                  if (block.type === "file") return "(file was attached)"
-                  return ""
-                })
-                .filter(Boolean)
-                .join("\n")
-            } else {
-              content = String(m.content)
-            }
-            return `${role}: ${content}`
-          })
-          .join("\n\n") || ""
+        // Text prompt — convert messages to string.
+        // On resume, skip assistant messages — the SDK already has them in its
+        // conversation history. This avoids duplicating tool_use inputs (which
+        // can be large) that are already present as structured blocks in the SDK.
+        if (isResume) {
+          // Resume: skip assistant messages (SDK already has them as structured
+          // blocks) and drop the "Human:" prefix since only user messages remain.
+          textPrompt = messagesToConvert
+            .filter((m: any) => m.role !== "assistant")
+            .map((m: any) => {
+              if (typeof m.content === "string") return m.content
+              if (Array.isArray(m.content)) {
+                return m.content
+                  .map((block: any) => {
+                    if (block.type === "text" && block.text) return block.text
+                    if (block.type === "tool_result") return `<tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</tool_output>`
+                    if (block.type === "image") return "(image was attached)"
+                    if (block.type === "document") return "(document was attached)"
+                    if (block.type === "file") return "(file was attached)"
+                    return ""
+                  })
+                  .filter(Boolean)
+                  .join("\n")
+              }
+              return String(m.content)
+            })
+            .join("\n\n") || ""
+        } else {
+          // First request: wrap prior history in <conversation_history> and keep
+          // the last user message outside as the current request.
+          textPrompt = buildTextPromptWithHistory(messagesToConvert, toolNameById)
+        }
       }
 
       // Create a fresh prompt value — can be called multiple times for retry
@@ -467,16 +509,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         return textPrompt!
       }
 
-      // --- Passthrough mode ---
-      // When enabled, ALL tool execution is forwarded to OpenCode instead of
-      // being handled internally. This enables multi-model agent delegation
-      // (e.g., oracle on GPT-5.2, explore on Gemini via oh-my-opencode).
-      // Adapter can override the global passthrough env var per-agent.
-      // Droid always uses internal mode; OpenCode defers to the env var.
-      const adapterPassthrough = adapter.usesPassthrough?.()
-      let passthrough = adapterPassthrough !== undefined
-        ? adapterPassthrough
-        : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
       const capturedToolUses: Array<{ id: string; name: string; input: any }> = []
       const fileChanges: FileChange[] = []
 
@@ -626,7 +658,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                     yield* query(buildQueryOptions({
-                      prompt: buildFreshPrompt(allMessages, stripCacheControl),
+                      prompt: buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : ""),
                       model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
@@ -974,7 +1006,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                       yield* query(buildQueryOptions({
-                        prompt: buildFreshPrompt(allMessages, stripCacheControl),
+                        prompt: buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : ""),
                         model, workingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
@@ -1191,26 +1223,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       break
                     }
                     eventsForwarded += 1
-
-                    // NOTE: agent-specific (passthrough mode) — break immediately when
-                    // the model stops for tool_use so the client can execute the tools
-                    // and send results back. Without this the SDK executes the passthrough
-                    // MCP no-op (→ "passthrough"), feeds that back to the model, and the
-                    // model produces an incorrect fallback response which gets forwarded.
-                    if (
-                      passthrough &&
-                      eventType === "message_delta" &&
-                      (event as any).delta?.stop_reason === "tool_use" &&
-                      streamedToolUseIds.size > 0
-                    ) {
-                      safeEnqueue(
-                        encoder.encode(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`),
-                        "passthrough_tool_stream_stop"
-                      )
-                      streamClosed = true
-                      controller.close()
-                      break
-                    }
 
                     if (eventType === "content_block_delta") {
                       const delta = (event as any).delta
