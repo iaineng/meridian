@@ -42,6 +42,112 @@ export function normalizeContent(content: any): string {
   return String(content)
 }
 
+// ---------------------------------------------------------------------------
+// Multimodal helpers
+// ---------------------------------------------------------------------------
+
+const MULTIMODAL_TYPES = new Set(["image", "document", "file"])
+
+export interface MultimodalCounter {
+  image: number
+  document: number
+  file: number
+}
+
+/**
+ * Increment the counter for the given type and return a label like "[Image 1]".
+ */
+export function nextMultimodalLabel(type: "image" | "document" | "file", counter: MultimodalCounter): string {
+  counter[type]++
+  const name = type.charAt(0).toUpperCase() + type.slice(1)
+  return `[${name} ${counter[type]}]`
+}
+
+/**
+ * Check whether any message contains multimodal content (image/document/file),
+ * including blocks nested inside tool_result.content arrays.
+ */
+export function hasMultimodalContent(messages: Array<{ role: string; content: any }>): boolean {
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue
+    for (const block of m.content) {
+      if (MULTIMODAL_TYPES.has(block.type)) return true
+      if (
+        block.type === "tool_result" &&
+        Array.isArray(block.content) &&
+        block.content.some((inner: any) => MULTIMODAL_TYPES.has(inner.type))
+      ) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Insert "[Image N]" / "[Document N]" / "[File N]" text blocks before each
+ * multimodal block in a content array.
+ *
+ * tool_result blocks are **flattened** into their inner content blocks rather
+ * than preserved as formal tool_result wrappers. This is necessary because
+ * the Agent SDK cannot reconnect a structured tool_result to a tool_use that
+ * was "blocked" in passthrough mode — sending raw tool_result blocks on
+ * session resume causes the model to respond with "No response requested."
+ * Flattening keeps the image data visible to the model while avoiding the
+ * SDK's tool_result handling issues.
+ *
+ * Mutates the counter so numbering is continuous across calls.
+ */
+export function annotateMultimodalContent(content: any, counter: MultimodalCounter, toolNameById?: Map<string, string>, toolPrefix?: string): any {
+  if (!Array.isArray(content)) return content
+  const prefix = toolPrefix ?? ""
+  const result: any[] = []
+  for (const block of content) {
+    if (MULTIMODAL_TYPES.has(block.type)) {
+      result.push({ type: "text", text: nextMultimodalLabel(block.type, counter) })
+      result.push(block)
+    } else if (block.type === "tool_result") {
+      // Flatten tool_result: extract inner content blocks wrapped in <tool_output>
+      // markers so the model knows this content came from a tool execution.
+      const toolName = toolNameById?.get(block.tool_use_id) ?? "unknown"
+      result.push({ type: "text", text: `<tool_output tool="${toolName}">` })
+      if (Array.isArray(block.content)) {
+        for (const inner of block.content) {
+          if (MULTIMODAL_TYPES.has(inner.type)) {
+            result.push({ type: "text", text: nextMultimodalLabel(inner.type, counter) })
+            result.push(inner)
+          } else if (inner.type === "tool_reference" && inner.tool_name) {
+            result.push({ ...inner, tool_name: prefix + inner.tool_name })
+          } else {
+            result.push(inner)
+          }
+        }
+      } else if (typeof block.content === "string") {
+        result.push({ type: "text", text: block.content })
+      }
+      result.push({ type: "text", text: "</tool_output>" })
+    } else {
+      result.push(block)
+    }
+  }
+  return result
+}
+
+/**
+ * Serialize tool_result.content to text for the text prompt path.
+ * Replaces image/document/file blocks with indexed labels instead of
+ * dumping raw base64 via JSON.stringify.
+ */
+export function serializeToolResultContentToText(content: any, counter: MultimodalCounter, toolPrefix?: string): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return content == null ? "" : JSON.stringify(content)
+  const prefix = toolPrefix ?? ""
+  return content.map((block: any) => {
+    if (block.type === "text" && block.text) return block.text
+    if (MULTIMODAL_TYPES.has(block.type)) return `${nextMultimodalLabel(block.type, counter)}: attached`
+    if (block.type === "tool_reference" && block.tool_name) return `tool_reference: ${prefix}${block.tool_name}`
+    return JSON.stringify(block)
+  }).filter(Boolean).join("\n")
+}
+
 /**
  * Extract only the last user message (for session resume — SDK already has history).
  */
