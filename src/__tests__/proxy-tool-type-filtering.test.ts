@@ -67,7 +67,7 @@ function createTestApp() {
   return app
 }
 
-async function sendRequest(app: any, tools: any[], stream = false) {
+async function sendRequest(app: any, tools: any[], stream = false, system?: string) {
   capturedQueryParams = null
   const response = await app.fetch(new Request("http://localhost/v1/messages", {
     method: "POST",
@@ -78,6 +78,7 @@ async function sendRequest(app: any, tools: any[], stream = false) {
       stream,
       messages: [{ role: "user", content: "hello" }],
       tools,
+      ...(system ? { system } : {}),
     }),
   }))
 
@@ -168,6 +169,17 @@ describe("Tool type filtering in passthrough mode", () => {
     expect(params.options.maxTurns).toBe(1)
     const disallowed = params.options.disallowedTools as string[]
     expect(disallowed).toContain("WebSearch")
+  })
+
+  it("single web_search preserves raw system prompt (no claude_code preset)", async () => {
+    const app = createTestApp()
+    const tools = [{ type: "web_search_20250305" }]
+    const systemText = "You are a helpful search assistant."
+    const params = await sendRequest(app, tools, false, systemText)
+    // Should use raw system prompt string, not the claude_code preset object
+    expect(typeof params.options.systemPrompt).toBe("string")
+    // Content is homoglyph-encoded but must not be the preset wrapper
+    expect(params.options.systemPrompt).not.toHaveProperty("type")
   })
 
   it("non-passthrough mode is unaffected by tool types", async () => {

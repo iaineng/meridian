@@ -46,6 +46,8 @@ export interface QueryContext {
   thinking?: { type: "adaptive" } | { type: "enabled"; budgetTokens?: number } | { type: "disabled" }
   /** Whether to enable the SDK's built-in WebSearch (removes it from blocked tools) */
   useBuiltinWebSearch?: boolean
+  /** Max output tokens (from client request body.max_tokens) */
+  maxOutputTokens?: number
   /** Callback to receive stderr lines from the Claude subprocess */
   onStderr?: (line: string) => void
 }
@@ -81,7 +83,7 @@ export function buildQueryOptions(ctx: QueryContext) {
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
       ...(systemContext ? {
-        systemPrompt: passthrough
+        systemPrompt: (passthrough || ctx.useBuiltinWebSearch)
           ? systemContext
           : { type: "preset" as const, preset: "claude_code" as const, append: systemContext }
       } : {}),
@@ -108,6 +110,7 @@ export function buildQueryOptions(ctx: QueryContext) {
         ENABLE_TOOL_SEARCH: "false",
         DISABLE_AUTO_COMPACT: "1",
         ...(passthrough ? { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } : {}),
+        ...(ctx.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(ctx.maxOutputTokens) } : {}),
       },
       ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),

@@ -166,13 +166,17 @@ describe("Multimodal content", () => {
       messages.push(msg)
     }
 
-    // Should have all 3 messages (system context now in SDK option, not in prompt)
-    expect(messages.length).toBeGreaterThanOrEqual(3)
-    // All should have the user type wrapper (SDK requirement)
-    for (const msg of messages) {
-      expect(msg.type).toBe("user")
-      expect(msg.message).toBeDefined()
-    }
+    // Single structured message with text prompt + attached multimodal blocks
+    expect(messages).toHaveLength(1)
+    expect(messages[0].type).toBe("user")
+    const content = messages[0].message.content
+    // Text block contains all roles via <turn> tags + <conversation_history>
+    expect(content[0].type).toBe("text")
+    expect(content[0].text).toContain("look at this")
+    expect(content[0].text).toContain("I see it")
+    expect(content[0].text).toContain("what color is it?")
+    expect(content[0].text).toContain("<conversation_history>")
+    expect(content[0].text).toContain('<turn role="assistant">')
   })
 
   it("should strip cache_control from content blocks", async () => {
@@ -300,10 +304,13 @@ describe("Multimodal content", () => {
     }
 
     const content = messages[0].message.content
-    // Should have: text("compare these"), text("[Image 1]"), image(a), text("[Image 2]"), image(b)
-    expect(content).toHaveLength(5)
-    expect(content[1]).toEqual({ type: "text", text: "[Image 1]" })
-    expect(content[3]).toEqual({ type: "text", text: "[Image 2]" })
+    // Text prompt with [Image N] labels + attached image blocks
+    expect(content).toHaveLength(3)
+    expect(content[0].type).toBe("text")
+    expect(content[0].text).toContain("[Image 1]")
+    expect(content[0].text).toContain("[Image 2]")
+    expect(content[1].type).toBe("image")
+    expect(content[2].type).toBe("image")
   })
 
   it("should add index labels to images inside tool_result in structured messages", async () => {
@@ -330,11 +337,11 @@ describe("Multimodal content", () => {
     }
 
     const content = messages[0].message.content
-    // tool_result is flattened with <tool_output> wrapper (no raw tool_result block)
-    expect(content).toHaveLength(4)
-    expect(content[0].text).toContain("<tool_output")
-    expect(content[1]).toEqual({ type: "text", text: "[Image 1]" })
-    expect(content[2].type).toBe("image")
-    expect(content[3]).toEqual({ type: "text", text: "</tool_output>" })
+    // Text prompt with [Image 1] label inside <prior_tool_output> + attached image block
+    expect(content).toHaveLength(2)
+    expect(content[0].type).toBe("text")
+    expect(content[0].text).toContain("<prior_tool_output")
+    expect(content[0].text).toContain("[Image 1]")
+    expect(content[1].type).toBe("image")
   })
 })

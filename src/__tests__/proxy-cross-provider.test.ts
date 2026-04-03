@@ -152,9 +152,11 @@ describe("Cross-provider: position-based assistant message handling", () => {
     expect(typeof prompt).toBe("string")
     // Leading assistant skipped, non-leading preserved in <conversation_history>
     expect(prompt).not.toContain("SDK response")
-    expect(prompt).toContain("Assistant: GPT says hi")
+    expect(prompt).toContain('<turn role="assistant">')
+    expect(prompt).toContain("GPT says hi")
     expect(prompt).toContain("<conversation_history>")
-    expect(prompt).toContain("Human: Switched to GPT")
+    expect(prompt).toContain('<turn role="user">')
+    expect(prompt).toContain("Switched to GPT")
     expect(prompt).toContain("Back to Claude")
   })
 

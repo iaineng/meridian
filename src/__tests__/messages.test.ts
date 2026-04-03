@@ -2,7 +2,7 @@
  * Unit tests for message parsing utilities.
  */
 import { describe, it, expect } from "bun:test"
-import { normalizeContent, getLastUserMessage, hasMultimodalContent, annotateMultimodalContent, nextMultimodalLabel, serializeToolResultContentToText, type MultimodalCounter } from "../proxy/messages"
+import { normalizeContent, getLastUserMessage, hasMultimodalContent, nextMultimodalLabel, serializeToolResultContentToText, type MultimodalCounter } from "../proxy/messages"
 
 describe("normalizeContent", () => {
   it("returns string content as-is", () => {
@@ -155,113 +155,6 @@ describe("hasMultimodalContent", () => {
   it("handles string message content", () => {
     const messages = [{ role: "user", content: "hello" }]
     expect(hasMultimodalContent(messages)).toBe(false)
-  })
-})
-
-describe("annotateMultimodalContent", () => {
-  it("inserts label before a top-level image block", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const content = [{ type: "image", source: { type: "base64", data: "abc" } }]
-    const result = annotateMultimodalContent(content, counter)
-    expect(result).toHaveLength(2)
-    expect(result[0]).toEqual({ type: "text", text: "[Image 1]" })
-    expect(result[1]).toEqual(content[0])
-  })
-
-  it("numbers multiple images sequentially", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const content = [
-      { type: "text", text: "look" },
-      { type: "image", source: { type: "base64", data: "a" } },
-      { type: "image", source: { type: "base64", data: "b" } },
-    ]
-    const result = annotateMultimodalContent(content, counter)
-    expect(result).toHaveLength(5)
-    expect(result[0]).toEqual({ type: "text", text: "look" })
-    expect(result[1]).toEqual({ type: "text", text: "[Image 1]" })
-    expect(result[3]).toEqual({ type: "text", text: "[Image 2]" })
-  })
-
-  it("flattens tool_result and annotates images inside it", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const content = [{
-      type: "tool_result",
-      tool_use_id: "tu_1",
-      content: [{ type: "image", source: { type: "base64", data: "screenshot" } }],
-    }]
-    const result = annotateMultimodalContent(content, counter)
-    // tool_result is flattened with <tool_output> wrapper: open + label + image + close
-    expect(result).toHaveLength(4)
-    expect(result[0]).toEqual({ type: "text", text: '<tool_output tool="unknown">' })
-    expect(result[1]).toEqual({ type: "text", text: "[Image 1]" })
-    expect(result[2].type).toBe("image")
-    expect(result[3]).toEqual({ type: "text", text: "</tool_output>" })
-  })
-
-  it("flattens tool_result with toolNameById resolving tool name", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const toolNameById = new Map([["tu_1", "screenshot"]])
-    const content = [{
-      type: "tool_result",
-      tool_use_id: "tu_1",
-      content: [{ type: "image", source: { type: "base64", data: "abc" } }],
-    }]
-    const result = annotateMultimodalContent(content, counter, toolNameById)
-    expect(result[0]).toEqual({ type: "text", text: '<tool_output tool="screenshot">' })
-  })
-
-  it("flattens tool_result with mixed text and image content", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const content = [{
-      type: "tool_result",
-      tool_use_id: "tu_1",
-      content: [
-        { type: "text", text: "Screenshot captured" },
-        { type: "image", source: { type: "base64", data: "abc" } },
-      ],
-    }]
-    const result = annotateMultimodalContent(content, counter)
-    // Flattened: open + text + label + image + close
-    expect(result).toHaveLength(5)
-    expect(result[0]).toEqual({ type: "text", text: '<tool_output tool="unknown">' })
-    expect(result[1]).toEqual({ type: "text", text: "Screenshot captured" })
-    expect(result[2]).toEqual({ type: "text", text: "[Image 1]" })
-    expect(result[3].type).toBe("image")
-    expect(result[4]).toEqual({ type: "text", text: "</tool_output>" })
-  })
-
-  it("flattens tool_result with string content to text block", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const content = [{
-      type: "tool_result",
-      tool_use_id: "tu_1",
-      content: "plain text result",
-    }]
-    const result = annotateMultimodalContent(content, counter)
-    // open + text + close
-    expect(result).toHaveLength(3)
-    expect(result[0]).toEqual({ type: "text", text: '<tool_output tool="unknown">' })
-    expect(result[1]).toEqual({ type: "text", text: "plain text result" })
-    expect(result[2]).toEqual({ type: "text", text: "</tool_output>" })
-  })
-
-  it("shares counter across calls", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    annotateMultimodalContent([{ type: "image", source: {} }], counter)
-    const result = annotateMultimodalContent([{ type: "image", source: {} }], counter)
-    expect(result[0]).toEqual({ type: "text", text: "[Image 2]" })
-  })
-
-  it("passes through non-multimodal content unchanged", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const content = [{ type: "text", text: "hello" }]
-    const result = annotateMultimodalContent(content, counter)
-    expect(result).toEqual(content)
-  })
-
-  it("returns string content unchanged", () => {
-    const counter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    expect(annotateMultimodalContent("hello", counter)).toBe("hello")
   })
 })
 

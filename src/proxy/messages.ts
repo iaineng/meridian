@@ -82,54 +82,6 @@ export function hasMultimodalContent(messages: Array<{ role: string; content: an
   return false
 }
 
-/**
- * Insert "[Image N]" / "[Document N]" / "[File N]" text blocks before each
- * multimodal block in a content array.
- *
- * tool_result blocks are **flattened** into their inner content blocks rather
- * than preserved as formal tool_result wrappers. This is necessary because
- * the Agent SDK cannot reconnect a structured tool_result to a tool_use that
- * was "blocked" in passthrough mode — sending raw tool_result blocks on
- * session resume causes the model to respond with "No response requested."
- * Flattening keeps the image data visible to the model while avoiding the
- * SDK's tool_result handling issues.
- *
- * Mutates the counter so numbering is continuous across calls.
- */
-export function annotateMultimodalContent(content: any, counter: MultimodalCounter, toolNameById?: Map<string, string>, toolPrefix?: string): any {
-  if (!Array.isArray(content)) return content
-  const prefix = toolPrefix ?? ""
-  const result: any[] = []
-  for (const block of content) {
-    if (MULTIMODAL_TYPES.has(block.type)) {
-      result.push({ type: "text", text: nextMultimodalLabel(block.type, counter) })
-      result.push(block)
-    } else if (block.type === "tool_result") {
-      // Flatten tool_result: extract inner content blocks wrapped in <tool_output>
-      // markers so the model knows this content came from a tool execution.
-      const toolName = toolNameById?.get(block.tool_use_id) ?? "unknown"
-      result.push({ type: "text", text: `<tool_output tool="${toolName}">` })
-      if (Array.isArray(block.content)) {
-        for (const inner of block.content) {
-          if (MULTIMODAL_TYPES.has(inner.type)) {
-            result.push({ type: "text", text: nextMultimodalLabel(inner.type, counter) })
-            result.push(inner)
-          } else if (inner.type === "tool_reference" && inner.tool_name) {
-            result.push({ ...inner, tool_name: prefix + inner.tool_name })
-          } else {
-            result.push(inner)
-          }
-        }
-      } else if (typeof block.content === "string") {
-        result.push({ type: "text", text: block.content })
-      }
-      result.push({ type: "text", text: "</tool_output>" })
-    } else {
-      result.push(block)
-    }
-  }
-  return result
-}
 
 /**
  * Serialize tool_result.content to text for the text prompt path.
