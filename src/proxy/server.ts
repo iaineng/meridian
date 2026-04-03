@@ -19,7 +19,7 @@ import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } fro
 import type { RequestMetric } from "../telemetry"
 import { classifyError, isStaleSessionError, isRateLimitError, isMaxTurnsError } from './errors'
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext } from "./models"
-import { getLastUserMessage } from "./messages"
+import { getLastUserMessage, hasMultimodalContent, annotateMultimodalContent, serializeToolResultContentToText, nextMultimodalLabel, type MultimodalCounter } from "./messages"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
@@ -52,65 +52,53 @@ const exec = promisify(execCallback)
 let claudeExecutable = ""
 
 /**
- * URL-encode using URLSearchParams (application/x-www-form-urlencoded),
- * but preserve non-ASCII characters (e.g. Chinese, emoji) unencoded.
+ * Homoglyph substitution map: replaces Latin characters with visually
+ * identical Cyrillic/Greek counterparts to prevent regex/keyword matching
+ * while keeping content human-readable.
  */
-function urlEncode(content: string): string {
-  const encoded = new URLSearchParams([["", content]]).toString().slice(1)
-  return encoded.replace(/(%[0-9A-Fa-f]{2})+/g, (match) => {
-    try {
-      const decoded = decodeURIComponent(match)
-      if (/[^\x00-\x7F]/.test(decoded)) {
-        return decoded
-      }
-      return match
-    } catch {
-      return match
-    }
-  })
+const HOMOGLYPH_MAP: Record<string, string> = {
+  // Lowercase: exact Cyrillic/Greek matches
+  'a': '\u0430', 'c': '\u0441', 'e': '\u0435', 'i': '\u0456',
+  'j': '\u0458', 'o': '\u043e', 'p': '\u0440', 's': '\u0455',
+  'x': '\u0445', 'y': '\u0443',
+  // Uppercase: exact Cyrillic/Greek matches
+  'A': '\u0410', 'B': '\u0412', 'C': '\u0421', 'E': '\u0415',
+  'H': '\u041d', 'I': '\u0406', 'J': '\u0408', 'K': '\u041a',
+  'M': '\u041c', 'N': '\u039d', 'O': '\u041e', 'P': '\u0420',
+  'S': '\u0405', 'T': '\u0422', 'X': '\u0425', 'Z': '\u0396',
+  // Lowercase: high-similarity approximations
+  'd': '\u0501', 'g': '\u0261', 'h': '\u04bb', 'q': '\u051b',
+  'v': '\u03bd', 'w': '\u051d',
+  // Uppercase: high-similarity approximations
+  'V': '\u0474', 'W': '\u051c',
+  // Punctuation/symbols
+  ' ': '\u3000', ':': '\uff1a',
 }
 
-/**
- * URL-encode the content inside <system-reminder> tags to prevent
- * the model from misinterpreting embedded tags or special characters.
- */
-function encodeSystemReminders(text: string): string {
-  return text.replace(
-    /<system-reminder>([\s\S]*?)<\/system-reminder>/g,
-    (_match, content) => `<system-reminder encoding="url">${urlEncode(content)}</system-reminder>`
-  )
+function homoglyphEncode(content: string): string {
+  let result = ''
+  for (const ch of content) {
+    result += HOMOGLYPH_MAP[ch] ?? ch
+  }
+  return result
 }
 
-function encodeMessageContent(content: any): any {
-  if (typeof content === "string") {
-    return encodeSystemReminders(content)
-  }
-  if (Array.isArray(content)) {
-    return content.map((block: any) => {
-      if (block.type === "text" && typeof block.text === "string") {
-        return { ...block, text: encodeSystemReminders(block.text) }
-      }
-      return block
-    })
-  }
-  return content
-}
 
 /**
  * Extract the text content of a message, serializing tool_use/tool_result
  * blocks as XML tags. Returns raw content without a role prefix.
  */
-function extractMessageContent(m: any, toolNameById: Map<string, string>): string {
+function extractMessageContent(m: any, toolNameById: Map<string, string>, counter?: MultimodalCounter, toolPrefix?: string): string {
   if (typeof m.content === "string") return m.content
   if (Array.isArray(m.content)) {
     return m.content
       .map((block: any) => {
         if (block.type === "text" && block.text) return block.text
         if (block.type === "tool_use") return `<prior_tool_invocation tool="${block.name}">${JSON.stringify(block.input)}</prior_tool_invocation>`
-        if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</prior_tool_output>`
-        if (block.type === "image") return "(image was attached)"
-        if (block.type === "document") return "(document was attached)"
-        if (block.type === "file") return "(file was attached)"
+        if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${counter ? serializeToolResultContentToText(block.content, counter, toolPrefix) : (typeof block.content === "string" ? block.content : JSON.stringify(block.content))}</prior_tool_output>`
+        if (block.type === "image") return counter ? `${nextMultimodalLabel("image", counter)}: attached` : "(image was attached)"
+        if (block.type === "document") return counter ? `${nextMultimodalLabel("document", counter)}: attached` : "(document was attached)"
+        if (block.type === "file") return counter ? `${nextMultimodalLabel("file", counter)}: attached` : "(file was attached)"
         return ""
       })
       .filter(Boolean)
@@ -120,16 +108,16 @@ function extractMessageContent(m: any, toolNameById: Map<string, string>): strin
 }
 
 /** Convert a message to "Role: content" text (with role prefix). */
-function convertMessageToText(m: any, toolNameById: Map<string, string>): string {
+function convertMessageToText(m: any, toolNameById: Map<string, string>, counter?: MultimodalCounter, toolPrefix?: string): string {
   const role = m.role === "assistant" ? "Assistant" : "Human"
-  return `${role}: ${extractMessageContent(m, toolNameById)}`
+  return `${role}: ${extractMessageContent(m, toolNameById, counter, toolPrefix)}`
 }
 
 /**
  * Convert an assistant message's content to a text summary with XML tags.
  * Used in multimodal paths where assistant messages are flattened into user messages.
  */
-function convertAssistantContentToText(content: any, toolNameById: Map<string, string>): string {
+function convertAssistantContentToText(content: any, toolNameById: Map<string, string>, counter?: MultimodalCounter, toolPrefix?: string): string {
   if (typeof content === "string") {
     return `<prior_assistant_response>${content}</prior_assistant_response>`
   }
@@ -137,7 +125,7 @@ function convertAssistantContentToText(content: any, toolNameById: Map<string, s
     return content.map((b: any) => {
       if (b.type === "text" && b.text) return `<prior_assistant_response>${b.text}</prior_assistant_response>`
       if (b.type === "tool_use") return `<prior_tool_invocation tool="${b.name}">${JSON.stringify(b.input)}</prior_tool_invocation>`
-      if (b.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(b.tool_use_id) ?? "unknown"}">${typeof b.content === "string" ? b.content : JSON.stringify(b.content)}</prior_tool_output>`
+      if (b.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(b.tool_use_id) ?? "unknown"}">${counter ? serializeToolResultContentToText(b.content, counter, toolPrefix) : (typeof b.content === "string" ? b.content : JSON.stringify(b.content))}</prior_tool_output>`
       return ""
     }).filter(Boolean).join("\n")
   }
@@ -148,17 +136,17 @@ function convertAssistantContentToText(content: any, toolNameById: Map<string, s
  * Build a text prompt from messages, wrapping all but the last user message
  * in <conversation_history> to separate history from the current request.
  */
-function buildTextPromptWithHistory(messages: Array<{ role: string; content: any }>, toolNameById: Map<string, string>): string {
+function buildTextPromptWithHistory(messages: Array<{ role: string; content: any }>, toolNameById: Map<string, string>, counter?: MultimodalCounter, toolPrefix?: string): string {
   let lastUserIdx = -1
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]?.role === "user") { lastUserIdx = i; break }
   }
   if (lastUserIdx > 0) {
-    const historyPart = messages.slice(0, lastUserIdx).map(m => convertMessageToText(m, toolNameById)).join("\n\n")
-    const currentPart = extractMessageContent(messages[lastUserIdx]!, toolNameById)
+    const historyPart = messages.slice(0, lastUserIdx).map(m => convertMessageToText(m, toolNameById, counter, toolPrefix)).join("\n\n")
+    const currentPart = extractMessageContent(messages[lastUserIdx]!, toolNameById, counter, toolPrefix)
     return `IMPORTANT: The following <conversation_history> is flattened from structured multi-turn messages. Use it as context only. Do NOT simulate or role-play as "Human:" — you are the assistant, respond only as yourself.\n\n<conversation_history>\n${historyPart}\n</conversation_history>\n\n${currentPart}`
   }
-  return messages.map(m => extractMessageContent(m, toolNameById)).join("\n\n") || ""
+  return messages.map(m => extractMessageContent(m, toolNameById, counter, toolPrefix)).join("\n\n") || ""
 }
 
 /**
@@ -170,11 +158,8 @@ function buildFreshPrompt(
   stripCacheControl: (content: any) => any,
   toolPrefix = ""
 ): string | AsyncIterable<any> {
-  messages = messages.map(m => ({ ...m, content: encodeMessageContent(m.content) }))
-  const MULTIMODAL_TYPES = new Set(["image", "document", "file"])
-  const hasMultimodal = messages.some((m) =>
-    Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
-  )
+
+  const hasMultimodal = hasMultimodalContent(messages)
 
   // Build tool_use_id → tool_name map so tool_result blocks can reference their tool
   const toolNameById = new Map<string, string>()
@@ -187,18 +172,19 @@ function buildFreshPrompt(
   }
 
   if (hasMultimodal) {
+    const freshCounter: MultimodalCounter = { image: 0, document: 0, file: 0 }
     const structured: Array<{ type: "user"; message: { role: string; content: any }; parent_tool_use_id: null }> = []
     for (const m of messages) {
       if (m.role === "user") {
         structured.push({
           type: "user" as const,
-          message: { role: "user" as const, content: stripCacheControl(m.content) },
+          message: { role: "user" as const, content: annotateMultimodalContent(stripCacheControl(m.content), freshCounter, toolNameById, toolPrefix) },
           parent_tool_use_id: null,
         })
       } else {
         structured.push({
           type: "user" as const,
-          message: { role: "user" as const, content: convertAssistantContentToText(m.content, toolNameById) },
+          message: { role: "user" as const, content: convertAssistantContentToText(m.content, toolNameById, freshCounter, toolPrefix) },
           parent_tool_use_id: null,
         })
       }
@@ -206,7 +192,8 @@ function buildFreshPrompt(
     return (async function* () { for (const msg of structured) yield msg })()
   }
 
-  return buildTextPromptWithHistory(messages, toolNameById)
+  const freshCounter: MultimodalCounter = { image: 0, document: 0, file: 0 }
+  return buildTextPromptWithHistory(messages, toolNameById, freshCounter, toolPrefix)
 }
 
 export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServer {
@@ -336,10 +323,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         claudeLog("debug.agents", { names: validAgentNames, count: validAgentNames.length })
       }
       systemContext += adapter.buildSystemContextAddendum?.(body, sdkAgents) ?? ""
-      // Wrap system context with URL encoding so the model sees it as
-      // a structured system-level instruction, not raw text
+      // Homoglyph-encode system context so the model doesn't misinterpret
+      // embedded tags or special characters
       if (systemContext) {
-        systemContext = `<system encoding="url">${urlEncode(systemContext)}</system>`
+        systemContext = homoglyphEncode(systemContext)
       }
 
 
@@ -369,17 +356,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         messagesToConvert = allMessages
       }
 
-      // Encode <system-reminder> blocks in message content
-      messagesToConvert = messagesToConvert.map((m: any) => ({
-        ...m,
-        content: encodeMessageContent(m.content)
-      }))
 
       // Check if any messages contain multimodal content (images, documents, files)
-      const MULTIMODAL_TYPES = new Set(["image", "document", "file"])
-      const hasMultimodal = messagesToConvert?.some((m: any) =>
-        Array.isArray(m.content) && m.content.some((b: any) => MULTIMODAL_TYPES.has(b.type))
-      )
+      // Also checks inside tool_result.content for nested image/document/file blocks
+      const hasMultimodal = hasMultimodalContent(messagesToConvert ?? [])
 
       // Build tool_use_id → tool_name map so tool_result blocks can reference their tool.
       // Scan allMessages (not just messagesToConvert) because in undo/fallback paths
@@ -406,6 +386,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
 
       // In passthrough mode, prefix tool names so they match the SDK's MCP tool names
+      const toolPrefixStr = passthrough ? PASSTHROUGH_MCP_PREFIX : ""
       if (passthrough) {
         for (const [id, name] of toolNameById) {
           toolNameById.set(id, PASSTHROUGH_MCP_PREFIX + name)
@@ -417,11 +398,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       function stripCacheControl(content: any): any {
         if (!Array.isArray(content)) return content
         return content.map((block: any) => {
+          let cleaned = block
           if (block.cache_control) {
             const { cache_control, ...rest } = block
-            return rest
+            cleaned = rest
           }
-          return block
+          if (cleaned.type === "tool_result" && Array.isArray(cleaned.content)) {
+            return { ...cleaned, content: stripCacheControl(cleaned.content) }
+          }
+          return cleaned
         })
       }
 
@@ -430,6 +415,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       let structuredMessages: Array<{ type: "user"; message: { role: string; content: any }; parent_tool_use_id: null }> | undefined
       let textPrompt: string | undefined
 
+      // Counter for multimodal index labels — shared across all code paths
+      const mmCounter: MultimodalCounter = { image: 0, document: 0, file: 0 }
+
       if (hasMultimodal) {
         // Structured messages preserve image/document/file blocks for Claude to see.
         // On resume, only send user messages (SDK has assistant context already).
@@ -437,12 +425,25 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         structuredMessages = []
 
         if (isResume) {
-          // Resume: only send user messages from the delta (SDK has the rest)
-          for (const m of messagesToConvert) {
+          // Resume: the leading assistant message is the SDK's own response
+          // (already in SDK history) — skip it. Keep all other messages:
+          // user messages pass through, and any subsequent assistant messages
+          // are from external providers (cross-provider switch) and get
+          // preserved as XML-wrapped context.
+          const skipLeadingAssistant = messagesToConvert[0]?.role === "assistant"
+          for (let i = 0; i < messagesToConvert.length; i++) {
+            const m = messagesToConvert[i]!
+            if (i === 0 && skipLeadingAssistant) continue
             if (m.role === "user") {
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: stripCacheControl(m.content) },
+                message: { role: "user" as const, content: annotateMultimodalContent(stripCacheControl(m.content), mmCounter, toolNameById, toolPrefixStr) },
+                parent_tool_use_id: null,
+              })
+            } else if (m.role === "assistant") {
+              structuredMessages.push({
+                type: "user" as const,
+                message: { role: "user" as const, content: convertAssistantContentToText(m.content, toolNameById, mmCounter, toolPrefixStr) },
                 parent_tool_use_id: null,
               })
             }
@@ -453,13 +454,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             if (m.role === "user") {
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: stripCacheControl(m.content) },
+                message: { role: "user" as const, content: annotateMultimodalContent(stripCacheControl(m.content), mmCounter, toolNameById, toolPrefixStr) },
                 parent_tool_use_id: null,
               })
             } else {
               structuredMessages.push({
                 type: "user" as const,
-                message: { role: "user" as const, content: convertAssistantContentToText(m.content, toolNameById) },
+                message: { role: "user" as const, content: convertAssistantContentToText(m.content, toolNameById, mmCounter, toolPrefixStr) },
                 parent_tool_use_id: null,
               })
             }
@@ -471,32 +472,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // conversation history. This avoids duplicating tool_use inputs (which
         // can be large) that are already present as structured blocks in the SDK.
         if (isResume) {
-          // Resume: skip assistant messages (SDK already has them as structured
-          // blocks) and drop the "Human:" prefix since only user messages remain.
-          textPrompt = messagesToConvert
-            .filter((m: any) => m.role !== "assistant")
-            .map((m: any) => {
-              if (typeof m.content === "string") return m.content
-              if (Array.isArray(m.content)) {
-                return m.content
-                  .map((block: any) => {
-                    if (block.type === "text" && block.text) return block.text
-                    if (block.type === "tool_result") return `<tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}">${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}</tool_output>`
-                    if (block.type === "image") return "(image was attached)"
-                    if (block.type === "document") return "(document was attached)"
-                    if (block.type === "file") return "(file was attached)"
-                    return ""
-                  })
-                  .filter(Boolean)
-                  .join("\n")
-              }
-              return String(m.content)
-            })
-            .join("\n\n") || ""
+          // Resume: the leading assistant message is the SDK's own response
+          // (already in SDK history) — skip it. Remaining messages (user +
+          // any external provider assistants) are formatted with the same
+          // <conversation_history> wrapper as the fresh path for consistency.
+          const skipLeadingAssistant = messagesToConvert[0]?.role === "assistant"
+          const externalMessages = skipLeadingAssistant ? messagesToConvert.slice(1) : messagesToConvert
+          textPrompt = buildTextPromptWithHistory(externalMessages, toolNameById, mmCounter, toolPrefixStr)
         } else {
           // First request: wrap prior history in <conversation_history> and keep
           // the last user message outside as the current request.
-          textPrompt = buildTextPromptWithHistory(messagesToConvert, toolNameById)
+          textPrompt = buildTextPromptWithHistory(messagesToConvert, toolNameById, mmCounter, toolPrefixStr)
         }
       }
 

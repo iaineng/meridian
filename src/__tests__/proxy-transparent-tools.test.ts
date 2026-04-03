@@ -11,6 +11,24 @@
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
+
+const HOMOGLYPH_MAP: Record<string, string> = {
+  'a': '\u0430', 'c': '\u0441', 'e': '\u0435', 'i': '\u0456',
+  'j': '\u0458', 'o': '\u043e', 'p': '\u0440', 's': '\u0455',
+  'x': '\u0445', 'y': '\u0443',
+  'A': '\u0410', 'B': '\u0412', 'C': '\u0421', 'E': '\u0415',
+  'H': '\u041d', 'I': '\u0406', 'J': '\u0408', 'K': '\u041a',
+  'M': '\u041c', 'N': '\u039d', 'O': '\u041e', 'P': '\u0420',
+  'S': '\u0405', 'T': '\u0422', 'X': '\u0425', 'Z': '\u0396',
+  'd': '\u0501', 'g': '\u0261', 'h': '\u04bb', 'q': '\u051b',
+  'v': '\u03bd', 'w': '\u051d',
+  'V': '\u0474', 'W': '\u051c',
+  ' ': '\u3000', ':': '\uff1a',
+}
+function homoglyphEncode(s: string): string {
+  let r = ''; for (const c of s) r += HOMOGLYPH_MAP[c] ?? c; return r
+}
+
 import {
   messageStart,
   textBlockStart,
@@ -182,9 +200,9 @@ describe("Phase 2: Message format preservation", () => {
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: `<system encoding="url">${new URLSearchParams([["", "You are a helpful assistant."]]).toString().slice(1)}</system>`,
+      append: homoglyphEncode("You are a helpful assistant."),
     })
-    // Prompt text should NOT contain the raw system context (it's in the SDK option now, URL-encoded)
+    // Prompt text should NOT contain the raw system context (it's in the SDK option now, homoglyph-encoded)
     const prompt = capturedQueryParams.prompt
     expect(typeof prompt).toBe("string")
     expect(prompt).not.toContain("You are a helpful assistant.")

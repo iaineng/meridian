@@ -8,6 +8,23 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test"
 import { assistantMessage } from "./helpers"
 
+const HOMOGLYPH_MAP: Record<string, string> = {
+  'a': '\u0430', 'c': '\u0441', 'e': '\u0435', 'i': '\u0456',
+  'j': '\u0458', 'o': '\u043e', 'p': '\u0440', 's': '\u0455',
+  'x': '\u0445', 'y': '\u0443',
+  'A': '\u0410', 'B': '\u0412', 'C': '\u0421', 'E': '\u0415',
+  'H': '\u041d', 'I': '\u0406', 'J': '\u0408', 'K': '\u041a',
+  'M': '\u041c', 'N': '\u039d', 'O': '\u041e', 'P': '\u0420',
+  'S': '\u0405', 'T': '\u0422', 'X': '\u0425', 'Z': '\u0396',
+  'd': '\u0501', 'g': '\u0261', 'h': '\u04bb', 'q': '\u051b',
+  'v': '\u03bd', 'w': '\u051d',
+  'V': '\u0474', 'W': '\u051c',
+  ' ': '\u3000', ':': '\uff1a',
+}
+function homoglyphEncode(s: string): string {
+  let r = ''; for (const c of s) r += HOMOGLYPH_MAP[c] ?? c; return r
+}
+
 let capturedQueryParams: any = null
 
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
@@ -209,7 +226,7 @@ describe("Multimodal content", () => {
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: `<system encoding="url">${new URLSearchParams([["", "You are a helpful assistant."]]).toString().slice(1)}</system>`,
+      append: homoglyphEncode("You are a helpful assistant."),
     })
 
     const messages: any[] = []
@@ -235,5 +252,89 @@ describe("Multimodal content", () => {
 
     expect(typeof capturedQueryParams.prompt).toBe("string")
     expect(capturedQueryParams.prompt).toContain("hello")
+  })
+
+  it("should use structured prompt when image is nested inside tool_result", async () => {
+    const app = createTestApp()
+    await (await post(app, {
+      model: "claude-sonnet-4-5",
+      max_tokens: 1024,
+      stream: false,
+      messages: [{
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "toolu_screenshot",
+          content: [
+            { type: "text", text: "Screenshot captured" },
+            { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBOR..." } },
+          ],
+        }],
+      }],
+    })).json()
+
+    // Should be an AsyncIterable (structured), not a string (text)
+    expect(typeof capturedQueryParams.prompt).not.toBe("string")
+    expect(capturedQueryParams.prompt[Symbol.asyncIterator]).toBeDefined()
+  })
+
+  it("should add index labels to multimodal blocks in structured messages", async () => {
+    const app = createTestApp()
+    await (await post(app, {
+      model: "claude-sonnet-4-5",
+      max_tokens: 1024,
+      stream: false,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "compare these" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "a" } },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "b" } },
+        ],
+      }],
+    })).json()
+
+    const messages: any[] = []
+    for await (const msg of capturedQueryParams.prompt) {
+      messages.push(msg)
+    }
+
+    const content = messages[0].message.content
+    // Should have: text("compare these"), text("[Image 1]"), image(a), text("[Image 2]"), image(b)
+    expect(content).toHaveLength(5)
+    expect(content[1]).toEqual({ type: "text", text: "[Image 1]" })
+    expect(content[3]).toEqual({ type: "text", text: "[Image 2]" })
+  })
+
+  it("should add index labels to images inside tool_result in structured messages", async () => {
+    const app = createTestApp()
+    await (await post(app, {
+      model: "claude-sonnet-4-5",
+      max_tokens: 1024,
+      stream: false,
+      messages: [{
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "toolu_1",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/png", data: "screenshot" } },
+          ],
+        }],
+      }],
+    })).json()
+
+    const messages: any[] = []
+    for await (const msg of capturedQueryParams.prompt) {
+      messages.push(msg)
+    }
+
+    const content = messages[0].message.content
+    // tool_result is flattened with <tool_output> wrapper (no raw tool_result block)
+    expect(content).toHaveLength(4)
+    expect(content[0].text).toContain("<tool_output")
+    expect(content[1]).toEqual({ type: "text", text: "[Image 1]" })
+    expect(content[2].type).toBe("image")
+    expect(content[3]).toEqual({ type: "text", text: "</tool_output>" })
   })
 })
