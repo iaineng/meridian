@@ -5,7 +5,9 @@
       "Bash(bun install:*)",
       "Bash(grep -E \"\\(package\\\\.json|tsconfig|\\\\.ts$|\\\\.js$\\)\")",
       "Bash(grep)",
-      "Bash(npx bun:*)"
+      "Bash(npx bun:*)",
+      "Bash(find:*)",
+      "WebSearch"
     ]
   }
 }
