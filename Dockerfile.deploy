@@ -33,7 +33,7 @@ RUN userdel -r node 2>/dev/null; \
     && chown -R claude:claude /home/claude
 
 # Install Claude Code via npm
-RUN npm install -g @anthropic-ai/claude-code@2.1.90
+RUN npm install -g @anthropic-ai/claude-code@2.1.91
 
 WORKDIR /app
 
