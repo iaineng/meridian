@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.26.1](https://github.com/rynfar/meridian/compare/v1.26.0...v1.26.1) (2026-04-03)
+
+
+### Bug Fixes
+
+* narrow event type before translateAnthropicSseEvent to satisfy tsc ([8417623](https://github.com/rynfar/meridian/commit/8417623a7404915eb16103429b892d44bae4d310))
+
 ## [1.26.0](https://github.com/rynfar/meridian/compare/v1.25.1...v1.26.0) (2026-04-03)
 
 
