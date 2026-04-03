@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.26.5](https://github.com/rynfar/meridian/compare/v1.26.4...v1.26.5) (2026-04-03)
+
+
+### Bug Fixes
+
+* isolate shared store context-usage test into its own file to prevent parallel contamination ([2a1fd66](https://github.com/rynfar/meridian/commit/2a1fd66ceab736def705545994807273ed7f2dc0))
+
 ## [1.26.4](https://github.com/rynfar/meridian/compare/v1.26.3...v1.26.4) (2026-04-03)
 
 
