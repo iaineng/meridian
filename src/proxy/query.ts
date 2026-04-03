@@ -96,14 +96,17 @@ export function buildQueryOptions(ctx: QueryContext) {
           }
         : {
             disallowedTools: blockedTools,
-            allowedTools: allowedMcpTools,
-            mcpServers: { [mcpServerName]: createOpencodeMcpServer() },
+            ...(ctx.useBuiltinWebSearch ? {} : {
+              allowedTools: allowedMcpTools,
+              mcpServers: { [mcpServerName]: createOpencodeMcpServer() },
+            }),
           }),
       plugins: [],
       ...(onStderr ? { stderr: onStderr } : {}),
       env: {
         ...cleanEnv,
         ENABLE_TOOL_SEARCH: "false",
+        DISABLE_AUTO_COMPACT: "1",
         ...(passthrough ? { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } : {}),
       },
       ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
