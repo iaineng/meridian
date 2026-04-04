@@ -19,6 +19,7 @@ import {
   messageDelta,
   messageStop,
   assistantMessage,
+  assistantStreamEvents,
   makeRequest,
   makeToolResultRequest,
   parseSSE,
@@ -126,9 +127,7 @@ describe("Phase 3: Concurrent request support", () => {
   })
 
   it("should handle concurrent non-streaming requests", async () => {
-    mockMessages = [
-      assistantMessage([{ type: "text", text: "OK" }]),
-    ]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "OK" }])
 
     const app = createTestApp()
 
@@ -295,12 +294,13 @@ describe("Phase 3: Multiple tool calls in response", () => {
   })
 
   it("should include multiple tool_use blocks in non-streaming", async () => {
-    mockMessages = [
-      assistantMessage([
+    mockMessages = assistantStreamEvents(
+      [
         { type: "tool_use", id: "toolu_m1", name: "Read", input: { file_path: "a.ts" } },
         { type: "tool_use", id: "toolu_m2", name: "Bash", input: { command: "ls" } },
-      ]),
-    ]
+      ],
+      { stopReason: "tool_use" }
+    )
 
     const app = createTestApp()
     const response = await postMessages(app, makeRequest({ stream: false }))

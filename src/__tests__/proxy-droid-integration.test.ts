@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
-import { assistantMessage } from "./helpers"
+import { assistantStreamEvents } from "./helpers"
 
 let mockMessages: any[] = []
 let capturedQueryParams: any = null
@@ -113,7 +113,7 @@ Available agent types and the tools they have access to:
 
 describe("Droid adapter: MCP server name", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -139,7 +139,7 @@ describe("Droid adapter: MCP server name", () => {
 
 describe("Droid adapter: allowed tools", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -167,7 +167,7 @@ describe("Droid adapter: allowed tools", () => {
 
 describe("Droid adapter: no subagent routing", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -210,7 +210,7 @@ describe("Droid adapter: no subagent routing", () => {
 
 describe("Droid adapter: CWD extraction from system-reminder", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -231,7 +231,7 @@ describe("Droid adapter: CWD extraction from system-reminder", () => {
 
 describe("Droid adapter: session management via fingerprint", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -275,7 +275,7 @@ describe("Droid adapter: session management via fingerprint", () => {
 
 describe("Droid adapter: response format", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Droid response" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Droid response" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -302,7 +302,7 @@ describe("Droid adapter: response format", () => {
 
 describe("Droid adapter: always internal mode (usesPassthrough=false)", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -343,7 +343,7 @@ describe("Droid adapter: always internal mode (usesPassthrough=false)", () => {
 
 describe("Backward compatibility: OpenCode unaffected", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "OpenCode response" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "OpenCode response" }])
     capturedQueryParams = null
     clearSessionCache()
   })

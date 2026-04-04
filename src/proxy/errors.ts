@@ -140,3 +140,13 @@ export function isRateLimitError(errMsg: string): boolean {
 export function isMaxTurnsError(errMsg: string): boolean {
   return errMsg.includes("Reached maximum number of turns")
 }
+
+/**
+ * Detect the SDK "max_output_tokens" error.
+ * The SDK throws this after yielding assistant content when the response
+ * exceeds CLAUDE_CODE_MAX_OUTPUT_TOKENS. We treat it as normal completion
+ * with stop_reason: "max_tokens" since the content was already captured.
+ */
+export function isMaxOutputTokensError(errMsg: string): boolean {
+  return errMsg.includes("output token maximum") || errMsg.includes("max_output_tokens")
+}

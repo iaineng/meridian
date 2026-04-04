@@ -46,7 +46,7 @@ export interface QueryContext {
   thinking?: { type: "adaptive" } | { type: "enabled"; budgetTokens?: number } | { type: "disabled" }
   /** Whether to enable the SDK's built-in WebSearch (removes it from blocked tools) */
   useBuiltinWebSearch?: boolean
-  /** Max output tokens (from client request body.max_tokens) */
+  /** Max output tokens from client request (body.max_tokens) */
   maxOutputTokens?: number
   /** Callback to receive stderr lines from the Claude subprocess */
   onStderr?: (line: string) => void
@@ -110,7 +110,12 @@ export function buildQueryOptions(ctx: QueryContext) {
         ENABLE_TOOL_SEARCH: "false",
         DISABLE_AUTO_COMPACT: "1",
         ...(passthrough ? { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } : {}),
-        ...(ctx.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(ctx.maxOutputTokens) } : {}),
+        // Pass through client's max_tokens directly. The streaming event model
+        // handles max_tokens cleanly via message_delta break, so the SDK's
+        // internal 3-retry recovery loop is no longer a concern.
+        ...(ctx.maxOutputTokens
+          ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(ctx.maxOutputTokens) }
+          : {}),
       },
       ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),

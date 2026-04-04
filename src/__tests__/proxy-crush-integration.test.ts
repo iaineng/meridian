@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
-import { assistantMessage, toolUseBlockStart, textBlockStart, textDelta, blockStop, messageDelta, messageStop, messageStart } from "./helpers"
+import { assistantMessage, assistantStreamEvents, toolUseBlockStart, textBlockStart, textDelta, blockStop, messageDelta, messageStop, messageStart } from "./helpers"
 
 let mockMessages: any[] = []
 let capturedQueryParams: any = null
@@ -82,7 +82,7 @@ async function post(app: any, body: any, headers: Record<string, string> = {}) {
 
 describe("Crush adapter: detection", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -106,7 +106,7 @@ describe("Crush adapter: detection", () => {
 
 describe("Crush adapter: MCP server name", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -150,7 +150,7 @@ describe("Crush adapter: MCP server name", () => {
 
 describe("Crush adapter: no session header", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -173,7 +173,7 @@ describe("Crush adapter: no session header", () => {
 
 describe("Crush adapter: fingerprint session resume", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -229,7 +229,7 @@ describe("Crush adapter: fingerprint session resume", () => {
 
 describe("Crush adapter: no subagent routing", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -268,7 +268,7 @@ describe("Crush adapter: headless auto-execute", () => {
 
 describe("Crush adapter: response format", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Here are the files: ..." }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Here are the files: ..." }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -327,7 +327,7 @@ describe("Crush adapter: streaming", () => {
 
 describe("Backward compatibility: OpenCode unaffected by Crush adapter", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "OpenCode response" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "OpenCode response" }])
     capturedQueryParams = null
     clearSessionCache()
   })

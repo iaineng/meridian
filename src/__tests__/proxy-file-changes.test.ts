@@ -9,7 +9,7 @@
 
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test"
 import {
-  assistantMessage,
+  assistantStreamEvents,
   messageStart,
   textBlockStart,
   toolUseBlockStart,
@@ -29,49 +29,54 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
     capturedQueryParams = params
 
     // If PostToolUse hooks are registered, call them for MCP tool events
-    // This simulates what the SDK does internally when tools execute
+    // This simulates what the SDK does internally when tools execute.
+    // We accumulate input_json_delta per block index and fire after block_stop.
     return (async function* () {
       const postToolUseHooks = params.options?.hooks?.PostToolUse
+      // Track in-progress tool_use blocks by index: { name, id, partialJson }
+      const pendingTools: Record<number, { name: string; id: string; partialJson: string }> = {}
+
       for (const msg of mockMessages) {
         yield msg
 
-        // After yielding an assistant message with tool results, fire PostToolUse
-        // for any MCP tool blocks (simulating the SDK's internal tool execution)
-        if (msg.type === "assistant" && postToolUseHooks) {
-          for (const block of msg.message?.content || []) {
-            if (block.type === "tool_use" && block.name?.startsWith("mcp__")) {
+        if (msg.type === "stream_event" && postToolUseHooks) {
+          const event = msg.event
+
+          // Track tool_use block starts
+          if (event.type === "content_block_start" && event.content_block?.type === "tool_use" && event.content_block?.name?.startsWith("mcp__")) {
+            pendingTools[event.index as number] = {
+              name: event.content_block.name as string,
+              id: event.content_block.id as string,
+              partialJson: "",
+            }
+          }
+
+          // Accumulate input JSON deltas
+          if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta") {
+            const pending = pendingTools[event.index as number]
+            if (pending) {
+              pending.partialJson += (event.delta.partial_json as string) ?? ""
+            }
+          }
+
+          // Fire PostToolUse after block_stop for tool_use blocks
+          if (event.type === "content_block_stop") {
+            const pending = pendingTools[event.index as number]
+            if (pending) {
+              let toolInput: Record<string, unknown> = {}
+              try { toolInput = JSON.parse(pending.partialJson) } catch { /* empty input */ }
               for (const matcher of postToolUseHooks) {
                 for (const hookFn of matcher.hooks) {
                   await hookFn({
                     hook_event_name: "PostToolUse",
-                    tool_name: block.name,
-                    tool_input: block.input,
-                    tool_response: `Success: ${block.name}`,
-                    tool_use_id: block.id,
+                    tool_name: pending.name,
+                    tool_input: toolInput,
+                    tool_response: `Success: ${pending.name}`,
+                    tool_use_id: pending.id,
                   })
                 }
               }
-            }
-          }
-        }
-
-        // For streaming: fire PostToolUse after tool_use content_block_start
-        if (msg.type === "stream_event" && postToolUseHooks) {
-          const event = msg.event
-          if (event.type === "content_block_start" && event.content_block?.type === "tool_use" && event.content_block?.name?.startsWith("mcp__")) {
-            const toolName = event.content_block.name
-            const toolInput = event.content_block.input || {}
-            const toolId = event.content_block.id
-            for (const matcher of postToolUseHooks) {
-              for (const hookFn of matcher.hooks) {
-                await hookFn({
-                  hook_event_name: "PostToolUse",
-                  tool_name: toolName,
-                  tool_input: toolInput,
-                  tool_response: `Success: ${toolName}`,
-                  tool_use_id: toolId,
-                })
-              }
+              delete pendingTools[event.index as number]
             }
           }
         }
@@ -124,7 +129,7 @@ async function postStream(app: any, body: any) {
 
 describe("File change visibility: PostToolUse hook registration", () => {
   beforeEach(() => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
     capturedQueryParams = null
     clearSessionCache()
   })
@@ -208,11 +213,11 @@ describe("File change visibility: non-streaming response", () => {
     // Simulate SDK executing mcp__opencode__write internally, then returning text
     mockMessages = [
       // First the SDK calls the write tool (internal, won't be in final content)
-      assistantMessage([
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_w1", name: "mcp__opencode__write", input: { path: "src/new-file.ts", content: "export const x = 1" } },
-      ]),
+      ], { stopReason: "tool_use" }),
       // Then SDK returns the text response after tool execution
-      assistantMessage([
+      ...assistantStreamEvents([
         { type: "text", text: "I created the file for you." },
       ]),
     ]
@@ -234,10 +239,10 @@ describe("File change visibility: non-streaming response", () => {
 
   it("should append file change summary when files are edited", async () => {
     mockMessages = [
-      assistantMessage([
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_e1", name: "mcp__opencode__edit", input: { path: "src/existing.ts", oldString: "foo", newString: "bar" } },
-      ]),
-      assistantMessage([
+      ], { stopReason: "tool_use" }),
+      ...assistantStreamEvents([
         { type: "text", text: "I fixed the bug." },
       ]),
     ]
@@ -258,10 +263,10 @@ describe("File change visibility: non-streaming response", () => {
 
   it("should not include summary when only reads occur", async () => {
     mockMessages = [
-      assistantMessage([
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_r1", name: "mcp__opencode__read", input: { path: "README.md" } },
-      ]),
-      assistantMessage([
+      ], { stopReason: "tool_use" }),
+      ...assistantStreamEvents([
         { type: "text", text: "The README says hello." },
       ]),
     ]
@@ -281,16 +286,16 @@ describe("File change visibility: non-streaming response", () => {
 
   it("should show multiple file changes", async () => {
     mockMessages = [
-      assistantMessage([
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_w1", name: "mcp__opencode__write", input: { path: "src/a.ts", content: "a" } },
-      ]),
-      assistantMessage([
+      ], { stopReason: "tool_use" }),
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_e1", name: "mcp__opencode__edit", input: { path: "src/b.ts", oldString: "x", newString: "y" } },
-      ]),
-      assistantMessage([
+      ], { stopReason: "tool_use" }),
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_w2", name: "mcp__opencode__write", input: { path: "src/c.ts", content: "c" } },
-      ]),
-      assistantMessage([
+      ], { stopReason: "tool_use" }),
+      ...assistantStreamEvents([
         { type: "text", text: "All done." },
       ]),
     ]
@@ -459,7 +464,7 @@ describe("File change visibility: MERIDIAN_NO_FILE_CHANGES opt-out", () => {
 
   it("should suppress PostToolUse hook registration when MERIDIAN_NO_FILE_CHANGES=1", async () => {
     process.env.MERIDIAN_NO_FILE_CHANGES = "1"
-    mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done" }])
 
     const app = createTestApp()
     await post(app, {
@@ -475,10 +480,10 @@ describe("File change visibility: MERIDIAN_NO_FILE_CHANGES opt-out", () => {
   it("should suppress file change summary in non-streaming response when MERIDIAN_NO_FILE_CHANGES=1", async () => {
     process.env.MERIDIAN_NO_FILE_CHANGES = "1"
     mockMessages = [
-      assistantMessage([
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_w1", name: "mcp__opencode__write", input: { path: "src/new-file.ts", content: "export const x = 1" } },
-      ]),
-      assistantMessage([{ type: "text", text: "I created the file." }]),
+      ], { stopReason: "tool_use" }),
+      ...assistantStreamEvents([{ type: "text", text: "I created the file." }]),
     ]
 
     const app = createTestApp()
@@ -538,10 +543,10 @@ describe("File change visibility: MERIDIAN_NO_FILE_CHANGES opt-out", () => {
   it("should suppress summary when CLAUDE_PROXY_NO_FILE_CHANGES=1 (fallback env var)", async () => {
     process.env.CLAUDE_PROXY_NO_FILE_CHANGES = "1"
     mockMessages = [
-      assistantMessage([
+      ...assistantStreamEvents([
         { type: "tool_use", id: "toolu_w3", name: "mcp__opencode__write", input: { path: "src/f.ts", content: "x" } },
-      ]),
-      assistantMessage([{ type: "text", text: "Done." }]),
+      ], { stopReason: "tool_use" }),
+      ...assistantStreamEvents([{ type: "text", text: "Done." }]),
     ]
 
     const app = createTestApp()

@@ -18,7 +18,7 @@ import {
   blockStop,
   messageDelta,
   messageStop,
-  assistantMessage,
+  assistantStreamEvents,
   parseSSE,
 } from "./helpers"
 
@@ -96,12 +96,10 @@ describe("Integration: Full Anthropic API tool loop", () => {
   })
 
   it("Step 1: Initial request → Claude responds with tool_use", async () => {
-    mockMessages = [
-      assistantMessage([
-        { type: "text", text: "I'll read that file." },
-        { type: "tool_use", id: "toolu_abc", name: "Read", input: { file_path: "package.json" } },
-      ]),
-    ]
+    mockMessages = assistantStreamEvents([
+      { type: "text", text: "I'll read that file." },
+      { type: "tool_use", id: "toolu_abc", name: "Read", input: { file_path: "package.json" } },
+    ], { stopReason: "tool_use" })
 
     const response = await post(app, {
       model: "claude-sonnet-4-5",
@@ -126,11 +124,9 @@ describe("Integration: Full Anthropic API tool loop", () => {
   })
 
   it("Step 2: Send tool_result → Claude responds with final text", async () => {
-    mockMessages = [
-      assistantMessage([
-        { type: "text", text: "The project is meridian version 1.1.0" },
-      ]),
-    ]
+    mockMessages = assistantStreamEvents([
+      { type: "text", text: "The project is meridian version 1.1.0" },
+    ])
 
     const response = await post(app, {
       model: "claude-sonnet-4-5",
@@ -160,12 +156,10 @@ describe("Integration: Full Anthropic API tool loop", () => {
   })
 
   it("Step 3: Error tool_result → Claude recovers", async () => {
-    mockMessages = [
-      assistantMessage([
-        { type: "text", text: "I see the agent type was invalid. Let me try with a different approach." },
-        { type: "tool_use", id: "toolu_retry", name: "Bash", input: { command: "cat README.md | head -5" } },
-      ]),
-    ]
+    mockMessages = assistantStreamEvents([
+      { type: "text", text: "I see the agent type was invalid. Let me try with a different approach." },
+      { type: "tool_use", id: "toolu_retry", name: "Bash", input: { command: "cat README.md | head -5" } },
+    ], { stopReason: "tool_use" })
 
     const response = await post(app, {
       model: "claude-sonnet-4-5",
@@ -275,9 +269,7 @@ describe("Integration: Concurrent subagent requests", () => {
   })
 
   beforeEach(() => {
-    mockMessages = [
-      assistantMessage([{ type: "text", text: "Done." }]),
-    ]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Done." }])
   })
 
   it("should handle 3 concurrent requests (parent + 2 subagents)", async () => {

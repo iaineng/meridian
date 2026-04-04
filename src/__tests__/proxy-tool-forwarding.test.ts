@@ -21,7 +21,7 @@ import {
   blockStop,
   messageDelta,
   messageStop,
-  assistantMessage,
+  assistantStreamEvents,
   makeRequest,
   parseSSE,
   READ_TOOL,
@@ -237,12 +237,13 @@ describe("Phase 1: Non-streaming - tool_use forwarding", () => {
   })
 
   it("should include tool_use blocks in non-streaming response", async () => {
-    mockMessages = [
-      assistantMessage([
+    mockMessages = assistantStreamEvents(
+      [
         { type: "text", text: "Let me read that." },
         { type: "tool_use", id: "toolu_ns1", name: "Read", input: { file_path: "test.ts" } },
-      ]),
-    ]
+      ],
+      { stopReason: "tool_use" }
+    )
 
     const app = createTestApp()
     const response = await postMessages(app, makeRequest({ stream: false }))
@@ -259,11 +260,10 @@ describe("Phase 1: Non-streaming - tool_use forwarding", () => {
   })
 
   it("should return tool_use-only responses without fallback text", async () => {
-    mockMessages = [
-      assistantMessage([
-        { type: "tool_use", id: "toolu_ns2", name: "Bash", input: { command: "ls" } },
-      ]),
-    ]
+    mockMessages = assistantStreamEvents(
+      [{ type: "tool_use", id: "toolu_ns2", name: "Bash", input: { command: "ls" } }],
+      { stopReason: "tool_use" }
+    )
 
     const app = createTestApp()
     const response = await postMessages(app, makeRequest({ stream: false }))
@@ -276,11 +276,10 @@ describe("Phase 1: Non-streaming - tool_use forwarding", () => {
   })
 
   it("should set stop_reason to tool_use when response contains tool_use blocks", async () => {
-    mockMessages = [
-      assistantMessage([
-        { type: "tool_use", id: "toolu_ns3", name: "Read", input: { file_path: "x.ts" } },
-      ]),
-    ]
+    mockMessages = assistantStreamEvents(
+      [{ type: "tool_use", id: "toolu_ns3", name: "Read", input: { file_path: "x.ts" } }],
+      { stopReason: "tool_use" }
+    )
 
     const app = createTestApp()
     const response = await postMessages(app, makeRequest({ stream: false }))
@@ -290,9 +289,10 @@ describe("Phase 1: Non-streaming - tool_use forwarding", () => {
   })
 
   it("should set stop_reason to end_turn for text-only responses", async () => {
-    mockMessages = [
-      assistantMessage([{ type: "text", text: "Here's the answer." }]),
-    ]
+    mockMessages = assistantStreamEvents(
+      [{ type: "text", text: "Here's the answer." }],
+      { stopReason: "end_turn" }
+    )
 
     const app = createTestApp()
     const response = await postMessages(app, makeRequest({ stream: false }))

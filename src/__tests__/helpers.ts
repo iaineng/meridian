@@ -111,6 +111,38 @@ export function assistantMessage(content: Array<Record<string, unknown>>): SDKMe
   } as SDKMessage
 }
 
+/** Convert an assistantMessage-style content array into a full stream event sequence.
+ *  Makes test migration from assistantMessage() trivial. */
+export function assistantStreamEvents(
+  content: Array<Record<string, unknown>>,
+  opts?: { stopReason?: string; usage?: Record<string, unknown>; messageId?: string }
+): SDKMessage[] {
+  const events: SDKMessage[] = [messageStart(opts?.messageId)]
+  content.forEach((block, i) => {
+    if (block.type === "text") {
+      events.push(textBlockStart(i))
+      if (block.text) events.push(textDelta(i, block.text as string))
+      events.push(blockStop(i))
+    } else if (block.type === "tool_use") {
+      events.push(toolUseBlockStart(i, block.name as string, block.id as string))
+      if (block.input !== undefined) events.push(inputJsonDelta(i, JSON.stringify(block.input)))
+      events.push(blockStop(i))
+    } else if (block.type === "thinking") {
+      events.push(streamEvent({ type: "content_block_start", index: i, content_block: { type: "thinking", thinking: "", signature: "" } }))
+      if (block.thinking) events.push(streamEvent({ type: "content_block_delta", index: i, delta: { type: "thinking_delta", thinking: block.thinking } }))
+      if (block.signature) events.push(streamEvent({ type: "content_block_delta", index: i, delta: { type: "signature_delta", signature: block.signature } }))
+      events.push(blockStop(i))
+    } else if (block.type === "server_tool_use") {
+      events.push(streamEvent({ type: "content_block_start", index: i, content_block: { type: "server_tool_use", id: block.id, name: block.name, input: {} } }))
+      if (block.input !== undefined) events.push(inputJsonDelta(i, JSON.stringify(block.input)))
+      events.push(blockStop(i))
+    }
+  })
+  events.push(messageDelta(opts?.stopReason ?? "end_turn"))
+  events.push(messageStop())
+  return events
+}
+
 // --- Request Factories ---
 
 /** Create a basic Anthropic API request body */
