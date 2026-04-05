@@ -13,8 +13,8 @@
 
 Meridian turns your Claude Max subscription into a local Anthropic API. Any tool that speaks the Anthropic or OpenAI protocol — OpenCode, OpenClaw, Crush, Cline, Aider, Pi, Droid, Open WebUI — connects to Meridian and gets Claude, powered by your existing subscription through the official Claude Code SDK.
 
-> [!NOTE]
-> **Renamed from `opencode-claude-max-proxy`.** If you're upgrading, see [`MIGRATION.md`](MIGRATION.md) for the checklist. Your existing sessions, env vars, and agent configs all continue to work.
+> [!IMPORTANT]
+> **Extra Usage billing fix (v0.x.x):** Previous versions defaulted Sonnet to `sonnet[1m]` (1M context), which is [always billed as Extra Usage](https://code.claude.com/docs/en/model-config#extended-context) on Max plans — even when regular usage isn't exhausted. Sonnet now defaults to 200k. If you're on an older version, update or set `MERIDIAN_SONNET_MODEL=sonnet` as a workaround. See [#255](https://github.com/rynfar/meridian/issues/255) for details.
 
 ## Quick Start
 
@@ -76,7 +76,8 @@ meridian setup
 This adds the Meridian plugin to your OpenCode global config (`~/.config/opencode/opencode.json`). The plugin enables:
 
 - **Session tracking** — reliable conversation continuity across requests
-- **Subagent model selection** — primary agents use `sonnet[1m]`; subagents automatically use `sonnet` (200k), preserving your 1M context rate-limit budget
+- **Safe model defaults** — Opus uses 1M context (included with Max subscription); Sonnet uses 200k to avoid Extra Usage charges ([details](#extended-context-billing))
+- **Subagent model selection** — subagents automatically use `sonnet`/`opus` (200k), preserving rate-limit budget
 
 If the plugin is missing, Meridian warns at startup and reports `"plugin": "not-configured"` in the health endpoint.
 
@@ -330,10 +331,10 @@ Implement the `AgentAdapter` interface in `src/proxy/adapters/`. See [`adapters/
 | `MERIDIAN_IDLE_TIMEOUT_SECONDS` | `CLAUDE_PROXY_IDLE_TIMEOUT_SECONDS` | `120` | HTTP keep-alive timeout |
 | `MERIDIAN_TELEMETRY_SIZE` | `CLAUDE_PROXY_TELEMETRY_SIZE` | `1000` | Telemetry ring buffer size |
 | `MERIDIAN_NO_FILE_CHANGES` | `CLAUDE_PROXY_NO_FILE_CHANGES` | unset | Disable "Files changed" summary in responses |
-| `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet[1m]`* | Force sonnet tier: `sonnet` (200k) or `sonnet[1m]` (1M). Set to `sonnet` if you hit 1M context rate limits |
+| `MERIDIAN_SONNET_MODEL` | `CLAUDE_PROXY_SONNET_MODEL` | `sonnet` | Sonnet context tier: `sonnet` (200k, default) or `sonnet[1m]` (1M, requires Extra Usage†) |
 | `MERIDIAN_DEFAULT_AGENT` | — | `opencode` | Default adapter for unrecognized agents: `opencode`, `pi`, `crush`, `droid`, `passthrough`. Requires restart. |
 
-*`sonnet[1m]` requires Max subscription with Extra Usage enabled. Falls back to `sonnet` automatically if not available.
+†Sonnet 1M requires Extra Usage on all plans including Max ([docs](https://code.claude.com/docs/en/model-config#extended-context)). Opus 1M is included with Max/Team/Enterprise at no extra cost.
 
 ## Endpoints
 
@@ -428,7 +429,7 @@ curl -X POST http://127.0.0.1:3456/auth/refresh
 ```
 
 **I'm hitting rate limits on 1M context. What do I do?**
-Set `MERIDIAN_SONNET_MODEL=sonnet` to use the 200k model for all requests. If you're using OpenCode with the Meridian plugin, subagents already use 200k automatically — only the primary agent uses 1M.
+Meridian defaults Sonnet to 200k context because Sonnet 1M is always billed as Extra Usage on Max plans — even when regular usage isn't exhausted. This is [Anthropic's intended billing model](https://code.claude.com/docs/en/model-config#extended-context), not a bug. Set `MERIDIAN_SONNET_MODEL=sonnet[1m]` to opt in if you have Extra Usage enabled and understand the billing implications. Opus defaults to 1M context, which is included with Max/Team/Enterprise subscriptions at no extra cost. Note: there is a [known upstream bug](https://github.com/anthropics/claude-code/issues/39841) where Claude Code incorrectly gates Opus 1M behind Extra Usage on Max — this is Anthropic's to fix.
 
 **Why does the health endpoint show `"plugin": "not-configured"`?**
 You haven't run `meridian setup`. Without the plugin, OpenCode requests won't have session tracking or subagent model selection. Run `meridian setup` and restart OpenCode.

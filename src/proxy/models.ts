@@ -49,21 +49,28 @@ export function mapModelToClaudeModel(model: string, subscriptionType?: string |
   // Using the base model preserves rate limit budget for the primary agent.
   const isSubagent = agentMode === "subagent"
 
+  // Opus [1m]: included with Max, Team, and Enterprise subscriptions per
+  // Anthropic docs (https://code.claude.com/docs/en/model-config#extended-context).
+  // Safe to default to [1m] for Max users — no Extra Usage charges.
+  // NOTE: There is a known upstream bug (anthropics/claude-code#39841) where
+  // Claude Code currently gates opus[1m] behind Extra Usage even on Max.
+  // We follow the documented behavior; the bug is Anthropic's to fix.
   if (model.includes("opus")) {
     if (use1m && !isSubagent && !isExtendedContextKnownUnavailable()) return "opus[1m]"
     return "opus"
   }
 
+  // Sonnet [1m]: requires Extra Usage on Max plans per Anthropic docs.
+  // Unlike Opus, Sonnet 1M is NOT included with the Max subscription —
+  // it is always billed as Extra Usage. Default to sonnet (200k) to
+  // avoid unexpected charges. Users opt in via MERIDIAN_SONNET_MODEL=sonnet[1m].
   const sonnetOverride = process.env.MERIDIAN_SONNET_MODEL ?? process.env.CLAUDE_PROXY_SONNET_MODEL
-  if (sonnetOverride === "sonnet" || sonnetOverride === "sonnet[1m]") return sonnetOverride
+  if (sonnetOverride === "sonnet[1m]") {
+    if (!use1m || isSubagent || isExtendedContextKnownUnavailable()) return "sonnet"
+    return "sonnet[1m]"
+  }
 
-  if (!use1m) return "sonnet"
-  if (isSubagent) return "sonnet"
-  // Skip [1m] during the cooldown window after a confirmed Extra Usage failure.
-  // After the window expires, this falls through to return [1m] once — probing
-  // whether Extra Usage has been enabled since last time.
-  if (isExtendedContextKnownUnavailable()) return "sonnet"
-  return subscriptionType === "max" ? "sonnet[1m]" : "sonnet"
+  return "sonnet"
 }
 
 // ---------------------------------------------------------------------------

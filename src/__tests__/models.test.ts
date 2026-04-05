@@ -27,9 +27,10 @@ describe("mapModelToClaudeModel", () => {
     expect(mapModelToClaudeModel("haiku")).toBe("haiku")
   })
 
-  it("maps sonnet 4.6 models to sonnet[1m] for max subscriptions", () => {
-    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet[1m]")
-    expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet[1m]")
+  it("maps sonnet 4.6 models to sonnet (200k) for max subscriptions by default", () => {
+    // Sonnet [1m] requires Extra Usage on Max — default to 200k to avoid charges
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
+    expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet")
   })
 
   it("maps sonnet 4.5 models to sonnet (no 1M regardless of subscription)", () => {
@@ -49,12 +50,22 @@ describe("mapModelToClaudeModel", () => {
     expect(mapModelToClaudeModel("", undefined)).toBe("sonnet")
   })
 
-  it("respects explicit sonnet model override", () => {
+  it("respects explicit sonnet[1m] override when opted in", () => {
     process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet[1m]"
     expect(mapModelToClaudeModel("sonnet", "team")).toBe("sonnet[1m]")
+    expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet[1m]")
+  })
 
-    process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet"
+  it("sonnet[1m] override still skips [1m] for subagents", () => {
+    process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet[1m]"
+    expect(mapModelToClaudeModel("sonnet", "max", "subagent")).toBe("sonnet")
+  })
+
+  it("sonnet[1m] override still skips [1m] during cooldown", () => {
+    process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet[1m]"
+    recordExtendedContextUnavailable()
     expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet")
+    resetExtendedContextUnavailable()
   })
 
   describe("subagent mode", () => {
@@ -72,21 +83,22 @@ describe("mapModelToClaudeModel", () => {
       expect(mapModelToClaudeModel("claude-haiku-4-5", "max", "subagent")).toBe("haiku")
     })
 
-    it("primary agents still get 1m models for max subscription", () => {
-      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", "primary")).toBe("sonnet[1m]")
+    it("primary agents get opus[1m] but sonnet (200k) for max subscription", () => {
+      // Opus [1m] is included with Max; Sonnet [1m] requires Extra Usage
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", "primary")).toBe("sonnet")
       expect(mapModelToClaudeModel("claude-opus-4-6", "max", "primary")).toBe("opus[1m]")
     })
 
     it("null or missing agentMode behaves as primary", () => {
-      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", null)).toBe("sonnet[1m]")
-      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", undefined)).toBe("sonnet[1m]")
-      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet[1m]")
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", null)).toBe("sonnet")
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", undefined)).toBe("sonnet")
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
     })
 
-    it("env var override takes priority over subagent mode for sonnet", () => {
+    it("env var override to sonnet[1m] is still blocked for subagents", () => {
       process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet[1m]"
-      // Override wins — useful if operator explicitly wants 1m everywhere
-      expect(mapModelToClaudeModel("sonnet", "max", "subagent")).toBe("sonnet[1m]")
+      // Subagents always use base model even with override
+      expect(mapModelToClaudeModel("sonnet", "max", "subagent")).toBe("sonnet")
     })
   })
 })
@@ -146,10 +158,19 @@ describe("Extra Usage cooldown", () => {
     expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
   })
 
-  it("mapModelToClaudeModel returns sonnet[1m] when cooldown is cleared", () => {
+  it("sonnet stays sonnet even when cooldown is cleared (default is 200k)", () => {
+    recordExtendedContextUnavailable()
+    resetExtendedContextUnavailable()
+    // Sonnet defaults to 200k now — [1m] requires explicit opt-in
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
+  })
+
+  it("sonnet[1m] override works when cooldown is cleared", () => {
+    process.env.MERIDIAN_SONNET_MODEL = "sonnet[1m]"
     recordExtendedContextUnavailable()
     resetExtendedContextUnavailable()
     expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet[1m]")
+    delete process.env.MERIDIAN_SONNET_MODEL
   })
 
   it("isExtendedContextKnownUnavailable is false after cooldown expires", () => {

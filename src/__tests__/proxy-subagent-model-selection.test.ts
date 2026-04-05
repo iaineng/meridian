@@ -75,9 +75,10 @@ describe("Subagent model selection", () => {
     capturedModel = null
   })
 
-  it("primary agent gets sonnet[1m] for max subscription", async () => {
+  it("primary agent gets sonnet (200k) for max subscription", async () => {
+    // Sonnet [1m] requires Extra Usage on Max — default to 200k
     await post(BASE_REQUEST, { "x-opencode-agent-mode": "primary" })
-    expect(capturedModel).toBe("sonnet[1m]")
+    expect(capturedModel).toBe("sonnet")
   })
 
   it("subagent gets base sonnet regardless of subscription", async () => {
@@ -87,7 +88,7 @@ describe("Subagent model selection", () => {
 
   it("no header behaves as primary (default)", async () => {
     await post(BASE_REQUEST)
-    expect(capturedModel).toBe("sonnet[1m]")
+    expect(capturedModel).toBe("sonnet")
   })
 
   it("subagent with opus gets base opus", async () => {
