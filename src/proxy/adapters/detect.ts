@@ -21,8 +21,14 @@ const ADAPTER_MAP: Record<string, AgentAdapter> = {
   pi: piAdapter,
 }
 
-const defaultAdapter: AgentAdapter =
-  ADAPTER_MAP[process.env.MERIDIAN_DEFAULT_AGENT || ""] ?? openCodeAdapter
+const envDefault = process.env.MERIDIAN_DEFAULT_AGENT || ""
+if (envDefault && !ADAPTER_MAP[envDefault]) {
+  console.warn(
+    `[meridian] Unknown MERIDIAN_DEFAULT_AGENT="${envDefault}". ` +
+    `Valid values: ${Object.keys(ADAPTER_MAP).join(", ")}. Falling back to opencode.`
+  )
+}
+const defaultAdapter: AgentAdapter = ADAPTER_MAP[envDefault] ?? openCodeAdapter
 
 /**
  * Detect LiteLLM requests via User-Agent or x-litellm-* headers.
@@ -42,18 +48,30 @@ function isLiteLLMRequest(c: Context): boolean {
  *
  * Detection rules (evaluated in order):
  * 1. x-meridian-agent header               → explicit adapter override
- * 2. User-Agent starts with "factory-cli/"  → Droid adapter
- * 3. User-Agent starts with "Charm-Crush/"  → Crush adapter
- * 4. litellm/* UA or x-litellm-* headers   → LiteLLM passthrough adapter
- * 5. Default                                → MERIDIAN_DEFAULT_AGENT env var, or OpenCode
+ * 2. x-opencode-session or x-session-affinity header → OpenCode adapter
+ * 3. User-Agent starts with "opencode/"     → OpenCode adapter
+ * 4. User-Agent starts with "factory-cli/"  → Droid adapter
+ * 5. User-Agent starts with "Charm-Crush/"  → Crush adapter
+ * 6. litellm/* UA or x-litellm-* headers   → LiteLLM passthrough adapter
+ * 7. Default                                → MERIDIAN_DEFAULT_AGENT env var, or OpenCode
  */
 export function detectAdapter(c: Context): AgentAdapter {
-  const agentOverride = c.req.header("x-meridian-agent")
+  const agentOverride = c.req.header("x-meridian-agent")?.toLowerCase()
   if (agentOverride && ADAPTER_MAP[agentOverride]) {
     return ADAPTER_MAP[agentOverride]!
   }
 
+  // OpenCode: plugin injects x-opencode-session; newer versions use x-session-affinity
+  if (c.req.header("x-opencode-session") || c.req.header("x-session-affinity")) {
+    return openCodeAdapter
+  }
+
   const userAgent = c.req.header("user-agent") || ""
+
+  // OpenCode User-Agent: opencode/<version>
+  if (userAgent.startsWith("opencode/")) {
+    return openCodeAdapter
+  }
 
   if (userAgent.startsWith("factory-cli/")) {
     return droidAdapter

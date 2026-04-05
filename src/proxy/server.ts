@@ -192,6 +192,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     const requestStartAt = Date.now()
 
     return withClaudeLogContext({ requestId: requestMeta.requestId, endpoint: requestMeta.endpoint }, async () => {
+      // Hoist adapter detection before try so it's available in the catch block for telemetry
+      const adapter = detectAdapter(c)
       try {
         const body = await c.req.json()
 
@@ -206,7 +208,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const authStatus = await getClaudeAuthStatusAsync()
         const agentMode = c.req.header("x-opencode-agent-mode") ?? null
         let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType, agentMode)
-        const adapter = detectAdapter(c)
         // Allow adapter to override streaming preference (e.g. LiteLLM requires non-streaming)
         const adapterStreamPref = adapter.prefersStreaming?.(body)
         const stream = adapterStreamPref !== undefined ? adapterStreamPref : (body.stream ?? false)
@@ -281,7 +282,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         }).join(" → ")
         const lineageType = lineageResult.type === "diverged" && !cachedSession ? "new" : lineageResult.type
         const msgCount = Array.isArray(body.messages) ? body.messages.length : 0
-        const requestLogLine = `${requestMeta.requestId} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""}${agentMode ? ` agent=${agentMode}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
+        const requestLogLine = `${requestMeta.requestId} adapter=${adapter.name} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""}${agentMode ? ` agent=${agentMode}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
         console.error(`[PROXY] ${requestLogLine} msgs=${msgSummary}`)
         diagnosticLog.session(`${requestLogLine}`, requestMeta.requestId)
 
@@ -804,6 +805,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           telemetryStore.record({
             requestId: requestMeta.requestId,
             timestamp: Date.now(),
+            adapter: adapter.name,
             model,
             requestModel: body.model || undefined,
             mode: "non-stream",
@@ -1337,6 +1339,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 telemetryStore.record({
                   requestId: requestMeta.requestId,
                   timestamp: Date.now(),
+                  adapter: adapter.name,
                   model,
                   requestModel: body.model || undefined,
                   mode: "stream",
@@ -1447,6 +1450,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         telemetryStore.record({
           requestId: requestMeta.requestId,
           timestamp: Date.now(),
+          adapter: adapter.name,
           model: "unknown",
           requestModel: undefined,
           mode: "non-stream",

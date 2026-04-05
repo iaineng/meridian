@@ -236,7 +236,7 @@ function render(s, reqs, logs) {
     + '<span><span class="legend-dot" style="background:var(--ttfb)"></span>TTFB</span>'
     + '<span><span class="legend-dot" style="background:var(--upstream)"></span>Response</span>'
     + '</div>'
-    + '<table><thead><tr><th>Time</th><th>Model</th><th>Mode</th><th>Session</th><th>Status</th>'
+    + '<table><thead><tr><th>Time</th><th>Adapter</th><th>Model</th><th>Mode</th><th>Session</th><th>Status</th>'
     + '<th>Queue</th><th>Proxy</th><th>TTFB</th><th>Total</th><th>Waterfall</th></tr></thead><tbody>';
 
   const maxTotal = Math.max(...reqs.map(r => r.totalDurationMs), 1);
@@ -256,6 +256,7 @@ function render(s, reqs, logs) {
 
     html += '<tr>'
       + '<td class="mono">' + ago(r.timestamp) + '</td>'
+      + '<td>' + (r.adapter || '—') + '</td>'
       + '<td>' + (r.requestModel || r.model) + '<br><span style="font-size:10px;color:var(--muted)">' + r.model + '</span></td>'
       + '<td>' + r.mode + '</td>'
       + '<td class="mono">' + sessionShort + ' ' + lineageBadge + '<br><span style="font-size:10px;color:var(--muted)">' + msgCount + ' msgs</span></td>'

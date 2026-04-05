@@ -37,6 +37,7 @@ const PI_ALLOWED_MCP_TOOLS: readonly string[] = [
   `mcp__${PI_MCP_SERVER_NAME}__write`,
   `mcp__${PI_MCP_SERVER_NAME}__edit`,
   `mcp__${PI_MCP_SERVER_NAME}__bash`,
+  `mcp__${PI_MCP_SERVER_NAME}__glob`,
   `mcp__${PI_MCP_SERVER_NAME}__grep`,
 ]
 
