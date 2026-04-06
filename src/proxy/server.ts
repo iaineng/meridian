@@ -38,6 +38,7 @@ import {
 // Re-export for backwards compatibility (existing tests import from here)
 
 import { lookupSession, storeSession, clearSessionCache, getMaxSessionsLimit, evictSession, getSessionByClaudeId } from "./session/cache"
+import { lookupSessionRecovery, listStoredSessions } from "./sessionStore"
 // Re-export for backwards compatibility (existing tests import from here)
 export { computeLineageHash, hashMessage, computeMessageHashes }
 export { clearSessionCache, getMaxSessionsLimit }
@@ -321,6 +322,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const requestLogLine = `${requestMeta.requestId} adapter=${adapter.name} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""}${agentMode ? ` agent=${agentMode}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
         console.error(`[PROXY] ${requestLogLine} msgs=${msgSummary}`)
         diagnosticLog.session(`${requestLogLine}`, requestMeta.requestId)
+
+        // Recovery logging: when a session diverges, check if the store has a
+        // previous session ID that the user can recover via `claude --resume`.
+        if (lineageResult.type === "diverged" && profileSessionId) {
+          const recovery = lookupSessionRecovery(profileSessionId)
+          if (recovery) {
+            const prevId = recovery.previousClaudeSessionId || recovery.claudeSessionId
+            const recoveryMsg = `${requestMeta.requestId} SESSION RECOVERY: previous conversation available. Run: claude --resume ${prevId}`
+            console.error(`[PROXY] ${recoveryMsg}`)
+            diagnosticLog.session(recoveryMsg, requestMeta.requestId)
+          }
+        }
 
         claudeLog("request.received", {
           model,
@@ -1765,6 +1778,51 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       return c.json({ error: "No usage data available for this session" }, 404)
     }
     return c.json({ session_id: claudeSessionId, context_usage: session.contextUsage })
+  })
+
+  // --- Session Recovery ---
+  // Returns recovery information for a session, including CLI commands and file paths
+  // to locate the conversation if context was lost due to compaction/restart bugs.
+  app.get("/v1/sessions/recover", (c) => {
+    const sessions = listStoredSessions()
+    if (sessions.length === 0) {
+      return c.json({ error: "No sessions found in store" }, 404)
+    }
+    return c.json({
+      sessions: sessions.map(s => ({
+        key: s.key,
+        claudeSessionId: s.claudeSessionId,
+        previousClaudeSessionId: s.previousClaudeSessionId,
+        createdAt: new Date(s.createdAt).toISOString(),
+        lastUsedAt: new Date(s.lastUsedAt).toISOString(),
+        messageCount: s.messageCount,
+        recoverCommand: `claude --resume ${s.claudeSessionId}`,
+        ...(s.previousClaudeSessionId ? {
+          recoverPreviousCommand: `claude --resume ${s.previousClaudeSessionId}`,
+        } : {}),
+      })),
+    })
+  })
+
+  app.get("/v1/sessions/:key/recover", (c) => {
+    const key = c.req.param("key")
+    const recovery = lookupSessionRecovery(key)
+    if (!recovery) {
+      return c.json({ error: "Session not found", key }, 404)
+    }
+    return c.json({
+      key,
+      claudeSessionId: recovery.claudeSessionId,
+      previousClaudeSessionId: recovery.previousClaudeSessionId,
+      createdAt: new Date(recovery.createdAt).toISOString(),
+      lastUsedAt: new Date(recovery.lastUsedAt).toISOString(),
+      messageCount: recovery.messageCount,
+      recoverCommand: `claude --resume ${recovery.claudeSessionId}`,
+      ...(recovery.previousClaudeSessionId ? {
+        recoverPreviousCommand: `claude --resume ${recovery.previousClaudeSessionId}`,
+        note: "Previous session was replaced — if your current session has lost context, try the previous session ID.",
+      } : {}),
+    })
   })
 
   // Catch-all: log unhandled requests
