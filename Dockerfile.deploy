@@ -32,8 +32,11 @@ RUN userdel -r node 2>/dev/null; \
     && mkdir -p /home/claude/.claude /home/claude/.cache/meridian \
     && chown -R claude:claude /home/claude
 
-# Install Claude Code via npm
-RUN npm install -g @anthropic-ai/claude-code@2.1.91
+# Install Claude Code (npm by default, or native via --build-arg CLAUDE_INSTALL_METHOD=native)
+ARG CLAUDE_INSTALL_METHOD=npm
+RUN if [ "$CLAUDE_INSTALL_METHOD" = "npm" ]; then \
+      npm install -g @anthropic-ai/claude-code@2.1.92; \
+    fi
 
 WORKDIR /app
 
@@ -47,6 +50,13 @@ RUN sed -i 's/\r$//' ./bin/docker-entrypoint.sh ./bin/claude-proxy-supervisor.sh
     && chmod +x ./bin/docker-entrypoint.sh ./bin/claude-proxy-supervisor.sh
 
 USER claude
+
+# Native Claude Code install (runs as claude user; no-op when CLAUDE_INSTALL_METHOD=npm)
+RUN if [ "$CLAUDE_INSTALL_METHOD" = "native" ]; then \
+      curl -fsSL https://claude.ai/install.sh | bash; \
+    fi
+
+ENV PATH="/home/claude/.claude/bin:${PATH}"
 
 EXPOSE 3456
 

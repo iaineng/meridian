@@ -19,6 +19,8 @@
 #   ./bin/deploy.sh --proxy http://host:port          # use HTTP proxy
 #   ./bin/deploy.sh --proxy socks5://host:port        # use SOCKS5 proxy
 #   ./bin/deploy.sh --proxy http://host:port --no-proxy "localhost,127.0.0.1"
+#   ./bin/deploy.sh --console                          # attach to default instance shell
+#   ./bin/deploy.sh --console --id 2                   # attach to instance #2 shell
 #   ./bin/deploy.sh --id 3 --auth                     # re-auth instance #3
 #   ./bin/deploy.sh --id 1 --upgrade                  # upgrade instance #1
 #
@@ -49,6 +51,10 @@ SKIP_AUTH=false
 NETWORK_PROXY=""
 NETWORK_NO_PROXY=""
 INSTANCE_ID=""
+CLEAN_MODE=false
+STATUS_MODE=false
+NATIVE_CLAUDE=false
+CONSOLE_MODE=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -68,6 +74,10 @@ while [[ $# -gt 0 ]]; do
       NETWORK_PROXY="$2"; shift 2 ;;
     --no-proxy)
       NETWORK_NO_PROXY="$2"; shift 2 ;;
+    --clean)     CLEAN_MODE=true; shift ;;
+    --status)    STATUS_MODE=true; shift ;;
+    --console)   CONSOLE_MODE=true; SKIP_BUILD=true; shift ;;
+    --native-claude) NATIVE_CLAUDE=true; shift ;;
     --help|-h)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -80,14 +90,23 @@ while [[ $# -gt 0 ]]; do
       echo "  --no-build            Skip Docker image build"
       echo "  --proxy URL           HTTP/SOCKS5 proxy (e.g. http://host:port, socks5://host:port)"
       echo "  --no-proxy LIST       Comma-separated proxy bypass list"
+      echo "  --console             Attach to a running container's shell (use with --id)"
+      echo "  --clean               Remove container and volumes for an instance"
+      echo "  --status              Show status of all instances (default when no flags)"
+      echo "  --native-claude       Use native install (curl) instead of npm for Claude Code"
       echo "  --help                Show this help"
       echo ""
       echo "Examples:"
-      echo "  $0                    # default instance → port 3456"
+      echo "  $0                    # show status of all instances"
       echo "  $0 --id 1            # instance 1 → port 3457"
       echo "  $0 --upgrade          # rebuild + restart (code/SDK update)"
       echo "  $0 --id 2 --upgrade  # upgrade instance 2"
       echo "  $0 --id 2 --auth     # re-auth instance 2"
+      echo "  $0 --console          # attach to default instance shell"
+      echo "  $0 --console --id 2  # attach to instance 2 shell"
+      echo "  $0 --clean            # clean default instance"
+      echo "  $0 --clean --id 2    # clean instance 2"
+      echo "  $0 --native-claude   # build with native Claude Code install"
       echo ""
       echo "Environment variables:"
       echo "  MERIDIAN_PORT    Base port (default: 3456), offset by --id N"
@@ -101,6 +120,81 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ── Default: show status panel when no action flags given ──────
+if [ "$STATUS_MODE" = false ] && [ "$CLEAN_MODE" = false ] && \
+   [ "$CONSOLE_MODE" = false ] && \
+   [ "$AUTH_ONLY" = false ] && [ "$SKIP_AUTH" = false ] && \
+   [ "$SKIP_BUILD" = false ] && [ -z "$INSTANCE_ID" ] && \
+   [ "$NATIVE_CLAUDE" = false ]; then
+  STATUS_MODE=true
+fi
+
+# ── Status panel ─────────────────────────────────────────────
+if [ "$STATUS_MODE" = true ]; then
+  echo "==========================================="
+  echo "  Meridian Instance Status"
+  echo "==========================================="
+  echo ""
+
+  CONTAINERS=$(docker ps -a --filter "name=^claude-max-proxy" --format '{{.Names}}' 2>/dev/null | sort)
+
+  if [ -z "$CONTAINERS" ]; then
+    echo "  No instances found."
+    echo ""
+    echo "  Deploy a new instance:"
+    echo "    $0 --id 0             # default instance → port 3456"
+    echo "    $0 --id 1             # instance 1 → port 3457"
+    exit 0
+  fi
+
+  printf "  %-10s %-25s %-10s %-7s %-8s %s\n" "Instance" "Container" "Status" "Port" "Health" "Uptime"
+  printf "  %-10s %-25s %-10s %-7s %-8s %s\n" "--------" "-------------------------" "--------" "-----" "------" "------"
+
+  for CNAME in $CONTAINERS; do
+    # Instance ID
+    if [ "$CNAME" = "claude-max-proxy" ]; then
+      INST_ID="default"
+    else
+      INST_ID="${CNAME##claude-max-proxy-}"
+    fi
+
+    # Status
+    CSTATUS=$(docker inspect --format '{{.State.Status}}' "$CNAME" 2>/dev/null || echo "unknown")
+
+    # Uptime (from docker ps Status field, e.g. "Up 2 hours (healthy)")
+    CUPTIME="-"
+    if [ "$CSTATUS" = "running" ]; then
+      CUPTIME=$(docker ps --filter "name=^${CNAME}$" --format '{{.Status}}' 2>/dev/null | sed 's/^Up //; s/ (.*//')
+    fi
+
+    # Port
+    MAPPED_PORT=$(docker port "$CNAME" 3456 2>/dev/null | head -1 | sed 's/.*://')
+    [ -z "$MAPPED_PORT" ] && MAPPED_PORT="-"
+
+    # Health check
+    CHEALTH="-"
+    if [ "$CSTATUS" = "running" ] && [ "$MAPPED_PORT" != "-" ]; then
+      if curl -sf "http://127.0.0.1:${MAPPED_PORT}/health" > /dev/null 2>&1; then
+        CHEALTH="✓"
+      else
+        CHEALTH="✗"
+      fi
+    fi
+
+    printf "  %-10s %-25s %-10s %-7s %-8s %s\n" "$INST_ID" "$CNAME" "$CSTATUS" "$MAPPED_PORT" "$CHEALTH" "$CUPTIME"
+  done
+
+  echo ""
+  echo "  Commands:"
+  echo "    $0 --id N             # deploy/redeploy instance N"
+  echo "    $0 --id N --upgrade   # rebuild + restart instance N"
+  echo "    $0 --id N --auth      # re-authenticate instance N"
+  echo "    $0 --id N --console   # attach to instance N shell"
+  echo "    $0 --clean --id N     # remove instance N (container + volumes)"
+  echo "==========================================="
+  exit 0
+fi
 
 # ── Derive names from instance ID ───────────────────────────────
 BASE_IMAGE="${IMAGE_NAME:-claude-max-proxy}"
@@ -119,6 +213,78 @@ fi
 
 AUTH_VOLUME="${CONTAINER_NAME}-auth"
 SESSION_VOLUME="${CONTAINER_NAME}-sessions"
+
+# ── Clean mode ───────────────────────────────────────────────
+if [ "$CLEAN_MODE" = true ]; then
+  echo "==========================================="
+  echo "  Clean instance: ${INSTANCE_ID:-default}"
+  echo "==========================================="
+  echo ""
+  echo "  The following resources will be removed:"
+
+  HAS_CONTAINER=false
+  HAS_AUTH_VOL=false
+  HAS_SESSION_VOL=false
+
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo "    Container: $CONTAINER_NAME"
+    HAS_CONTAINER=true
+  fi
+  if docker volume ls --format '{{.Name}}' | grep -q "^${AUTH_VOLUME}$"; then
+    echo "    Volume:    $AUTH_VOLUME"
+    HAS_AUTH_VOL=true
+  fi
+  if docker volume ls --format '{{.Name}}' | grep -q "^${SESSION_VOLUME}$"; then
+    echo "    Volume:    $SESSION_VOLUME"
+    HAS_SESSION_VOL=true
+  fi
+
+  if [ "$HAS_CONTAINER" = false ] && [ "$HAS_AUTH_VOL" = false ] && [ "$HAS_SESSION_VOL" = false ]; then
+    echo "    (nothing found)"
+    echo ""
+    echo "  Nothing to clean."
+    exit 0
+  fi
+
+  echo ""
+  read -r -p "  Proceed? [y/N] " yn
+  case "$yn" in
+    [Yy]*)
+      if [ "$HAS_CONTAINER" = true ]; then
+        echo "  Removing container..."
+        docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1 || true
+      fi
+      if [ "$HAS_AUTH_VOL" = true ]; then
+        echo "  Removing auth volume..."
+        docker volume rm "$AUTH_VOLUME" > /dev/null 2>&1 || true
+      fi
+      if [ "$HAS_SESSION_VOL" = true ]; then
+        echo "  Removing session volume..."
+        docker volume rm "$SESSION_VOLUME" > /dev/null 2>&1 || true
+      fi
+      echo ""
+      echo "  Instance ${INSTANCE_ID:-default} cleaned."
+      ;;
+    *)
+      echo "  Aborted."
+      ;;
+  esac
+  exit 0
+fi
+
+# ── Console mode ─────────────────────────────────────────────
+if [ "$CONSOLE_MODE" = true ]; then
+  if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo "Error: Container '$CONTAINER_NAME' is not running."
+    echo "  Deploy it first:  $0 --id ${INSTANCE_ID:-0}"
+    exit 1
+  fi
+  echo "  Attaching to container '$CONTAINER_NAME'..."
+  echo "  Type 'exit' to detach."
+  echo ""
+  docker exec -it "$CONTAINER_NAME" bash
+  exit 0
+fi
 
 echo "==========================================="
 echo "  Instance config"
@@ -177,7 +343,11 @@ if [ "$SKIP_BUILD" = false ]; then
   echo "==========================================="
   echo "  [1/3] Building Docker image..."
   echo "==========================================="
-  docker build -f Dockerfile.deploy -t "$IMAGE_NAME" .
+  BUILD_ARGS=()
+  if [ "$NATIVE_CLAUDE" = true ]; then
+    BUILD_ARGS+=(--build-arg CLAUDE_INSTALL_METHOD=native)
+  fi
+  docker build -f Dockerfile.deploy "${BUILD_ARGS[@]}" -t "$IMAGE_NAME" .
   echo ""
   echo "  Build complete."
   echo ""
@@ -308,6 +478,7 @@ if curl -sf "http://127.0.0.1:$PORT/health" > /dev/null 2>&1; then
   echo "    docker logs -f $CONTAINER_NAME   # view logs"
   echo "    docker stop $CONTAINER_NAME      # stop"
   echo "    docker start $CONTAINER_NAME     # restart"
+  echo "    $0${ID_FLAG} --console           # attach to container shell"
   echo "    $0${ID_FLAG} --upgrade           # rebuild + restart (code update)"
   echo "    $0${ID_FLAG} --auth              # re-authenticate"
   echo "==========================================="
