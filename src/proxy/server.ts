@@ -506,7 +506,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         passthroughMcp = createPassthroughMcpServer(body.tools)
       }
 
-
+      // In passthrough mode with tools, hint the model to use prefixed tool names
+      if (passthrough && passthroughMcp) {
+        systemContext += `\n\nIMPORTANT: Every tool name is prefixed with "${PASSTHROUGH_MCP_PREFIX}". You should call ${PASSTHROUGH_MCP_PREFIX}Read instead of Read, ${PASSTHROUGH_MCP_PREFIX}mcp__*__* instead of mcp__*__*. Always use the full prefixed name when calling tools.`
+      }
 
       // In passthrough mode: block ALL tools, capture them for forwarding (agent-agnostic).
       // In normal mode: delegate hook construction to the adapter.
