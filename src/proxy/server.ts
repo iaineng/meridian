@@ -91,18 +91,47 @@ function homoglyphEncode(content: string): string {
 function extractMessageContent(m: any, toolNameById: Map<string, string>, counter?: MultimodalCounter, toolPrefix?: string): string {
   if (typeof m.content === "string") return m.content
   if (Array.isArray(m.content)) {
-    return m.content
-      .map((block: any) => {
-        if (block.type === "text" && block.text) return block.text
-        if (block.type === "tool_use") return `<prior_tool_invocation tool="${block.name}" id="${block.id}">${JSON.stringify(block.input)}</prior_tool_invocation>`
-        if (block.type === "tool_result") return `<prior_tool_output tool="${toolNameById.get(block.tool_use_id) ?? "unknown"}" id="${block.tool_use_id}">${counter ? serializeToolResultContentToText(block.content, counter, toolPrefix) : (typeof block.content === "string" ? block.content : JSON.stringify(block.content))}</prior_tool_output>`
-        if (block.type === "image") return counter ? `${nextMultimodalLabel("image", counter)}: attached` : "(image was attached)"
-        if (block.type === "document") return counter ? `${nextMultimodalLabel("document", counter)}: attached` : "(document was attached)"
-        if (block.type === "file") return counter ? `${nextMultimodalLabel("file", counter)}: attached` : "(file was attached)"
-        return ""
-      })
-      .filter(Boolean)
-      .join("\n")
+    const parts: string[] = []
+    let i = 0
+    while (i < m.content.length) {
+      const block = m.content[i]
+      if (block.type === "text" && block.text) {
+        parts.push(block.text)
+        i++
+      } else if (block.type === "tool_use") {
+        const invokes: string[] = []
+        while (i < m.content.length && m.content[i].type === "tool_use") {
+          const b = m.content[i]
+          const params = Object.entries(b.input ?? {}).map(([k, v]: [string, any]) =>
+            `<parameter name="${k}">${typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? String(v) : JSON.stringify(v)}</parameter>`
+          ).join("\n")
+          invokes.push(`<invoke name="${b.name}">\n${params}\n</invoke>`)
+          i++
+        }
+        parts.push(`<function_calls>\n${invokes.join("\n")}\n</function_calls>`)
+      } else if (block.type === "tool_result") {
+        const results: string[] = []
+        while (i < m.content.length && m.content[i].type === "tool_result") {
+          const b = m.content[i]
+          const body = counter ? serializeToolResultContentToText(b.content, counter, toolPrefix) : (typeof b.content === "string" ? b.content : JSON.stringify(b.content))
+          results.push(b.is_error ? `<error>${body}</error>` : `<output>${body}</output>`)
+          i++
+        }
+        parts.push(`<function_results>\n${results.join("\n")}\n</function_results>`)
+      } else if (block.type === "image") {
+        parts.push(counter ? `${nextMultimodalLabel("image", counter)}: attached` : "(image was attached)")
+        i++
+      } else if (block.type === "document") {
+        parts.push(counter ? `${nextMultimodalLabel("document", counter)}: attached` : "(document was attached)")
+        i++
+      } else if (block.type === "file") {
+        parts.push(counter ? `${nextMultimodalLabel("file", counter)}: attached` : "(file was attached)")
+        i++
+      } else {
+        i++
+      }
+    }
+    return parts.filter(Boolean).join("\n")
   }
   return String(m.content)
 }
@@ -128,11 +157,6 @@ function buildTextPromptWithHistory(messages: Array<{ role: string; content: any
     const currentPart = extractMessageContent(messages[lastUserIdx]!, toolNameById, counter, toolPrefix)
     const preamble = [
       `IMPORTANT: The following <conversation_history> is flattened from structured multi-turn messages. Use it as context only. Do NOT simulate or role-play as any turn — you are the assistant, respond only as yourself.`,
-      ``,
-      `Tag reference:`,
-      `- <turn role="user"> / <turn role="assistant">: a prior conversation turn`,
-      `- <prior_tool_invocation tool="X" id="Y">: a tool call you previously made`,
-      `- <prior_tool_output tool="X" id="Y">: the result of that tool call (id matches the invocation)`,
       ``,
       `The content after </conversation_history> is the current user request.`,
     ].join("\n")

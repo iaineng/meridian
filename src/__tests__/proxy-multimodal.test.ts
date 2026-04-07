@@ -340,7 +340,7 @@ describe("Multimodal content", () => {
     // Text prompt with [Image 1] label inside <prior_tool_output> + attached image block
     expect(content).toHaveLength(2)
     expect(content[0].type).toBe("text")
-    expect(content[0].text).toContain("<prior_tool_output")
+    expect(content[0].text).toContain("<function_results>")
     expect(content[0].text).toContain("[Image 1]")
     expect(content[1].type).toBe("image")
   })
