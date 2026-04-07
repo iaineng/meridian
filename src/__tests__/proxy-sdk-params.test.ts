@@ -18,6 +18,8 @@ import {
   messageDelta,
   messageStop,
   assistantMessage,
+  assistantStreamEvents,
+  streamEvent,
 } from "./helpers"
 
 
@@ -75,7 +77,7 @@ const BASE_BODY = {
 describe("SDK param passthrough — body fields", () => {
   beforeEach(() => {
     capturedOptions = {}
-    mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }])
     clearSessionCache()
   })
 
@@ -113,7 +115,7 @@ describe("SDK param passthrough — body fields", () => {
 describe("SDK param passthrough — header overrides", () => {
   beforeEach(() => {
     capturedOptions = {}
-    mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }])
     clearSessionCache()
   })
 
@@ -237,7 +239,7 @@ describe("Usage logging", () => {
   })
 
   it("logs usage line after non-streaming response", async () => {
-    mockMessages = [assistantMessage([{ type: "text", text: "hello" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "hello" }])
     const logSpy = spyOn(console, "error")
     const app = createTestApp()
 
@@ -268,22 +270,19 @@ describe("Usage logging", () => {
   })
 
   it("formats large token counts with k suffix", async () => {
-    // Patch the assistantMessage usage to large values
-    mockMessages = [{
-      type: "assistant",
-      message: {
-        id: "msg_test",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "ok" }],
-        model: "claude-haiku-4-5-20251001",
-        stop_reason: "end_turn",
+    // Manually construct stream events with large usage values
+    mockMessages = [
+      messageStart(),
+      textBlockStart(0),
+      textDelta(0, "ok"),
+      blockStop(0),
+      streamEvent({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
         usage: { input_tokens: 15000, output_tokens: 2500, cache_read_input_tokens: 80000 },
-      },
-      parent_tool_use_id: null,
-      uuid: crypto.randomUUID(),
-      session_id: "test-session-fmt",
-    }]
+      }),
+      messageStop(),
+    ]
     const logSpy = spyOn(console, "error")
     const app = createTestApp()
 
@@ -298,7 +297,7 @@ describe("Usage logging", () => {
   })
 
   it("does not include cache fields when zero", async () => {
-    mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }])
     const logSpy = spyOn(console, "error")
     const app = createTestApp()
 
@@ -329,21 +328,9 @@ describe("GET /v1/sessions/:claudeSessionId/context-usage", () => {
 
   it("returns usage after a completed request", async () => {
     const claudeSessionId = "sess_usage_test_001"
-    mockMessages = [{
-      type: "assistant",
-      message: {
-        id: "msg_test",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "ok" }],
-        model: "claude-haiku-4-5-20251001",
-        stop_reason: "end_turn",
-        usage: { input_tokens: 100, output_tokens: 50 },
-      },
-      parent_tool_use_id: null,
-      uuid: crypto.randomUUID(),
-      session_id: claudeSessionId,
-    }]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }]).map(
+      msg => ({ ...msg, session_id: claudeSessionId })
+    )
 
     const app = createTestApp()
     // Fire a request to populate the session cache with usage
@@ -359,27 +346,15 @@ describe("GET /v1/sessions/:claudeSessionId/context-usage", () => {
     expect(body.session_id).toBe(claudeSessionId)
     expect(body.context_usage).toBeDefined()
     const usage = body.context_usage as Record<string, unknown>
-    expect(usage.input_tokens).toBe(100)
+    expect(usage.input_tokens).toBe(10)
     expect(usage.output_tokens).toBe(50)
   })
 
   it("returns usage for sessions tracked only by fingerprint fallback", async () => {
     const claudeSessionId = "sess_usage_fingerprint_only"
-    mockMessages = [{
-      type: "assistant",
-      message: {
-        id: "msg_fingerprint",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "ok" }],
-        model: "claude-haiku-4-5-20251001",
-        stop_reason: "end_turn",
-        usage: { input_tokens: 12, output_tokens: 6 },
-      },
-      parent_tool_use_id: null,
-      uuid: crypto.randomUUID(),
-      session_id: claudeSessionId,
-    }]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }]).map(
+      msg => ({ ...msg, session_id: claudeSessionId })
+    )
 
     const app = createTestApp()
     await post(app, BASE_BODY)
@@ -391,8 +366,8 @@ describe("GET /v1/sessions/:claudeSessionId/context-usage", () => {
     const body = await res.json() as Record<string, unknown>
     const usage = body.context_usage as Record<string, unknown>
     expect(body.session_id).toBe(claudeSessionId)
-    expect(usage.input_tokens).toBe(12)
-    expect(usage.output_tokens).toBe(6)
+    expect(usage.input_tokens).toBe(10)
+    expect(usage.output_tokens).toBe(50)
   })
 
   it("returns 404 when session exists but has no usage data", async () => {
@@ -411,21 +386,9 @@ describe("GET /v1/sessions/:claudeSessionId/context-usage", () => {
     const claudeSessionId = "sess_claude_id_check"
     const agentSessionId = "agent-id-xyz-different"
 
-    mockMessages = [{
-      type: "assistant",
-      message: {
-        id: "msg_test2",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "ok" }],
-        model: "claude-haiku-4-5-20251001",
-        stop_reason: "end_turn",
-        usage: { input_tokens: 5, output_tokens: 3 },
-      },
-      parent_tool_use_id: null,
-      uuid: crypto.randomUUID(),
-      session_id: claudeSessionId,
-    }]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }]).map(
+      msg => ({ ...msg, session_id: claudeSessionId })
+    )
 
     const app = createTestApp()
     await post(app, BASE_BODY, { "x-opencode-session": agentSessionId })

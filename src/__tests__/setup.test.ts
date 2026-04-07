@@ -28,14 +28,16 @@ describe("findOpencodeConfigPath", () => {
 
   it("respects OPENCODE_CONFIG_DIR", () => {
     process.env.OPENCODE_CONFIG_DIR = "/custom/opencode"
-    expect(findOpencodeConfigPath()).toBe("/custom/opencode/opencode.json")
+    const result = findOpencodeConfigPath().replace(/\\/g, "/")
+    expect(result).toBe("/custom/opencode/opencode.json")
   })
 
   it("respects XDG_CONFIG_HOME", () => {
     delete process.env.OPENCODE_CONFIG_DIR
     process.env.XDG_CONFIG_HOME = "/xdg/config"
-    expect(findOpencodeConfigPath()).toContain("opencode/opencode.json")
-    expect(findOpencodeConfigPath()).toContain("/xdg/config")
+    const result = findOpencodeConfigPath().replace(/\\/g, "/")
+    expect(result).toContain("opencode/opencode.json")
+    expect(result).toContain("/xdg/config")
   })
 
   it("falls back to ~/.config/opencode/opencode.json", () => {

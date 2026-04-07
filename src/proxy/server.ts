@@ -393,7 +393,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const effort = effortHeader
           || body.effort
           || undefined
-        let thinking: QueryContext['thinking'] = body.thinking ?? { type: "disabled" }
+        let thinking: QueryContext['thinking'] | undefined = body.thinking || undefined
         if (thinkingHeader !== undefined) {
           try {
             thinking = JSON.parse(thinkingHeader) as QueryContext["thinking"]
@@ -709,6 +709,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           const structuredOutputIds = new Set<string>()
           const structuredOutputIndices = new Set<number>()
 
+          // Passthrough: track whether Turn 1 has produced a tool_use block so
+          // we can suppress all content from subsequent SDK turns (Turn 2+).
+          let passthroughTurn1HasToolUse = false
+          let passthroughSuppressTurn2 = false
+
           // Build SDK UUID map: start with previously stored UUIDs (if resuming),
           // then capture new ones from the response. Declared outside try so
           // storeSession (in the finally/after block) can access it.
@@ -881,11 +886,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
               // message_start: reset per-turn state, capture message ID and base usage
               if (eventType === "message_start") {
-                if (!messageId) messageId = (event as any).message?.id
-                const startUsage = (event as any).message?.usage
-                if (startUsage && typeof startUsage === "object") {
-                  baseUsage = { ...startUsage }
+                if (!messageId) {
+                  // First message_start
+                  messageId = (event as any).message?.id
+                  const startUsage = (event as any).message?.usage
+                  if (startUsage && typeof startUsage === "object") {
+                    baseUsage = { ...startUsage }
+                  }
+                } else if (passthrough && passthroughTurn1HasToolUse) {
+                  // Second message_start in passthrough mode with tool_use already seen —
+                  // suppress all Turn 2 content (SDK artefact: prose summary after blocked tool).
+                  passthroughSuppressTurn2 = true
+                  claudeLog("passthrough.turn2_suppressed", { mode: "non_stream", toolUses: contentBlocks.filter(b => b.type === "tool_use").length })
                 }
+                // Always reset per-turn index tracking — indices from the previous
+                // turn are stale and would incorrectly skip new turn's blocks.
                 skipBlockIndices.clear()
                 sdkIndexToContentIdx.clear()
                 continue
@@ -896,7 +911,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
               // content_block_start: filtering + begin accumulation
               if (eventType === "content_block_start") {
+                // Passthrough Turn 2 suppression: discard all blocks from the second turn
+                if (passthroughSuppressTurn2) {
+                  if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                  continue
+                }
+
                 const block = { ...(event as any).content_block } as Record<string, unknown>
+
+                // Strip thinking/redacted_thinking in passthrough mode — non-native
+                // clients have no renderer for these and may misinterpret them.
+                if (passthrough && (block.type === "thinking" || block.type === "redacted_thinking")) {
+                  if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                  claudeLog("passthrough.thinking_stripped", { mode: "non_stream", type: block.type, index: eventIndex })
+                  continue
+                }
 
                 // outputFormat: StructuredOutput → accumulate as text block
                 if (outputFormat) {
@@ -917,6 +946,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   }
                 }
 
+                // Strip thinking blocks in passthrough mode — non-native clients
+                // have no renderer for type:"thinking" and may choke on the
+                // encrypted signature field.
+                if (
+                  passthrough &&
+                  (block.type === "thinking" || block.type === "redacted_thinking")
+                ) {
+                  if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                  claudeLog("passthrough.thinking_stripped", { mode: "non_stream", type: block.type, index: eventIndex })
+                  continue
+                }
+
                 // Tool filtering (same as streaming path)
                 if (block.type === "tool_use" && typeof block.name === "string") {
                   if (passthrough && (block.name as string).startsWith(PASSTHROUGH_MCP_PREFIX)) {
@@ -927,6 +968,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   } else if (useBuiltinWebSearch) {
                     block.type = "server_tool_use"
                   }
+                }
+
+                // Passthrough: mark that Turn 1 produced a tool_use so Turn 2 can be suppressed
+                if (passthrough && block.type === "tool_use") {
+                  passthroughTurn1HasToolUse = true
                 }
 
                 contentBlocks.push(block)
@@ -1122,9 +1168,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             error: null,
           })
 
-          // Store session for future resume
+          // Store session for future resume — merge baseUsage (from message_start)
+          // with lastUsage (from message_delta) for complete context usage tracking
+          const mergedUsage = (baseUsage || lastUsage)
+            ? { ...baseUsage, ...lastUsage } as import("./session/lineage").TokenUsage
+            : undefined
           if (currentSessionId) {
-            storeSession(profileSessionId, body.messages || [], currentSessionId, profileScopedCwd, sdkUuidMap, lastUsage)
+            storeSession(profileSessionId, body.messages || [], currentSessionId, profileScopedCwd, sdkUuidMap, mergedUsage)
           }
 
           const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`

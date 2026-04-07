@@ -105,7 +105,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
           ? systemContext
           : { type: "preset" as const, preset: "claude_code" as const, append: systemContext }
       } : {}),
-      effort: "high",
+      ...(effort ? { effort } : {}),
       ...(passthrough
         ? {
             disallowedTools: blockedTools,
@@ -145,7 +145,6 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...(isUndo ? { forkSession: true, ...(undoRollbackUuid ? { resumeSessionAt: undoRollbackUuid } : {}) } : {}),
       ...(sdkHooks ? { hooks: sdkHooks } : {}),
       ...(outputFormat ? { outputFormat } : {}),
-      ...(effort ? { effort } : {}),
       ...(thinking ? { thinking } : {}),
       ...(taskBudget ? { taskBudget } : {}),
       ...(betas && betas.length > 0 ? { betas: betas as SdkBeta[] } : {}),

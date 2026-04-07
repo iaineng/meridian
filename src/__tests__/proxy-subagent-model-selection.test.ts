@@ -7,6 +7,17 @@
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
+import { assistantStreamEvents } from "./helpers"
+import {
+  mapModelToClaudeModel,
+  hasExtendedContext,
+  stripExtendedContext,
+  isClosedControllerError,
+  isExtendedContextKnownUnavailable,
+  recordExtendedContextUnavailable,
+  resetExtendedContextUnavailable,
+  getAuthCacheInfo,
+} from "../proxy/models"
 
 let capturedModel: string | null = null
 
@@ -14,20 +25,7 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   query: (opts: any) => {
     capturedModel = opts.options?.model ?? null
     return (async function* () {
-      yield {
-        type: "assistant",
-        uuid: "test-uuid",
-        message: {
-          id: "msg-1",
-          type: "message",
-          role: "assistant",
-          content: [{ type: "text", text: "ok" }],
-          model: capturedModel,
-          stop_reason: "end_turn",
-          usage: { input_tokens: 5, output_tokens: 2 },
-        },
-        session_id: "sdk-session-1",
-      }
+      for (const msg of assistantStreamEvents([{ type: "text", text: "ok" }])) yield msg
     })()
   },
   createSdkMcpServer: () => ({ type: "sdk", name: "test", instance: {} }),
@@ -42,14 +40,20 @@ mock.module("../mcpTools", () => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
-// Fix auth status so mapModelToClaudeModel always picks the max/1m path
-mock.module("../proxy/models", () => {
-  const actual = require("../proxy/models")
-  return {
-    ...actual,
-    getClaudeAuthStatusAsync: async () => ({ loggedIn: true, subscriptionType: "max" }),
-  }
-})
+// Fix auth status so mapModelToClaudeModel always picks the max/1m path.
+// Use the real mapModelToClaudeModel so subagent routing logic is exercised.
+mock.module("../proxy/models", () => ({
+  mapModelToClaudeModel,
+  hasExtendedContext,
+  stripExtendedContext,
+  isClosedControllerError,
+  isExtendedContextKnownUnavailable,
+  recordExtendedContextUnavailable,
+  resetExtendedContextUnavailable,
+  getAuthCacheInfo,
+  resolveClaudeExecutableAsync: async () => "claude",
+  getClaudeAuthStatusAsync: async () => ({ loggedIn: true, subscriptionType: "max" }),
+}))
 
 const { createProxyServer, clearSessionCache } = await import("../proxy/server")
 

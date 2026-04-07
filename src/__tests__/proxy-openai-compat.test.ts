@@ -20,6 +20,7 @@ import {
   messageDelta,
   messageStop,
   assistantMessage,
+  assistantStreamEvents,
   parseSSE,
 } from "./helpers"
 
@@ -69,7 +70,7 @@ describe("POST /v1/chat/completions — non-streaming", () => {
   })
 
   it("returns OpenAI completion shape for a simple message", async () => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Hello!" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Hello!" }])
     const app = createTestApp()
 
     const res = await postChatCompletion(app, {
@@ -118,10 +119,10 @@ describe("POST /v1/chat/completions — non-streaming", () => {
   })
 
   it("filters thinking blocks from response", async () => {
-    mockMessages = [assistantMessage([
+    mockMessages = assistantStreamEvents([
       { type: "thinking", thinking: "internal thoughts" },
       { type: "text", text: "public answer" },
-    ])]
+    ])
     const app = createTestApp()
 
     const res = await postChatCompletion(app, {
@@ -135,7 +136,7 @@ describe("POST /v1/chat/completions — non-streaming", () => {
   })
 
   it("handles system message correctly", async () => {
-    mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }])
     const app = createTestApp()
 
     const res = await postChatCompletion(app, {
@@ -150,7 +151,7 @@ describe("POST /v1/chat/completions — non-streaming", () => {
   })
 
   it("response has Content-Type application/json", async () => {
-    mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "ok" }])
     const app = createTestApp()
 
     const res = await postChatCompletion(app, {
@@ -382,7 +383,7 @@ describe("Regression: /v1/messages unaffected", () => {
   })
 
   it("still returns Anthropic format from /v1/messages", async () => {
-    mockMessages = [assistantMessage([{ type: "text", text: "Anthropic response" }])]
+    mockMessages = assistantStreamEvents([{ type: "text", text: "Anthropic response" }])
     const app = createTestApp()
 
     const res = await app.fetch(new Request("http://localhost/v1/messages", {

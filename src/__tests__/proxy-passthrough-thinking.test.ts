@@ -32,6 +32,8 @@ import {
   textDelta,
   parseSSE,
   assistantMessage,
+  assistantStreamEvents,
+  streamEvent,
   makeRequest,
 } from "./helpers"
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk"
@@ -107,8 +109,8 @@ async function fetchPassthrough(stream: boolean, extra: Record<string, unknown> 
   }
 }
 
-// SDK prefix for passthrough MCP tools
-const PREFIX = "mcp__oc__"
+// SDK prefix for passthrough MCP tools — must match PASSTHROUGH_MCP_PREFIX from passthroughTools.ts
+const PREFIX = "mcp__p-tools__"
 
 // Helper: a complete tool_use block (streamed)
 function streamedToolUse(index: number, toolId: string) {
@@ -159,16 +161,19 @@ beforeEach(() => {
 describe("passthrough non-streaming — Turn 2 suppression", () => {
   it("returns only Turn 1 tool_use blocks when Turn 2 adds prose", async () => {
     // Turn 1: tool_use for edit
-    const turn1 = assistantMessage([
+    const turn1content = [
       { type: "tool_use", id: "tu_001", name: `${PREFIX}edit`,
         input: { filePath: "/tmp/hello.ts", oldString: "foo", newString: "bar" } },
-    ])
+    ]
     // Turn 2: thinking + prose summary (SDK artefact from blocked tool result)
-    const turn2 = assistantMessage([
+    const turn2content = [
       { type: "thinking", thinking: "I edited the file", signature: "enc_sig_xyz" },
       { type: "text", text: "The edit has been forwarded to your local environment. The change was: foo → bar" },
-    ])
-    mockMessages = [turn1, turn2]
+    ]
+    mockMessages = [
+      ...assistantStreamEvents(turn1content, { stopReason: "tool_use" }),
+      ...assistantStreamEvents(turn2content),
+    ]
 
     const res = await fetchPassthrough(false)
     expect(res.status).toBe(200)
@@ -191,10 +196,9 @@ describe("passthrough non-streaming — Turn 2 suppression", () => {
 
   it("does not suppress Turn 2 content when Turn 1 had no tool_use (end_turn flow)", async () => {
     // Turn 1: plain text only (Claude just replied without tools)
-    const turn1 = assistantMessage([
+    mockMessages = assistantStreamEvents([
       { type: "text", text: "I cannot edit that file without tools." },
     ])
-    mockMessages = [turn1]
 
     const res = await fetchPassthrough(false)
     expect(res.status).toBe(200)
@@ -207,12 +211,11 @@ describe("passthrough non-streaming — Turn 2 suppression", () => {
 
   it("strips thinking blocks from Turn 1 in non-streaming passthrough", async () => {
     // Turn 1: thinking + tool_use (Claude with extended thinking enabled)
-    const turn1 = assistantMessage([
+    mockMessages = assistantStreamEvents([
       { type: "thinking", thinking: "Let me plan the edit...", signature: "enc_sig_abc" },
       { type: "tool_use", id: "tu_002", name: `${PREFIX}edit`,
         input: { filePath: "/tmp/hello.ts", oldString: "foo", newString: "bar" } },
-    ])
-    mockMessages = [turn1]
+    ], { stopReason: "tool_use" })
 
     const res = await fetchPassthrough(false)
     const body = await res.json() as Record<string, unknown>
@@ -224,12 +227,16 @@ describe("passthrough non-streaming — Turn 2 suppression", () => {
   })
 
   it("strips redacted_thinking blocks from passthrough non-streaming", async () => {
-    const turn1 = assistantMessage([
-      { type: "redacted_thinking", data: "redacted_data_xyz" },
-      { type: "tool_use", id: "tu_003", name: `${PREFIX}edit`,
-        input: { filePath: "/tmp/hello.ts", oldString: "foo", newString: "bar" } },
-    ])
-    mockMessages = [turn1]
+    mockMessages = [
+      messageStart(),
+      streamEvent({ type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "redacted_data_xyz" } }),
+      blockStop(0),
+      toolUseBlockStart(1, `${PREFIX}edit`, "tu_003"),
+      inputJsonDelta(1, JSON.stringify({ filePath: "/tmp/hello.ts", oldString: "foo", newString: "bar" })),
+      blockStop(1),
+      messageDelta("tool_use"),
+      messageStop(),
+    ]
 
     const res = await fetchPassthrough(false)
     const body = await res.json() as Record<string, unknown>
@@ -240,14 +247,13 @@ describe("passthrough non-streaming — Turn 2 suppression", () => {
   })
 
   it("preserves tool_use input fields intact after stripping thinking", async () => {
-    const turn1 = assistantMessage([
+    mockMessages = assistantStreamEvents([
       { type: "thinking", thinking: "Planning...", signature: "enc_sig" },
       {
         type: "tool_use", id: "tu_004", name: `${PREFIX}edit`,
         input: { filePath: "/tmp/greet.ts", oldString: `"Hello " + name`, newString: "`Hello ${name}`" },
       },
-    ])
-    mockMessages = [turn1]
+    ], { stopReason: "tool_use" })
 
     const res = await fetchPassthrough(false)
     const body = await res.json() as Record<string, unknown>
