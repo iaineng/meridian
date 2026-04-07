@@ -1,23 +1,10 @@
 /**
- * Passthrough mode: thinking-block filtering and Turn 2 suppression.
+ * Passthrough mode: thinking-block filtering.
  *
- * Two bugs caused Claude edits via passthrough to show prose instead of
- * diff UI in OpenCode:
- *
- * Bug 1 — Non-streaming Turn 2 contamination:
- *   The SDK needs maxTurns:2 in passthrough mode to avoid crashing. But Turn 2
- *   runs after the blocked tool call completes, and Claude generates a prose
- *   summary ("The edit has been forwarded to your local environment...").
- *   Meridian was returning both Turn 1 (tool_use) + Turn 2 (thinking + prose)
- *   in one response, which confused OpenCode's diff renderer.
- *   Fix: once Turn 1 has produced tool_use blocks, ignore all content from
- *   subsequent assistant turns.
- *
- * Bug 2 — Thinking blocks forwarded to non-native clients (both modes):
- *   type:"thinking" / type:"redacted_thinking" blocks contain an encrypted
- *   signature that is only valid in Claude's native context. OpenCode has no
- *   renderer for them and can misinterpret them.
- *   Fix: strip thinking/redacted_thinking blocks in passthrough mode.
+ * type:"thinking" / type:"redacted_thinking" blocks contain an encrypted
+ * signature that is only valid in Claude's native context. Non-native clients
+ * have no renderer for them and can misinterpret them.
+ * Fix: strip thinking/redacted_thinking blocks in passthrough mode.
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
@@ -31,7 +18,6 @@ import {
   messageStop,
   textDelta,
   parseSSE,
-  assistantMessage,
   assistantStreamEvents,
   streamEvent,
   makeRequest,
@@ -155,61 +141,11 @@ beforeEach(() => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Non-streaming: Turn 2 suppression
+// Non-streaming: thinking block stripping
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("passthrough non-streaming — Turn 2 suppression", () => {
-  it("returns only Turn 1 tool_use blocks when Turn 2 adds prose", async () => {
-    // Turn 1: tool_use for edit
-    const turn1content = [
-      { type: "tool_use", id: "tu_001", name: `${PREFIX}edit`,
-        input: { filePath: "/tmp/hello.ts", oldString: "foo", newString: "bar" } },
-    ]
-    // Turn 2: thinking + prose summary (SDK artefact from blocked tool result)
-    const turn2content = [
-      { type: "thinking", thinking: "I edited the file", signature: "enc_sig_xyz" },
-      { type: "text", text: "The edit has been forwarded to your local environment. The change was: foo → bar" },
-    ]
-    mockMessages = [
-      ...assistantStreamEvents(turn1content, { stopReason: "tool_use" }),
-      ...assistantStreamEvents(turn2content),
-    ]
-
-    const res = await fetchPassthrough(false)
-    expect(res.status).toBe(200)
-    const body = await res.json() as Record<string, unknown>
-
-    const content = body.content as Array<Record<string, unknown>>
-    // Should have exactly the tool_use block — no thinking, no Turn 2 prose
-    const types = content.map((b) => b.type)
-    expect(types).toContain("tool_use")
-    expect(types).not.toContain("thinking")
-    expect(types).not.toContain("redacted_thinking")
-    // The prose "The edit has been forwarded..." must NOT appear
-    const textBlocks = content.filter((b) => b.type === "text")
-    for (const tb of textBlocks) {
-      expect(String(tb.text ?? "")).not.toContain("forwarded")
-    }
-    // stop_reason must be tool_use
-    expect(body.stop_reason).toBe("tool_use")
-  })
-
-  it("does not suppress Turn 2 content when Turn 1 had no tool_use (end_turn flow)", async () => {
-    // Turn 1: plain text only (Claude just replied without tools)
-    mockMessages = assistantStreamEvents([
-      { type: "text", text: "I cannot edit that file without tools." },
-    ])
-
-    const res = await fetchPassthrough(false)
-    expect(res.status).toBe(200)
-    const body = await res.json() as Record<string, unknown>
-
-    const content = body.content as Array<Record<string, unknown>>
-    expect(content.some((b) => b.type === "text")).toBe(true)
-    expect(body.stop_reason).toBe("end_turn")
-  })
-
-  it("strips thinking blocks from Turn 1 in non-streaming passthrough", async () => {
+describe("passthrough non-streaming — thinking block stripping", () => {
+  it("strips thinking blocks in non-streaming passthrough", async () => {
     // Turn 1: thinking + tool_use (Claude with extended thinking enabled)
     mockMessages = assistantStreamEvents([
       { type: "thinking", thinking: "Let me plan the edit...", signature: "enc_sig_abc" },
@@ -359,68 +295,6 @@ describe("passthrough streaming — thinking block filtering", () => {
     expect(input.filePath).toBe("/tmp/g.ts")
     expect(input.oldString).toBe("foo bar")
     expect(input.newString).toBe("baz qux")
-  })
-
-  it("intercepts second message_start (Turn 2) and emits stop_reason:tool_use before Turn 2 content", async () => {
-    // Simulates real SDK behaviour: tool names arrive WITHOUT the mcp__oc__ prefix
-    // and the SDK delivers both turns in one stream, with Turn 2 starting after
-    // a second message_start event.
-    const turn2Start: SDKMessage = {
-      type: "stream_event",
-      event: {
-        type: "message_start",
-        message: { id: "msg_turn2", type: "message", role: "assistant", content: [],
-          model: "claude-sonnet-4-6", stop_reason: null,
-          usage: { input_tokens: 5, output_tokens: 0 } },
-      },
-      parent_tool_use_id: null,
-      uuid: crypto.randomUUID(),
-      session_id: "test-session",
-    } as unknown as SDKMessage
-
-    mockMessages = [
-      messageStart(),
-      // Turn 1: text preamble + tool_use WITHOUT mcp__oc__ prefix (real SDK behaviour)
-      textBlockStart(0),
-      textDelta(0, "Sure, calling the edit tool:"),
-      blockStop(0),
-      // Note: no mcp__oc__ prefix — the real SDK strips it before stream_events
-      toolUseBlockStart(1, "edit", "tu_real_001"),
-      inputJsonDelta(1, '{"filePath":"/tmp/f.ts","oldString":"foo","newString":"bar"}'),
-      blockStop(1),
-      // Turn 2 begins — second message_start should trigger the break
-      turn2Start,
-      textBlockStart(0),
-      textDelta(0, "The edit was forwarded to your local environment."),
-      blockStop(0),
-      messageDelta("end_turn"),
-      messageStop(),
-    ]
-
-    const res = await fetchPassthrough(true)
-    const text = await res.text()
-    const events = parseSSE(text)
-
-    // Only Turn 1 content should be present
-    const blockStarts = events.filter((e) => e.event === "content_block_start")
-    const blockTypes = blockStarts.map((e) => (e.data as any).content_block?.type)
-    expect(blockTypes).toContain("tool_use")
-
-    // Turn 2 prose must not be present
-    const textDeltas = events
-      .filter((e) => e.event === "content_block_delta" && (e.data as any).delta?.type === "text_delta")
-      .map((e) => (e.data as any).delta?.text as string)
-    const allText = textDeltas.join("")
-    expect(allText).not.toContain("forwarded to your local environment")
-
-    // Stream must end with stop_reason:tool_use injected by the proxy
-    const msgDeltas = events.filter((e) => e.event === "message_delta")
-    expect(msgDeltas.length).toBeGreaterThan(0)
-    const stopReason = (msgDeltas[msgDeltas.length - 1]!.data as any).delta?.stop_reason
-    expect(stopReason).toBe("tool_use")
-
-    // message_stop must follow
-    expect(events.some((e) => e.event === "message_stop")).toBe(true)
   })
 
   it("does not strip thinking blocks in non-passthrough mode", async () => {

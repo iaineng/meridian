@@ -709,11 +709,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           const structuredOutputIds = new Set<string>()
           const structuredOutputIndices = new Set<number>()
 
-          // Passthrough: track whether Turn 1 has produced a tool_use block so
-          // we can suppress all content from subsequent SDK turns (Turn 2+).
-          let passthroughTurn1HasToolUse = false
-          let passthroughSuppressTurn2 = false
-
           // Build SDK UUID map: start with previously stored UUIDs (if resuming),
           // then capture new ones from the response. Declared outside try so
           // storeSession (in the finally/after block) can access it.
@@ -893,11 +888,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   if (startUsage && typeof startUsage === "object") {
                     baseUsage = { ...startUsage }
                   }
-                } else if (passthrough && passthroughTurn1HasToolUse) {
-                  // Second message_start in passthrough mode with tool_use already seen —
-                  // suppress all Turn 2 content (SDK artefact: prose summary after blocked tool).
-                  passthroughSuppressTurn2 = true
-                  claudeLog("passthrough.turn2_suppressed", { mode: "non_stream", toolUses: contentBlocks.filter(b => b.type === "tool_use").length })
                 }
                 // Always reset per-turn index tracking — indices from the previous
                 // turn are stale and would incorrectly skip new turn's blocks.
@@ -911,12 +901,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
               // content_block_start: filtering + begin accumulation
               if (eventType === "content_block_start") {
-                // Passthrough Turn 2 suppression: discard all blocks from the second turn
-                if (passthroughSuppressTurn2) {
-                  if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
-                  continue
-                }
-
                 const block = { ...(event as any).content_block } as Record<string, unknown>
 
                 // Strip thinking/redacted_thinking in passthrough mode — non-native
@@ -946,18 +930,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   }
                 }
 
-                // Strip thinking blocks in passthrough mode — non-native clients
-                // have no renderer for type:"thinking" and may choke on the
-                // encrypted signature field.
-                if (
-                  passthrough &&
-                  (block.type === "thinking" || block.type === "redacted_thinking")
-                ) {
-                  if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
-                  claudeLog("passthrough.thinking_stripped", { mode: "non_stream", type: block.type, index: eventIndex })
-                  continue
-                }
-
                 // Tool filtering (same as streaming path)
                 if (block.type === "tool_use" && typeof block.name === "string") {
                   if (passthrough && (block.name as string).startsWith(PASSTHROUGH_MCP_PREFIX)) {
@@ -968,11 +940,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   } else if (useBuiltinWebSearch) {
                     block.type = "server_tool_use"
                   }
-                }
-
-                // Passthrough: mark that Turn 1 produced a tool_use so Turn 2 can be suppressed
-                if (passthrough && block.type === "tool_use") {
-                  passthroughTurn1HasToolUse = true
                 }
 
                 contentBlocks.push(block)
@@ -1050,7 +1017,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 }
 
                 if (deltaStopReason) stopReason = deltaStopReason
-                continue
               }
             }
 
@@ -1441,24 +1407,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       const startUsage = (event as unknown as { message?: { usage?: TokenUsage } }).message?.usage
                       if (startUsage) lastUsage = { ...lastUsage, ...startUsage }
                       // Only emit the first message_start — subsequent ones are internal SDK turns.
-                      // In passthrough mode, the second message_start marks Turn 2 beginning
-                      // (SDK processed the blocked tool call and Claude is now summarising).
-                      // Close the stream immediately — before ANY Turn 2 content blocks reach
-                      // the client — and inject a clean message_delta + message_stop so the
-                      // client sees stop_reason:"tool_use" and executes the tool itself.
                       if (messageStartEmitted) {
-                        if (passthrough && streamedToolUseIds.size > 0) {
-                          safeEnqueue(encoder.encode(
-                            `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: lastUsage?.output_tokens ?? 0 } })}\n\n`
-                          ), "passthrough_turn2_stop")
-                          safeEnqueue(encoder.encode(
-                            `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`
-                          ), "passthrough_turn2_stop")
-                          claudeLog("passthrough.turn2_suppressed", { mode: "stream", toolUses: streamedToolUseIds.size })
-                          streamClosed = true
-                          controller.close()
-                          break
-                        }
                         continue
                       }
                       messageStartEmitted = true
