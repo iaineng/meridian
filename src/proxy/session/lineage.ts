@@ -16,6 +16,14 @@ function xxh64(data: string): string {
 
 // --- Types ---
 
+/** Token usage counters from the SDK (subset of Anthropic usage object). */
+export interface TokenUsage {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+}
+
 /** Minimum suffix overlap (stored messages found at the end of incoming)
  *  required to classify a mutation as compaction rather than a branch. */
 export const MIN_SUFFIX_FOR_COMPACTION = 2
@@ -36,6 +44,8 @@ export interface SessionState {
    *  Only assistant messages have UUIDs (user messages are null).
    *  Used to find the rollback point for undo. */
   sdkMessageUuids?: Array<string | null>
+  /** Last observed token usage for this session (from SDK message_start / message_delta events) */
+  contextUsage?: TokenUsage
 }
 
 /**
@@ -81,34 +91,95 @@ export function computeMessageHashes(messages: Array<{ role: string; content: an
 
 /**
  * Measure how many stored hashes match from the START of the stored array
- * against the incoming hashes (order-preserving).
+ * against the incoming hashes (positional comparison).
  *
  * Prefix overlap means the beginning of the conversation is intact (undo
  * changes the end but preserves the beginning).
+ *
+ * NOTE: Compares stored[i] === incoming[i] positionally. An earlier
+ * implementation used a Set for O(1) lookups, but that allowed a stored
+ * hash at position i to match an incoming hash at a completely different
+ * position, inflating the overlap count when duplicate messages exist
+ * in the conversation history.
  */
-export function measurePrefixOverlap(storedHashes: string[], incomingSet: Set<string>): number {
+export function measurePrefixOverlap(storedHashes: string[], incomingHashes: string[]): number {
   let overlap = 0
-  for (const h of storedHashes) {
-    if (incomingSet.has(h)) overlap++
+  const minLen = Math.min(storedHashes.length, incomingHashes.length)
+  for (let i = 0; i < minLen; i++) {
+    if (storedHashes[i] === incomingHashes[i]) overlap++
     else break
   }
   return overlap
 }
 
 /**
- * Measure how many stored hashes match from the END of the stored array
- * against the incoming hashes (order-preserving).
+ * Measure how many consecutive messages at the END of the stored array
+ * appear as a contiguous run in the incoming array.
  *
  * Suffix overlap means the recent conversation is intact (compaction
  * changes the beginning but preserves the end).
+ *
+ * Algorithm: find the last stored hash in the incoming array, then walk
+ * backward through both arrays verifying contiguous matches. This handles
+ * the real-world compaction pattern where new messages are appended AFTER
+ * the preserved suffix.
+ *
+ * NOTE: An earlier implementation used a Set for O(1) lookups, but that
+ * allowed a stored suffix hash to match an incoming hash at a completely
+ * different position — producing false compaction when duplicate messages
+ * exist in the conversation. The current approach verifies positional
+ * contiguity.
  */
-export function measureSuffixOverlap(storedHashes: string[], incomingSet: Set<string>): number {
+export function measureSuffixOverlap(storedHashes: string[], incomingHashes: string[]): number {
+  if (storedHashes.length === 0 || incomingHashes.length === 0) return 0
+
+  // Find where the last stored hash appears in the incoming array.
+  // Search from the end of incoming to prefer the latest match.
+  const lastStoredHash = storedHashes[storedHashes.length - 1]!
+  let anchorInIncoming = -1
+  for (let i = incomingHashes.length - 1; i >= 0; i--) {
+    if (incomingHashes[i] === lastStoredHash) {
+      anchorInIncoming = i
+      break
+    }
+  }
+  if (anchorInIncoming < 0) return 0
+
+  // Walk backward from the anchor, verifying contiguous matches.
   let overlap = 0
-  for (let i = storedHashes.length - 1; i >= 0; i--) {
-    if (incomingSet.has(storedHashes[i]!)) overlap++
-    else break
+  let si = storedHashes.length - 1
+  let ii = anchorInIncoming
+  while (si >= 0 && ii >= 0) {
+    if (storedHashes[si] === incomingHashes[ii]) {
+      overlap++
+      si--
+      ii--
+    } else {
+      break
+    }
   }
   return overlap
+}
+
+/**
+ * Find the start index in the incoming array where the stored suffix
+ * contiguous run begins.  Returns -1 if the suffix overlap is 0.
+ */
+function findSuffixAnchorStart(
+  storedHashes: string[],
+  incomingHashes: string[],
+  suffixOverlap: number
+): number {
+  if (suffixOverlap <= 0) return -1
+  // The anchor (last stored hash) position in incoming:
+  const lastStoredHash = storedHashes[storedHashes.length - 1]!
+  let anchor = -1
+  for (let i = incomingHashes.length - 1; i >= 0; i--) {
+    if (incomingHashes[i] === lastStoredHash) { anchor = i; break }
+  }
+  if (anchor < 0) return -1
+  // The suffix run starts at (anchor - suffixOverlap + 1)
+  return anchor - suffixOverlap + 1
 }
 
 // --- Lineage verification ---
@@ -161,16 +232,24 @@ export function verifyLineage(
   }
 
   const incomingHashes = computeMessageHashes(messages)
-  const incomingSet = new Set(incomingHashes)
 
-  const prefixOverlap = measurePrefixOverlap(cached.messageHashes, incomingSet)
-  const suffixOverlap = measureSuffixOverlap(cached.messageHashes, incomingSet)
+  const prefixOverlap = measurePrefixOverlap(cached.messageHashes, incomingHashes)
+  const suffixOverlap = measureSuffixOverlap(cached.messageHashes, incomingHashes)
 
-  // Compaction: suffix preserved, long enough conversation
+  // Compaction: suffix preserved, long enough conversation.
+  // The suffix must not start at the very beginning of incoming — a valid
+  // compaction always has at least one replaced/summarized message before
+  // the preserved suffix.  Without this guard, a conversation that simply
+  // reuses the stored tail messages at position 0 (e.g. after an undo +
+  // retype) would be falsely classified as compaction (#283).
   const MIN_STORED_FOR_COMPACTION = 6
+  const suffixStartInIncoming = incomingHashes.length - suffixOverlap >= 0
+    ? findSuffixAnchorStart(cached.messageHashes, incomingHashes, suffixOverlap)
+    : -1
   if (
     suffixOverlap >= MIN_SUFFIX_FOR_COMPACTION &&
-    cached.messageHashes.length >= MIN_STORED_FOR_COMPACTION
+    cached.messageHashes.length >= MIN_STORED_FOR_COMPACTION &&
+    suffixStartInIncoming > 0   // at least one changed message before the preserved suffix
   ) {
     const compactionMsg = `Compaction detected (key=${cacheKey.slice(0, 8)}…): suffix overlap ${suffixOverlap}/${cached.messageHashes.length}. Allowing resume.`
     console.error(`[PROXY] ${compactionMsg}`)

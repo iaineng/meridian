@@ -134,13 +134,13 @@ describe("Stale UUID retry", () => {
     expect(body.content.some((b: any) => b.type === "text")).toBe(true)
 
     // First call should have had resumeSessionAt (the undo attempt)
-    expect(queryCalls[0].resumeSessionAt).toBe("uuid-assistant-1")
-    expect(queryCalls[0].forkSession).toBe(true)
+    expect(queryCalls[0]!.resumeSessionAt).toBe("uuid-assistant-1")
+    expect(queryCalls[0]!.forkSession).toBe(true)
 
     // Second call should be a fresh session (retry after stale UUID)
-    expect(queryCalls[1].resume).toBeUndefined()
-    expect(queryCalls[1].forkSession).toBeUndefined()
-    expect(queryCalls[1].resumeSessionAt).toBeUndefined()
+    expect(queryCalls[1]!.resume).toBeUndefined()
+    expect(queryCalls[1]!.forkSession).toBeUndefined()
+    expect(queryCalls[1]!.resumeSessionAt).toBeUndefined()
   })
 
   it("retries as fresh session when undo hits stale UUID (streaming)", async () => {
@@ -179,8 +179,8 @@ describe("Stale UUID retry", () => {
     expect(text).not.toContain("No message found with message.uuid")
 
     // Verify retry happened: first call with resumeSessionAt, second without
-    expect(queryCalls[0].resumeSessionAt).toBe("uuid-assistant-1")
-    expect(queryCalls[1].resumeSessionAt).toBeUndefined()
+    expect(queryCalls[0]!.resumeSessionAt).toBe("uuid-assistant-1")
+    expect(queryCalls[1]!.resumeSessionAt).toBeUndefined()
   })
 
   it("evicts stale session from cache after retry", async () => {
@@ -235,7 +235,7 @@ describe("Stale UUID retry", () => {
 
     // The second request should NOT have resumeSessionAt
     // (it may have resume if the fresh session was stored, which is fine)
-    expect(queryCalls[0].resumeSessionAt).toBeUndefined()
+    expect(queryCalls[0]!.resumeSessionAt).toBeUndefined()
   })
 
   it("propagates non-stale errors normally", async () => {

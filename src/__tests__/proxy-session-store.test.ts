@@ -6,7 +6,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test"
-import { lookupSharedSession, storeSharedSession, clearSharedSessions, setSessionStoreDir } from "../proxy/sessionStore"
+import {
+  lookupSharedSession,
+  lookupSharedSessionByClaudeId,
+  storeSharedSession,
+  clearSharedSessions,
+  setSessionStoreDir,
+} from "../proxy/sessionStore"
 import { join } from "node:path"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -76,6 +82,42 @@ describe("Shared session store", () => {
     clearSharedSessions()
     expect(lookupSharedSession("sess-1")).toBeUndefined()
     expect(lookupSharedSession("sess-2")).toBeUndefined()
+  })
+
+  it("should persist context usage and find it by Claude session ID", () => {
+    storeSharedSession(
+      "session-usage",
+      "claude-sess-usage",
+      1,
+      undefined,
+      undefined,
+      undefined,
+      { input_tokens: 9, output_tokens: 4 }
+    )
+
+    const byKey = lookupSharedSession("session-usage")
+    expect(byKey?.contextUsage).toEqual({ input_tokens: 9, output_tokens: 4 })
+
+    const byClaudeId = lookupSharedSessionByClaudeId("claude-sess-usage")
+    expect(byClaudeId?.contextUsage).toEqual({ input_tokens: 9, output_tokens: 4 })
+  })
+
+  it("should return the freshest match when multiple keys share a Claude session ID", () => {
+    storeSharedSession("session-old", "claude-shared")
+    const first = lookupSharedSessionByClaudeId("claude-shared")
+
+    const start = Date.now()
+    while (Date.now() - start < 10) {} // busy wait 10ms
+
+    storeSharedSession("session-new", "claude-shared", 2, undefined, undefined, undefined, {
+      input_tokens: 20,
+      output_tokens: 8,
+    })
+
+    const latest = lookupSharedSessionByClaudeId("claude-shared")
+    expect(latest?.lastUsedAt).toBeGreaterThanOrEqual(first?.lastUsedAt ?? 0)
+    expect(latest?.messageCount).toBe(2)
+    expect(latest?.contextUsage).toEqual({ input_tokens: 20, output_tokens: 8 })
   })
 
   it("should handle concurrent writes safely", async () => {

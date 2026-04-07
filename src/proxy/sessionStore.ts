@@ -23,6 +23,7 @@ import {
 } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import type { TokenUsage } from "./session/lineage"
 
 export interface StoredSession {
   claudeSessionId: string
@@ -35,6 +36,12 @@ export interface StoredSession {
   messageHashes?: string[]
   /** Per-message SDK assistant UUIDs for undo rollback (null for user messages) */
   sdkMessageUuids?: Array<string | null>
+  /** Last observed token usage for this Claude session */
+  contextUsage?: TokenUsage
+  /** Previous Claude session ID preserved when the session mapping is replaced.
+   *  Enables recovery when a lineage bug (e.g. false compaction) causes the
+   *  original session to be abandoned and a new one started. */
+  previousClaudeSessionId?: string
 }
 
 // No time-based session expiry. SDK sessions persist on Anthropic's side
@@ -174,7 +181,29 @@ export function lookupSharedSession(key: string): StoredSession | undefined {
   return store[key]
 }
 
-export function storeSharedSession(key: string, claudeSessionId: string, messageCount?: number, lineageHash?: string, messageHashes?: string[], sdkMessageUuids?: Array<string | null>): void {
+export function lookupSharedSessionByClaudeId(claudeSessionId: string): StoredSession | undefined {
+  const sessions = Object.values(readStore())
+  let newest: StoredSession | undefined
+
+  for (const session of sessions) {
+    if (session.claudeSessionId !== claudeSessionId) continue
+    if (!newest || session.lastUsedAt > newest.lastUsedAt) {
+      newest = session
+    }
+  }
+
+  return newest
+}
+
+export function storeSharedSession(
+  key: string,
+  claudeSessionId: string,
+  messageCount?: number,
+  lineageHash?: string,
+  messageHashes?: string[],
+  sdkMessageUuids?: Array<string | null>,
+  contextUsage?: TokenUsage
+): void {
   const path = getStorePath()
   const lockPath = `${path}.lock`
   const hasLock = skipLocking ? false : acquireLock(lockPath)
@@ -184,6 +213,13 @@ export function storeSharedSession(key: string, claudeSessionId: string, message
   try {
     const store = readStore()
     const existing = store[key]
+    // Preserve the previous Claude session ID when the mapping changes.
+    // This enables recovery when a lineage bug causes the original session
+    // to be abandoned — the old ID still points to the full conversation
+    // in ~/.claude/projects/.
+    const previousClaudeSessionId = existing && existing.claudeSessionId !== claudeSessionId
+      ? existing.claudeSessionId
+      : existing?.previousClaudeSessionId
     store[key] = {
       claudeSessionId,
       createdAt: existing?.createdAt || Date.now(),
@@ -192,6 +228,8 @@ export function storeSharedSession(key: string, claudeSessionId: string, message
       lineageHash: lineageHash ?? existing?.lineageHash,
       messageHashes: messageHashes ?? existing?.messageHashes,
       sdkMessageUuids: sdkMessageUuids ?? existing?.sdkMessageUuids,
+      contextUsage: contextUsage ?? existing?.contextUsage,
+      ...(previousClaudeSessionId ? { previousClaudeSessionId } : {}),
     }
 
     // Prune oldest entries if over capacity (count-based, not time-based)
@@ -233,6 +271,49 @@ export function evictSharedSession(key: string): void {
       releaseLock(lockPath)
     }
   }
+}
+
+/** Look up recovery information for a session key.
+ *  Returns the current and previous Claude session IDs, plus derived
+ *  file paths and CLI commands for conversation recovery. */
+export function lookupSessionRecovery(key: string): {
+  claudeSessionId: string
+  previousClaudeSessionId?: string
+  createdAt: number
+  lastUsedAt: number
+  messageCount: number
+} | undefined {
+  const store = readStore()
+  const session = store[key]
+  if (!session) return undefined
+  return {
+    claudeSessionId: session.claudeSessionId,
+    previousClaudeSessionId: session.previousClaudeSessionId,
+    createdAt: session.createdAt,
+    lastUsedAt: session.lastUsedAt,
+    messageCount: session.messageCount,
+  }
+}
+
+/** List all stored session keys and their Claude session IDs.
+ *  Used by the recovery endpoint to find sessions by partial match. */
+export function listStoredSessions(): Array<{
+  key: string
+  claudeSessionId: string
+  previousClaudeSessionId?: string
+  createdAt: number
+  lastUsedAt: number
+  messageCount: number
+}> {
+  const store = readStore()
+  return Object.entries(store).map(([key, session]) => ({
+    key,
+    claudeSessionId: session.claudeSessionId,
+    previousClaudeSessionId: session.previousClaudeSessionId,
+    createdAt: session.createdAt,
+    lastUsedAt: session.lastUsedAt,
+    messageCount: session.messageCount,
+  }))
 }
 
 export function clearSharedSessions(): void {

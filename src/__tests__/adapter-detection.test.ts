@@ -10,13 +10,22 @@ import { detectAdapter } from "../proxy/adapters/detect"
 import { openCodeAdapter } from "../proxy/adapters/opencode"
 import { droidAdapter } from "../proxy/adapters/droid"
 import { crushAdapter } from "../proxy/adapters/crush"
+import { piAdapter } from "../proxy/adapters/pi"
+import { passthroughAdapter } from "../proxy/adapters/passthrough"
 
-function makeContext(userAgent: string): any {
+function makeContext(userAgent: string, extraHeaders?: Record<string, string>): any {
+  const allHeaders: Record<string, string> = {}
+  if (userAgent) allHeaders["user-agent"] = userAgent
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      allHeaders[k.toLowerCase()] = v
+    }
+  }
   return {
     req: {
       header: (name?: string) => {
-        if (!name) return userAgent ? { "user-agent": userAgent } : {}
-        return name.toLowerCase() === "user-agent" ? userAgent : undefined
+        if (!name) return { ...allHeaders }
+        return allHeaders[name.toLowerCase()]
       },
     },
   }
@@ -101,6 +110,81 @@ describe("detectAdapter — OpenCode fallback", () => {
 
   it("does NOT match 'Charm-Crush' as OpenCode", () => {
     expect(detectAdapter(makeContext("Charm-Crush/v0.51.2")).name).toBe("crush")
+  })
+})
+
+describe("detectAdapter — x-meridian-agent header override", () => {
+  it("returns piAdapter when x-meridian-agent is 'pi'", () => {
+    const adapter = detectAdapter(makeContext("", { "x-meridian-agent": "pi" }))
+    expect(adapter).toBe(piAdapter)
+    expect(adapter.name).toBe("pi")
+  })
+
+  it("returns crushAdapter when x-meridian-agent is 'crush'", () => {
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "crush" }))).toBe(crushAdapter)
+  })
+
+  it("returns openCodeAdapter when x-meridian-agent is 'opencode'", () => {
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "opencode" }))).toBe(openCodeAdapter)
+  })
+
+  it("returns droidAdapter when x-meridian-agent is 'droid'", () => {
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "droid" }))).toBe(droidAdapter)
+  })
+
+  it("returns passthroughAdapter when x-meridian-agent is 'passthrough'", () => {
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "passthrough" }))).toBe(passthroughAdapter)
+  })
+
+  it("is case-insensitive on header value", () => {
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "Pi" })).name).toBe("pi")
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "PI" })).name).toBe("pi")
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "CRUSH" })).name).toBe("crush")
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "OpenCode" })).name).toBe("opencode")
+  })
+
+  it("takes precedence over User-Agent detection", () => {
+    expect(detectAdapter(makeContext("factory-cli/1.0.0", { "x-meridian-agent": "pi" }))).toBe(piAdapter)
+  })
+
+  it("takes precedence over x-opencode-session detection", () => {
+    expect(detectAdapter(makeContext("", { "x-meridian-agent": "pi", "x-opencode-session": "sess-123" }))).toBe(piAdapter)
+  })
+
+  it("falls through for unknown header values", () => {
+    expect(detectAdapter(makeContext("factory-cli/1.0.0", { "x-meridian-agent": "unknown" }))).toBe(droidAdapter)
+  })
+})
+
+describe("detectAdapter — OpenCode detection", () => {
+  it("returns openCodeAdapter when x-opencode-session is present", () => {
+    const adapter = detectAdapter(makeContext("", { "x-opencode-session": "sess-abc" }))
+    expect(adapter).toBe(openCodeAdapter)
+    expect(adapter.name).toBe("opencode")
+  })
+
+  it("returns openCodeAdapter when x-session-affinity is present", () => {
+    const adapter = detectAdapter(makeContext("", { "x-session-affinity": "ses_2a50aeb32ffe" }))
+    expect(adapter).toBe(openCodeAdapter)
+  })
+
+  it("returns openCodeAdapter for 'opencode/' User-Agent", () => {
+    const adapter = detectAdapter(makeContext("opencode/1.3.15 ai-sdk/provider-utils/4.0.21"))
+    expect(adapter).toBe(openCodeAdapter)
+  })
+
+  it("returns openCodeAdapter for any 'opencode/' version", () => {
+    expect(detectAdapter(makeContext("opencode/0.1.0")).name).toBe("opencode")
+    expect(detectAdapter(makeContext("opencode/2.0.0")).name).toBe("opencode")
+    expect(detectAdapter(makeContext("opencode/99.99.99")).name).toBe("opencode")
+  })
+
+  it("returns openCodeAdapter regardless of User-Agent when session header present", () => {
+    expect(detectAdapter(makeContext("claude-cli/1.0.0", { "x-opencode-session": "sess-xyz" }))).toBe(openCodeAdapter)
+  })
+
+  it("returns openCodeAdapter even with unknown UA when session-affinity present", () => {
+    expect(detectAdapter(makeContext("curl/7.88.0", { "x-session-affinity": "ses_123" }))).toBe(openCodeAdapter)
   })
 })
 

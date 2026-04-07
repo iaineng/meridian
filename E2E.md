@@ -75,10 +75,32 @@ kill $(lsof -ti :3456)
 | FC4 | [File Changes: Read-only (no summary)](#fc4-file-changes-read-only-no-summary) | Read-only operations produce no "Files changed" section | 2026-03-30 |
 | FC5 | [File Changes: Multiple ops](#fc5-file-changes-multiple-ops) | Multiple writes + edits listed in a single summary | 2026-03-30 |
 | FC6 | [File Changes: Multiple ops (stream)](#fc6-file-changes-multiple-ops-stream) | Multiple file changes emitted as a text block in SSE stream | 2026-03-30 |
+| E22 | [OAuth Token Refresh](#e22-oauth-token-refresh) | Expired access token auto-refreshed inline; request succeeds without manual `claude login` | 2026-04-02 |
+| E23 | [Subagent Model Selection](#e23-subagent-model-selection) | `x-opencode-agent-mode: subagent` header selects base model; primary gets 1M; proxy log shows `agent=subagent` | 2026-04-02 |
+| E24 | [Default Non-Streaming](#e24-default-non-streaming) | Omitting `stream` field returns JSON (not SSE), matching Anthropic API spec | - |
+| E25 | [OpenAI Compat: Non-Streaming](#e25-openai-compat-non-streaming) | `/v1/chat/completions` returns valid OpenAI completion shape | - |
+| E26 | [OpenAI Compat: Streaming](#e26-openai-compat-streaming) | `/v1/chat/completions` with `stream: true` returns OpenAI SSE chunks | - |
+| E27 | [OpenAI Compat: Models](#e27-openai-compat-models) | `GET /v1/models` returns Claude model list in OpenAI format | - |
+| E28 | [SDK Param Passthrough](#e28-sdk-param-passthrough) | Live proxy accepts effort/thinking/task_budget/beta fields without breaking responses | 2026-04-03 |
+| E29 | [Context Usage Endpoint](#e29-context-usage-endpoint) | `/v1/sessions/:claudeSessionId/context-usage` returns live token usage for a completed request | 2026-04-03 |
+| E30 | [Context Usage via Fingerprint + Restart](#e30-context-usage-via-fingerprint--restart) | Context usage lookup works for headerless sessions and survives proxy restart via shared store | 2026-04-03 |
+
+| P1 | [Profile: List & Auth Status](#p1-profile-list--auth-status) | `/profiles/list` returns profiles with emails, login status, auth timestamps | - |
+| P2 | [Profile: Switch via API](#p2-profile-switch-via-api) | `POST /profiles/active` switches profile; health endpoint reflects new email | - |
+| P3 | [Profile: Persistence Across Restart](#p3-profile-persistence-across-restart) | Active profile survives proxy restart via settings.json | - |
+| P4 | [Profile: Request Routing](#p4-profile-request-routing) | Request on profile A uses different SDK auth than profile B | - |
+| P5 | [Profile: Per-Request Header Override](#p5-profile-per-request-header-override) | `x-meridian-profile` header routes single request to non-active profile | - |
+| P6 | [Profile: Session Isolation](#p6-profile-session-isolation) | Same messages on different profiles get separate SDK sessions (no cross-contamination) | - |
+| P7 | [Profile: Invalid Profile Rejection](#p7-profile-invalid-profile-rejection) | Switching to nonexistent profile returns 400; invalid persisted profile falls back safely | - |
+| P8 | [Profile: Settings Persistence](#p8-profile-settings-persistence) | `settings.json` updated on switch; CLI `meridian profile list` reflects state | - |
+| P9 | [Profile: Health Reflects Active](#p9-profile-health-reflects-active) | `/health` email changes when active profile changes | - |
+| P10 | [Profile: Telemetry Records After Switch](#p10-profile-telemetry-records-after-switch) | Requests on both profiles appear in `/telemetry/requests` | - |
 
 ---
 
 ## Conventions
+
+**Model selection.** Tests use `claude-haiku-4-5-20251001` by default — it's the cheapest Claude Max tier and sufficient for verifying proxy behavior. Only use sonnet or opus when the test genuinely requires stronger reasoning (E3, E10: real coding tasks via opencode) or is explicitly testing model routing (E14, C4).
 
 **Proxy log verification.** Most tests check proxy stderr for structured log lines:
 ```
@@ -110,7 +132,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-basic-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [{"role": "user", "content": "Respond with exactly: E2E_OK"}]
@@ -135,7 +157,7 @@ curl -sN http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-stream-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": true,
     "messages": [{"role": "user", "content": "Say hello in one word"}]
@@ -196,7 +218,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-cont-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 100,
     "stream": false,
     "messages": [{"role": "user", "content": "Remember: DELTA_99"}]
@@ -208,7 +230,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-cont-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 100,
     "stream": false,
     "messages": [
@@ -238,7 +260,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-cont-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 100,
     "stream": false,
     "messages": [
@@ -267,7 +289,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-compact-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [
@@ -287,7 +309,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-compact-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [
@@ -323,7 +345,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-compact-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [
@@ -350,7 +372,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-persist-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [{"role": "user", "content": "Remember: PHOENIX_42"}]
@@ -370,7 +392,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-persist-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 100,
     "stream": false,
     "messages": [
@@ -398,7 +420,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: dummy" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [{"role": "user", "content": "Unique fingerprint test message 98765"}]
@@ -409,7 +431,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: dummy" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [
@@ -526,7 +548,7 @@ for i in 1 2 3; do
     -H "x-api-key: dummy" \
     -H "x-opencode-session: e2e-concurrent-$i" \
     -d "{
-      \"model\": \"claude-sonnet-4-5-20250514\",
+      \"model\": \"claude-haiku-4-5-20251001\",
       \"max_tokens\": 30,
       \"stream\": false,
       \"messages\": [{\"role\": \"user\", \"content\": \"Say $i\"}]
@@ -583,7 +605,7 @@ curl -s -D /tmp/e2e-headers.txt http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-nonstream-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [{"role": "user", "content": "Say exactly: NONSTREAM_OK"}]
@@ -613,7 +635,7 @@ curl -s -w "\n%{http_code}" http://127.0.0.1:3456/v1/messages \
 # Missing messages
 curl -s -w "\n%{http_code}" http://127.0.0.1:3456/v1/messages \
   -H "Content-Type: application/json" -H "x-api-key: dummy" \
-  -d '{"model":"claude-sonnet-4-5-20250514","stream":false}'
+  -d '{"model":"claude-haiku-4-5-20251001","stream":false}'
 
 # Unknown endpoint
 curl -s -w "\n%{http_code}" http://127.0.0.1:3456/v1/nonexistent
@@ -624,7 +646,7 @@ curl -s -w "\n%{http_code}" http://127.0.0.1:3456/v1/messages
 
 **Pass criteria:**
 - Malformed JSON → HTTP 500, `{"type":"error","error":{"type":"api_error",...}}`
-- Missing messages → HTTP 500, structured error
+- Missing messages → HTTP 400, `{"type":"error","error":{"type":"invalid_request_error","message":"messages: Field required"}}`
 - Unknown endpoint → HTTP 404, `{"error":{"type":"not_found",...}}`
 - GET on POST endpoint → HTTP 404, `{"error":{"type":"not_found",...}}`
 - Proxy does NOT crash on any of these
@@ -650,7 +672,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-passthrough-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 200,
     "stream": false,
     "messages": [{"role": "user", "content": "Read the file /tmp/test.txt"}],
@@ -682,7 +704,7 @@ curl -sN http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-passthrough-stream-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 200,
     "stream": true,
     "messages": [{"role": "user", "content": "Read the file /tmp/test.txt"}],
@@ -715,7 +737,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-multimodal-001" \
   -d "{
-    \"model\": \"claude-sonnet-4-5-20250514\",
+    \"model\": \"claude-haiku-4-5-20251001\",
     \"max_tokens\": 100,
     \"stream\": false,
     \"messages\": [{
@@ -745,7 +767,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-task-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 100,
     "stream": false,
     "messages": [{"role": "user", "content": "Just say hello"}],
@@ -789,7 +811,7 @@ ANTHROPIC_API_KEY=should-be-stripped ANTHROPIC_BASE_URL=http://should-be-strippe
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-envstrip-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 20,
     "stream": false,
     "messages": [{"role": "user", "content": "Say OK"}]
@@ -823,7 +845,7 @@ for i in 1 2 3 4 5; do
     -H "Content-Type: application/json" \
     -H "x-api-key: dummy" \
     -H "x-opencode-session: e2e-prune-$i" \
-    -d "{\"model\":\"claude-sonnet-4-5-20250514\",\"max_tokens\":10,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"Session $i\"}]}" > /dev/null
+    -d "{\"model\":\"claude-haiku-4-5-20251001\",\"max_tokens\":10,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"Session $i\"}]}" > /dev/null
   sleep 1  # ensure distinct timestamps for deterministic eviction
 done
 
@@ -843,11 +865,424 @@ print(f'Entries: {len(d)} (should be <= 3)')
 
 ---
 
+## E22: OAuth Token Refresh
+
+**Verifies:** When the Claude Code OAuth access token has expired, the proxy detects the 401, refreshes the token automatically, and retries the request — the caller sees a normal successful response.
+
+**Platform note:** The credential store is platform-specific. Run on the platform you want to verify:
+- **macOS** — credentials in Keychain (`/usr/bin/security`)
+- **Linux** — credentials in `~/.claude/.credentials.json`
+
+### macOS
+
+```bash
+# 1. Snapshot current expiry
+python3 -c "
+import subprocess, json
+creds = json.loads(subprocess.check_output(
+    ['/usr/bin/security', 'find-generic-password', '-s', 'Claude Code-credentials',
+     '-a', __import__('os').getlogin(), '-w']).decode())
+print('Current expiresAt:', creds['claudeAiOauth']['expiresAt'])
+"
+
+# 2. Artificially expire the token
+CREDS=$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w)
+EXPIRED=$(echo "$CREDS" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+d['claudeAiOauth']['expiresAt'] = 0   # epoch — definitely expired
+print(json.dumps(d, indent=2))
+")
+security add-generic-password -U -s "Claude Code-credentials" -a "$(whoami)" -w "$EXPIRED"
+echo "Token expired (expiresAt set to 0)"
+
+# 3. Make a request — proxy should refresh inline and succeed
+curl -s http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "x-opencode-session: e2e-token-refresh-001" \
+  -d '{
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 20,
+    "stream": false,
+    "messages": [{"role": "user", "content": "Say: REFRESH_OK"}]
+  }'
+
+# 4. Verify token was refreshed
+python3 -c "
+import subprocess, json
+creds = json.loads(subprocess.check_output(
+    ['/usr/bin/security', 'find-generic-password', '-s', 'Claude Code-credentials',
+     '-a', __import__('os').getlogin(), '-w']).decode())
+exp = creds['claudeAiOauth']['expiresAt']
+import time
+print(f'New expiresAt: {exp} ({"VALID" if exp > time.time()*1000 else "STILL EXPIRED"})')
+"
+```
+
+### Linux
+
+```bash
+# 1. Snapshot current expiry
+python3 -c "
+import json, os
+creds = json.loads(open(os.path.expanduser('~/.claude/.credentials.json')).read())
+print('Current expiresAt:', creds['claudeAiOauth']['expiresAt'])
+"
+
+# 2. Artificially expire the token
+python3 -c "
+import json, os
+path = os.path.expanduser('~/.claude/.credentials.json')
+d = json.loads(open(path).read())
+d['claudeAiOauth']['expiresAt'] = 0
+open(path, 'w').write(json.dumps(d, indent=2))
+print('Token expired')
+"
+
+# 3. Make a request
+curl -s http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "x-opencode-session: e2e-token-refresh-001" \
+  -d '{
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 20,
+    "stream": false,
+    "messages": [{"role": "user", "content": "Say: REFRESH_OK"}]
+  }'
+
+# 4. Verify token was refreshed
+python3 -c "
+import json, os, time
+path = os.path.expanduser('~/.claude/.credentials.json')
+d = json.loads(open(path).read())
+exp = d['claudeAiOauth']['expiresAt']
+print(f'New expiresAt: {exp} ({\"VALID\" if exp > time.time()*1000 else \"STILL EXPIRED\"})')
+"
+```
+
+**Pass criteria:**
+- Response: `"type": "message"` with text containing `REFRESH_OK` — request succeeded despite starting with an expired token
+- Proxy log: `[PROXY] <id> OAuth token expired — refreshed, retrying` appears before the successful response log line
+- Step 4 expiresAt: `VALID` (in the future — token was refreshed and written back)
+- No `authentication_error` in the response
+
+**What's being tested:** The `isExpiredTokenError()` detection in `errors.ts`, the `refreshOAuthToken()` cross-platform credential read/write in `tokenRefresh.ts`, and the inline retry loop in `server.ts`.
+
+### Bonus: manual refresh endpoint
+
+While the proxy is running with a valid token, you can also verify the `/auth/refresh` endpoint directly:
+
+```bash
+curl -s -X POST http://127.0.0.1:3456/auth/refresh
+# → {"success":true,"message":"OAuth token refreshed successfully"}
+```
+
+**Pass criteria:** `success: true` and the `expiresAt` in the credential store is updated to a new future timestamp.
+
+---
+
+## E23: Subagent Model Selection
+
+**Verifies:** When the `x-opencode-agent-mode: subagent` header is present, the proxy selects the base model (200k) instead of the 1M variant, conserving rate limit budget for the primary agent. The `meridian-agent-mode.ts` plugin sets this header automatically based on the agent's runtime `mode` field.
+
+### Part A — header routing (curl, no plugin needed)
+
+```bash
+# Primary agent → sonnet[1m]
+curl -s http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "x-opencode-agent-mode: primary" \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":10,"stream":false,"messages":[{"role":"user","content":"hi"}]}' > /dev/null
+# Proxy log: model=sonnet[1m] ... agent=primary
+
+# Subagent → sonnet (base)
+curl -s http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "x-opencode-agent-mode: subagent" \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":10,"stream":false,"messages":[{"role":"user","content":"hi"}]}' > /dev/null
+# Proxy log: model=sonnet ... agent=subagent
+```
+
+**Pass criteria (Part A):**
+- Primary request proxy log: `model=sonnet[1m] ... agent=primary`
+- Subagent request proxy log: `model=sonnet ... agent=subagent` — base model, no `[1m]`
+- No header → `model=sonnet[1m]` (default primary behaviour)
+
+### Part B — plugin integration (requires OpenCode)
+
+**Setup:**
+```bash
+# 1. Copy the plugin into your project
+cp /path/to/meridian/examples/opencode-plugin/meridian-agent-mode.ts ./meridian-agent-mode.ts
+
+# 2. Add to opencode.json
+# { "plugin": ["./claude-max-headers.ts", "./meridian-agent-mode.ts"] }
+
+# 3. Create a named agent (e.g. ~/.config/opencode/agents/researcher.md)
+# The agent's frontmatter mode determines primary vs subagent
+```
+
+**Test:**
+```bash
+# Run a task that uses the Task tool to spawn the researcher agent
+opencode run --model anthropic/claude-sonnet-4-6 \
+  "Use the researcher agent to find out what day it is, then summarise."
+```
+
+**Pass criteria (Part B):**
+- Primary session log line: `model=sonnet[1m] agent=primary`
+- Subagent session log line: `model=sonnet agent=subagent`
+- Both requests succeed — no errors
+- Two distinct proxy log entries visible (parent + subagent turn)
+
+**What's being tested:** `mapModelToClaudeModel()` `agentMode` parameter in `models.ts`, `x-opencode-agent-mode` header reading in `server.ts`, and the `meridian-agent-mode.ts` plugin's use of `(incoming.agent as any).mode` to detect subagents without any API calls.
+
+---
+
+## E24: Default Non-Streaming
+
+**Verifies:** When the `stream` field is omitted from the request body, the proxy returns a single JSON response (`application/json`), not an SSE stream — matching the Anthropic API spec default.
+
+```bash
+curl -s -D /tmp/e2e-headers.txt http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -d '{
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 10,
+    "messages": [{"role": "user", "content": "Say OK"}]
+  }'
+grep -i content-type /tmp/e2e-headers.txt
+rm /tmp/e2e-headers.txt
+```
+
+**Pass criteria:**
+- Response header: `Content-Type: application/json` (not `text/event-stream`)
+- Response body: `"type": "message"`, `"role": "assistant"`, valid `content` array
+- Response is a single JSON object, not SSE events
+- Proxy log: `stream=false`
+
+**What's being tested:** The `body.stream ?? false` default in `server.ts`. Prior to this fix, omitting `stream` defaulted to `true` (SSE), which broke SDK clients calling `messages.create()` without an explicit `stream` parameter.
+
+---
+
+## E25: OpenAI Compat: Non-Streaming
+
+**Verifies:** `POST /v1/chat/completions` accepts an OpenAI-format request and returns a valid OpenAI completion JSON object.
+
+```bash
+curl -s http://127.0.0.1:3456/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -d '{
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 20,
+    "stream": false,
+    "messages": [{"role": "user", "content": "Say: OK"}]
+  }' | python3 -m json.tool
+```
+
+**Pass criteria:**
+- `"object": "chat.completion"`
+- `id` starts with `chatcmpl-`
+- `choices[0].message.role` is `"assistant"`
+- `choices[0].message.content` contains a response
+- `choices[0].finish_reason` is `"stop"`
+- `usage.prompt_tokens`, `usage.completion_tokens`, `usage.total_tokens` are numbers
+- Proxy log: `stream=false` (non-streaming path used internally)
+
+**What's being tested:** `translateOpenAiToAnthropic()` and `translateAnthropicToOpenAi()` in `openai.ts`, internal routing via `app.fetch()` to `/v1/messages`.
+
+---
+
+## E26: OpenAI Compat: Streaming
+
+**Verifies:** `POST /v1/chat/completions` with `stream: true` returns OpenAI SSE chunks in the correct format.
+
+```bash
+curl -sN http://127.0.0.1:3456/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -d '{
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 20,
+    "stream": true,
+    "messages": [{"role": "user", "content": "Say: hello"}]
+  }'
+```
+
+**Pass criteria:**
+- Response `Content-Type: text/event-stream`
+- First data chunk has `"object": "chat.completion.chunk"` and `choices[0].delta.role == "assistant"`
+- At least one chunk has non-empty `choices[0].delta.content`
+- A chunk has `choices[0].finish_reason == "stop"`
+- Stream ends with `data: [DONE]`
+- All chunks share the same `id` starting with `chatcmpl-`
+- Proxy log: `stream=true`
+
+**What's being tested:** `translateAnthropicSseEvent()` in `openai.ts`, SSE stream translation in `server.ts`.
+
+---
+
+## E27: OpenAI Compat: Models
+
+**Verifies:** `GET /v1/models` returns available Claude models in OpenAI format with correct context windows for the subscription tier.
+
+```bash
+curl -s http://127.0.0.1:3456/v1/models | python3 -m json.tool
+```
+
+**Pass criteria:**
+- `"object": "list"`
+- `data` array contains `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001`
+- Each model has `object: "model"`, `owned_by: "anthropic"`, `context_window > 0`
+- For Max subscription: sonnet and opus have `context_window: 1000000`
+- Haiku always has `context_window: 200000`
+
+**What's being tested:** `buildModelList()` in `openai.ts`, `GET /v1/models` route in `server.ts`.
+
+---
+
+## E28: SDK Param Passthrough
+
+**Verifies:** The live proxy accepts the new SDK passthrough fields (`effort`, `thinking`, `task_budget`, `anthropic-beta`) and still completes a normal Claude request. Exact option mapping is asserted by the integration tests in `src/__tests__/proxy-sdk-params.test.ts` and `src/__tests__/query-passthrough.test.ts`; this live test proves the real HTTP → proxy → SDK path does not reject or break on these fields.
+
+```bash
+curl -s http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "x-opencode-session: e2e-sdk-params-001" \
+  -H "x-opencode-effort: high" \
+  -H "x-opencode-task-budget: 2000" \
+  -H "anthropic-beta: interleaved-thinking-2025-05-14" \
+  -d '{
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 120,
+    "stream": false,
+    "thinking": {"type": "enabled", "budgetTokens": 1024},
+    "task_budget": {"total": 1000},
+    "messages": [{"role": "user", "content": "Reply with exactly: SDK_PARAMS_OK"}]
+  }' | python3 -m json.tool
+```
+
+**Pass criteria:**
+- Response is a valid Anthropic-format assistant message
+- Response is **not** a structured error
+- Proxy stderr shows a normal request log line (`model=... stream=false ...`)
+- Proxy stderr shows a `usage:` line after the request
+
+### Variant: malformed thinking override falls back cleanly
+
+```bash
+curl -s http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "x-opencode-session: e2e-sdk-params-002" \
+  -H "x-opencode-thinking: not-valid-json{{{" \
+  -d '{
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 120,
+    "stream": false,
+    "thinking": {"type": "enabled", "budgetTokens": 1024},
+    "messages": [{"role": "user", "content": "Reply with exactly: THINKING_FALLBACK_OK"}]
+  }' | python3 -m json.tool
+```
+
+**Pass criteria:**
+- Response succeeds with a normal assistant message (HTTP 200)
+- Proxy stderr contains `ignoring malformed x-opencode-thinking header`
+- Request still completes normally instead of failing with a 4xx/5xx
+
+---
+
+## E29: Context Usage Endpoint
+
+**Verifies:** A completed request stores token usage under the Claude SDK session ID returned by the proxy, and `/v1/sessions/:claudeSessionId/context-usage` returns it.
+
+```bash
+# 1. Make a request and capture response headers + body
+curl -sD /tmp/e2e-context-usage.headers \
+  -o /tmp/e2e-context-usage.body \
+  http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "x-opencode-session: e2e-context-usage-001" \
+  -d '{
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 80,
+    "stream": false,
+    "messages": [{"role": "user", "content": "Reply with exactly: CONTEXT_USAGE_OK"}]
+  }'
+
+# 2. Extract the Claude session ID the proxy returned
+CLAUDE_SESSION_ID=$(awk 'BEGIN{IGNORECASE=1} /^X-Claude-Session-ID:/ {print $2}' /tmp/e2e-context-usage.headers | tr -d '\r')
+echo "$CLAUDE_SESSION_ID"
+
+# 3. Query the usage endpoint
+curl -s http://127.0.0.1:3456/v1/sessions/$CLAUDE_SESSION_ID/context-usage | python3 -m json.tool
+```
+
+**Pass criteria:**
+- `CLAUDE_SESSION_ID` is non-empty
+- Endpoint returns HTTP 200
+- JSON contains `session_id` equal to the extracted Claude session ID
+- JSON contains `context_usage.input_tokens` and `context_usage.output_tokens`
+- Proxy stderr for the original request contains a `usage:` line
+
+---
+
+## E30: Context Usage via Fingerprint + Restart
+
+**Verifies:** The context-usage endpoint also works for sessions created **without** `x-opencode-session` (fingerprint fallback) and still works after restarting the proxy (shared session store persistence).
+
+```bash
+# 1. Make a headerless request and capture the returned Claude session ID
+curl -sD /tmp/e2e-context-fp.headers \
+  -o /tmp/e2e-context-fp.body \
+  http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -d '{
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 80,
+    "stream": false,
+    "messages": [{"role": "user", "content": "Reply with exactly: FP_CONTEXT_USAGE_OK"}]
+  }'
+
+CLAUDE_SESSION_ID=$(awk 'BEGIN{IGNORECASE=1} /^X-Claude-Session-ID:/ {print $2}' /tmp/e2e-context-fp.headers | tr -d '\r')
+echo "$CLAUDE_SESSION_ID"
+
+# 2. Query usage immediately (proves fingerprint-backed sessions are discoverable)
+curl -s http://127.0.0.1:3456/v1/sessions/$CLAUDE_SESSION_ID/context-usage | python3 -m json.tool
+
+# 3. Restart the proxy WITHOUT deleting ~/.cache/meridian/sessions.json
+kill $(lsof -ti :3456) 2>/dev/null
+sleep 2
+CLAUDE_PROXY_PORT=3456 bun run ./bin/cli.ts > /tmp/proxy-e2e.log 2>&1 &
+sleep 5
+
+# 4. Query usage again after restart (proves shared-store persistence)
+curl -s http://127.0.0.1:3456/v1/sessions/$CLAUDE_SESSION_ID/context-usage | python3 -m json.tool
+```
+
+**Pass criteria:**
+- Step 2 returns HTTP 200 for a request that had **no** `x-opencode-session` header
+- Step 4 also returns HTTP 200 after restart
+- Both responses contain `session_id` equal to the extracted Claude session ID
+- Both responses contain `context_usage.input_tokens` and `context_usage.output_tokens`
+- No need to replay the original request after restart — the lookup should work from persisted session data alone
+
+---
+
 ## Adding New E2E Tests
 
 When extending this document:
 
-1. **Assign an ID** — sequential `E22`, `E23`, etc.
+1. **Assign an ID** — use the next sequential `E##` number in the index.
 2. **Add to the index table** at the top with the date verified.
 3. **Include the exact curl/opencode command** — tests must be copy-pasteable.
 4. **Define pass criteria** — what to check in the response AND in the proxy log.
@@ -897,17 +1332,18 @@ Which proxy modules each E2E test exercises:
 |--------|-------|
 | `server.ts` (orchestration) | All |
 | `session/lineage.ts` | E4, E5, E6, E7, E8, E9 |
-| `session/cache.ts` | E4, E5, E6, E7, E8, E9 |
-| `session/fingerprint.ts` | E9 |
-| `sessionStore.ts` | E8, E21 |
-| `query.ts` | All (builds SDK options) |
+| `session/cache.ts` | E4, E5, E6, E7, E8, E9, E29, E30 |
+| `session/fingerprint.ts` | E9, E30 |
+| `sessionStore.ts` | E8, E21, E30 |
+| `query.ts` | All (builds SDK options), especially E28 |
 | `adapter.ts` + `adapters/opencode.ts` | All E-tests, D3, D10 |
 | `adapters/droid.ts` | D1, D2, D4, D5, D6, D7, D8, D9 |
 | `adapters/crush.ts` | C1, C2, C3, C4, C5 |
 | `adapters/detect.ts` | D1, D2, D3, D6, D7, D9, D10, C1, C5 |
 | *(default adapter — no Cline adapter needed)* | CL1–CL8 |
-| `errors.ts` | E16 |
-| `models.ts` | E14 |
+| `errors.ts` | E16, E22 |
+| `tokenRefresh.ts` | E22 |
+| `models.ts` | E14, E23 |
 | `messages.ts` | E4, E5, E6 (content normalization for hashing) |
 | `tools.ts` | E3, E17, E19 |
 | `agentDefs.ts` | E19 |
@@ -951,7 +1387,7 @@ with open('$HOME/.factory/settings.json', 'w') as f:
 "
 
 # 3. Verify Droid sees the model
-droid exec --model "custom:claude-sonnet-4-5-20250514" --list-tools 2>&1 | head -3
+droid exec --model "custom:claude-haiku-4-5-20251001" --list-tools 2>&1 | head -3
 # → Available tools for claude-sonnet-4-5-20250514
 
 # After all Droid tests, restore:
@@ -986,7 +1422,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "User-Agent: factory-cli/0.89.0" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [{"role": "user", "content": "Respond with exactly: DROID_E2E_OK"}]
@@ -1011,7 +1447,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "User-Agent: factory-cli/0.89.0" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 200,
     "stream": false,
     "messages": [{"role": "user", "content": "List the current directory. Use the Bash tool."}],
@@ -1046,7 +1482,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: d3-compat-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 30,
     "stream": false,
     "messages": [{"role": "user", "content": "Say: OC_COMPAT_OK"}]
@@ -1058,7 +1494,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "User-Agent: opencode/1.0" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 30,
     "stream": false,
     "messages": [{"role": "user", "content": "Say: OC_UA_OK"}]
@@ -1082,7 +1518,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "User-Agent: factory-cli/0.89.0" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 30,
     "stream": false,
     "messages": [{
@@ -1114,7 +1550,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "User-Agent: factory-cli/0.89.0" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [{
@@ -1132,7 +1568,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "User-Agent: factory-cli/0.89.0" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 80,
     "stream": false,
     "messages": [
@@ -1160,7 +1596,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
 
 ```bash
 droid exec \
-  --model "custom:claude-sonnet-4-5-20250514" \
+  --model "custom:claude-haiku-4-5-20251001" \
   --skip-permissions-unsafe \
   --cwd /tmp \
   "Reply with exactly: REAL_DROID_OK. Nothing else."
@@ -1186,7 +1622,7 @@ echo "DROID_CANARY_E2E_42" > /tmp/droid-canary.txt
 
 # Droid reads it via proxy
 droid exec \
-  --model "custom:claude-sonnet-4-5-20250514" \
+  --model "custom:claude-haiku-4-5-20251001" \
   --auto medium \
   --cwd /tmp \
   "Read the file /tmp/droid-canary.txt and tell me what it contains. Just the content, nothing else."
@@ -1209,14 +1645,14 @@ rm /tmp/droid-canary.txt
 ```bash
 # Turn 1 — set a secret
 droid exec \
-  --model "custom:claude-sonnet-4-5-20250514" \
+  --model "custom:claude-haiku-4-5-20251001" \
   --skip-permissions-unsafe \
   --cwd /tmp \
   "Remember the code: DROID_SECRET_99. Just say 'noted'."
 
 # Turn 2 — separate exec, no shared history
 droid exec \
-  --model "custom:claude-sonnet-4-5-20250514" \
+  --model "custom:claude-haiku-4-5-20251001" \
   --skip-permissions-unsafe \
   --cwd /tmp \
   "What was the secret code?"
@@ -1242,7 +1678,7 @@ curl -sN http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "User-Agent: factory-cli/0.89.0" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": true,
     "messages": [{"role": "user", "content": "Say: STREAM_DROID_OK"}]
@@ -1269,7 +1705,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: d10-oc-backcompat-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 50,
     "stream": false,
     "messages": [{"role": "user", "content": "Remember: OPENCODE_BACKCOMPAT_55"}]
@@ -1281,7 +1717,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: d10-oc-backcompat-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 80,
     "stream": false,
     "messages": [
@@ -1362,7 +1798,7 @@ Add the `meridian` provider to `~/.config/crush/crush.json`:
 Verify Crush sees the models:
 ```bash
 crush models | grep meridian
-# → meridian/claude-sonnet-4-6
+# → meridian/claude-haiku-4-5-20251001
 # → meridian/claude-opus-4-6
 # → meridian/claude-haiku-4-5-20251001
 ```
@@ -1375,7 +1811,7 @@ crush models | grep meridian
 
 ```bash
 crush run \
-  --model meridian/claude-sonnet-4-6 \
+  --model meridian/claude-haiku-4-5-20251001 \
   --cwd /path/to/your/project \
   --quiet \
   "Respond with exactly: CRUSH_E2E_OK"
@@ -1395,14 +1831,14 @@ crush run \
 ```bash
 # Turn 1: establish session
 crush run \
-  --model meridian/claude-sonnet-4-6 \
+  --model meridian/claude-haiku-4-5-20251001 \
   --cwd /path/to/your/project \
   --quiet \
   "Remember the code: CRUSH_CONT_99. Reply with 'stored'."
 
 # Turn 2: continue that session
 crush run \
-  --model meridian/claude-sonnet-4-6 \
+  --model meridian/claude-haiku-4-5-20251001 \
   --cwd /path/to/your/project \
   --continue \
   --quiet \
@@ -1422,7 +1858,7 @@ crush run \
 
 ```bash
 crush run \
-  --model meridian/claude-sonnet-4-6 \
+  --model meridian/claude-haiku-4-5-20251001 \
   --cwd /path/to/your/project \
   --quiet \
   "Use the ls tool to list the files in the current directory and show me the output"
@@ -1443,7 +1879,7 @@ crush run \
 
 ```bash
 crush run \
-  --model meridian/claude-sonnet-4-6 \
+  --model meridian/claude-haiku-4-5-20251001 \
   --cwd /path/to/project \
   --quiet \
   "Write the text 'CRUSH_WRITE_OK' to /tmp/crush-write-test.txt"
@@ -1495,7 +1931,7 @@ curl -s http://127.0.0.1:3456/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: c5-oc-001" \
-  -d '{"model":"claude-sonnet-4-5-20250929","max_tokens":20,"stream":false,"messages":[{"role":"user","content":"Say: OC_COEXIST"}]}' \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":20,"stream":false,"messages":[{"role":"user","content":"Say: OC_COEXIST"}]}' \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['content'][0]['text'])"
 
 curl -s http://127.0.0.1:3456/v1/messages \
@@ -1758,7 +2194,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-fc-write-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 300,
     "stream": false,
     "messages": [{"role": "user", "content": "Write the text FILECHANGE_OK to /tmp/e2e-fc-write.txt. Just write it, nothing else."}]
@@ -1793,7 +2229,7 @@ curl -sN http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-fc-stream-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 300,
     "stream": true,
     "messages": [{"role": "user", "content": "Write the text STREAMFC_OK to /tmp/e2e-fc-stream.txt. Just write it."}]
@@ -1823,7 +2259,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-fc-edit-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 300,
     "stream": false,
     "messages": [{"role": "user", "content": "Edit /tmp/e2e-fc-edit.js to change hello to world. Do not rewrite the whole file, just edit it."}]
@@ -1857,7 +2293,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-fc-readonly-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 200,
     "stream": false,
     "messages": [{"role": "user", "content": "Read the file /tmp/e2e-fc-readonly.txt and tell me what it contains. Do not modify it."}]
@@ -1894,7 +2330,7 @@ curl -s http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-fc-multi-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 400,
     "stream": false,
     "messages": [{"role": "user", "content": "Do two things: 1) Write MULTI_A to /tmp/e2e-fc-multi-a.txt. 2) Edit /tmp/e2e-fc-multi-b.txt to change \"original\" to \"modified\". Do both."}]
@@ -1934,7 +2370,7 @@ curl -sN http://127.0.0.1:3457/v1/messages \
   -H "x-api-key: dummy" \
   -H "x-opencode-session: e2e-fc-stream-multi-001" \
   -d '{
-    "model": "claude-sonnet-4-5-20250514",
+    "model": "claude-haiku-4-5-20251001",
     "max_tokens": 400,
     "stream": true,
     "messages": [{"role": "user", "content": "Write FOO to /tmp/e2e-fc-stream-multi-a.txt and BAR to /tmp/e2e-fc-stream-multi-b.txt"}]
@@ -1958,3 +2394,501 @@ rm -f /tmp/e2e-fc-stream-multi-a.txt /tmp/e2e-fc-stream-multi-b.txt
 kill $(lsof -ti :3457) 2>/dev/null
 rm -f /tmp/proxy-fc-e2e.log
 ```
+
+---
+
+## E31: Passthrough — thinking blocks stripped, Turn 2 prose suppressed
+
+Verifies that Claude's `thinking` content blocks and the SDK's internal Turn 2 prose summary are NOT forwarded to the client in passthrough mode. This fixes the missing diff-UI bug in OpenCode when using Claude Opus (issue #237).
+
+### Setup
+
+```bash
+# Proxy must be running in passthrough mode
+MERIDIAN_PASSTHROUGH=1 MERIDIAN_PORT=3457 npm start &
+sleep 3
+curl -s http://127.0.0.1:3457/health | jq .mode   # → "passthrough"
+
+# Create a test file to edit
+echo 'function greet(name) { return "Hello " + name }' > /tmp/e2e-passthrough-edit.js
+```
+
+### Non-streaming: no thinking, no Turn 2 prose
+
+```bash
+curl -s http://127.0.0.1:3457/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-opus-4-6",
+    "max_tokens": 1024,
+    "stream": false,
+    "messages": [{"role":"user","content":"Edit /tmp/e2e-passthrough-edit.js — replace string concat with a template literal. Use the edit tool."}],
+    "tools": [{
+      "name": "edit",
+      "description": "Edit a file by replacing oldString with newString",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "filePath": {"type":"string"},
+          "oldString": {"type":"string"},
+          "newString": {"type":"string"}
+        },
+        "required": ["filePath","oldString","newString"]
+      }
+    }]
+  }' | jq '{
+    stop_reason,
+    block_types: [.content[].type],
+    has_thinking: ([.content[].type] | contains(["thinking"])),
+    has_prose_about_forwarding: ([.content[] | select(.type=="text") | .text // ""] | any(contains("forwarded"))),
+    tool_use_name: (.content[] | select(.type=="tool_use") | .name),
+    tool_input_keys: (.content[] | select(.type=="tool_use") | .input | keys)
+  }'
+```
+
+**Pass criteria:**
+- `stop_reason` = `"tool_use"`
+- `has_thinking` = `false`
+- `has_prose_about_forwarding` = `false`
+- `tool_use_name` = `"edit"`
+- `tool_input_keys` contains `["filePath","oldString","newString"]`
+
+### Streaming: no thinking_delta events forwarded
+
+```bash
+curl -sN http://127.0.0.1:3457/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: dummy" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-opus-4-6",
+    "max_tokens": 1024,
+    "stream": true,
+    "messages": [{"role":"user","content":"Edit /tmp/e2e-passthrough-edit.js — replace string concat with a template literal. Use the edit tool."}],
+    "tools": [{
+      "name": "edit",
+      "description": "Edit a file by replacing oldString with newString",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "filePath": {"type":"string"},
+          "oldString": {"type":"string"},
+          "newString": {"type":"string"}
+        },
+        "required": ["filePath","oldString","newString"]
+      }
+    }]
+  }' | tee /tmp/e31-stream.txt | grep "thinking"
+# → (no output)
+
+# Verify the edit tool_use IS in the stream
+grep '"tool_use"' /tmp/e31-stream.txt | head -1
+# → data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"...","name":"edit","input":{}}}
+
+grep '"thinking"' /tmp/e31-stream.txt
+# → (no output — thinking blocks stripped)
+
+rm -f /tmp/e31-stream.txt /tmp/e2e-passthrough-edit.js
+```
+
+**Pass criteria:**
+- `grep '"thinking"'` returns no output
+- A `content_block_start` with `"type":"tool_use"` and `"name":"edit"` is present
+- The stream ends with `event: message_stop`
+
+### Cleanup
+
+```bash
+kill $(lsof -ti :3457) 2>/dev/null
+```
+
+---
+
+## Profile Tests
+
+**Prerequisites:** Two profiles configured in `~/.config/meridian/profiles.json` with valid auth. Example:
+```json
+[
+  {"id": "personal", "claudeConfigDir": "/Users/you/.claude"},
+  {"id": "work", "claudeConfigDir": "/Users/you/.claude-work"}
+]
+```
+
+Both must pass `claude auth status` with `loggedIn: true` under their respective `CLAUDE_CONFIG_DIR`.
+
+Proxy must be running with disk profile discovery (no `MERIDIAN_PROFILES` env var — let it auto-discover from the JSON file).
+
+### Setup
+
+```bash
+# Verify both profiles are authenticated
+PROFILE1_DIR=$(python3 -c "import json; print(json.load(open('$HOME/.config/meridian/profiles.json'))[0]['claudeConfigDir'])")
+PROFILE2_DIR=$(python3 -c "import json; print(json.load(open('$HOME/.config/meridian/profiles.json'))[1]['claudeConfigDir'])")
+PROFILE1_ID=$(python3 -c "import json; print(json.load(open('$HOME/.config/meridian/profiles.json'))[0]['id'])")
+PROFILE2_ID=$(python3 -c "import json; print(json.load(open('$HOME/.config/meridian/profiles.json'))[1]['id'])")
+
+CLAUDE_CONFIG_DIR=$PROFILE1_DIR claude auth status | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['loggedIn'], f'{d}'; print(f'Profile 1 ({d[\"email\"]}): OK')"
+CLAUDE_CONFIG_DIR=$PROFILE2_DIR claude auth status | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['loggedIn'], f'{d}'; print(f'Profile 2 ({d[\"email\"]}): OK')"
+
+# Verify proxy is healthy
+curl -sf http://127.0.0.1:3456/health | python3 -c "import json,sys; assert json.load(sys.stdin)['status']=='healthy'; print('Proxy: healthy')"
+```
+
+---
+
+## P1: Profile List & Auth Status
+
+**Verifies:** `/profiles/list` returns all configured profiles with live auth status, emails, and timestamps.
+
+```bash
+RESULT=$(curl -s http://127.0.0.1:3456/profiles/list)
+
+# Should have at least 2 profiles
+COUNT=$(echo "$RESULT" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['profiles']))")
+test "$COUNT" -ge 2 && echo "PASS: $COUNT profiles found" || echo "FAIL: expected >=2, got $COUNT"
+
+# Each profile should have id, email, loggedIn, isActive, lastSuccessAt
+echo "$RESULT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for p in d['profiles']:
+    assert 'id' in p, f'missing id: {p}'
+    assert 'email' in p, f'missing email: {p}'
+    assert 'loggedIn' in p, f'missing loggedIn: {p}'
+    assert 'isActive' in p, f'missing isActive: {p}'
+    assert 'lastSuccessAt' in p or 'lastCheckedAt' in p, f'missing auth timestamps: {p}'
+    print(f'  {p[\"id\"]:12} email={p[\"email\"]}  loggedIn={p[\"loggedIn\"]}  active={p[\"isActive\"]}')
+assert d.get('activeProfile'), 'missing activeProfile'
+print(f'Active: {d[\"activeProfile\"]}  PASS')
+"
+```
+
+**Pass criteria:**
+- At least 2 profiles returned
+- Each has `id`, `email`, `loggedIn`, `isActive`, auth timestamps
+- Exactly one profile has `isActive: true`
+- `activeProfile` field present
+
+---
+
+## P2: Profile Switch via API
+
+**Verifies:** `POST /profiles/active` switches the active profile; `/profiles/list` and `/health` reflect the change.
+
+```bash
+# Get profile IDs
+PROFILE1_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['id'])")
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+PROFILE1_EMAIL=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['email'])")
+PROFILE2_EMAIL=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['email'])")
+
+# Switch to profile 1
+RES=$(curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE1_ID\"}")
+echo "$RES" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['success']; assert d['activeProfile']=='$PROFILE1_ID'; print(f'Switch to $PROFILE1_ID: PASS')"
+
+# Health should show profile 1 email
+HEALTH_EMAIL=$(curl -s http://127.0.0.1:3456/health | python3 -c "import json,sys; print(json.load(sys.stdin)['auth']['email'])")
+test "$HEALTH_EMAIL" = "$PROFILE1_EMAIL" && echo "PASS: health=$HEALTH_EMAIL" || echo "FAIL: expected $PROFILE1_EMAIL, got $HEALTH_EMAIL"
+
+# Switch to profile 2
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE2_ID\"}" > /dev/null
+
+# Health should show profile 2 email
+HEALTH_EMAIL=$(curl -s http://127.0.0.1:3456/health | python3 -c "import json,sys; print(json.load(sys.stdin)['auth']['email'])")
+test "$HEALTH_EMAIL" = "$PROFILE2_EMAIL" && echo "PASS: health=$HEALTH_EMAIL" || echo "FAIL: expected $PROFILE2_EMAIL, got $HEALTH_EMAIL"
+```
+
+**Pass criteria:**
+- Switch returns `{"success": true, "activeProfile": "<id>"}`
+- `/health` email matches the switched profile
+
+---
+
+## P3: Profile Persistence Across Restart
+
+**Verifies:** Active profile survives a proxy restart.
+
+```bash
+# Get profile IDs
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+PROFILE2_EMAIL=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['email'])")
+
+# Switch to profile 2
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE2_ID\"}" > /dev/null
+
+# Verify settings.json
+SAVED=$(python3 -c "import json; print(json.load(open('$HOME/.config/meridian/settings.json'))['activeProfile'])")
+test "$SAVED" = "$PROFILE2_ID" && echo "PASS: settings.json=$SAVED" || echo "FAIL: expected $PROFILE2_ID, got $SAVED"
+
+# Restart proxy (adjust for your setup — launchd, systemd, or manual)
+kill $(lsof -ti :3456) 2>/dev/null; sleep 1
+MERIDIAN_PORT=3456 bun run ./bin/cli.ts &
+sleep 3
+
+# Verify profile restored
+ACTIVE=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['activeProfile'])")
+test "$ACTIVE" = "$PROFILE2_ID" && echo "PASS: restored=$ACTIVE" || echo "FAIL: expected $PROFILE2_ID, got $ACTIVE"
+
+HEALTH_EMAIL=$(curl -s http://127.0.0.1:3456/health | python3 -c "import json,sys; print(json.load(sys.stdin)['auth']['email'])")
+test "$HEALTH_EMAIL" = "$PROFILE2_EMAIL" && echo "PASS: health=$HEALTH_EMAIL" || echo "FAIL: expected $PROFILE2_EMAIL, got $HEALTH_EMAIL"
+```
+
+**Pass criteria:**
+- `settings.json` has the switched profile ID
+- After restart, `/profiles/list` shows same active profile
+- `/health` shows the correct email
+
+---
+
+## P4: Profile Request Routing
+
+**Verifies:** Requests use the active profile's SDK auth context.
+
+```bash
+PROFILE1_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['id'])")
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+
+# Switch to profile 1, send request
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE1_ID\"}" > /dev/null
+
+curl -s -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -H "x-opencode-session: e2e-profile-p4a" \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"stream":false,
+       "messages":[{"role":"user","content":"say ok"}]}' > /dev/null
+
+LOG_P1=$(cat /tmp/proxy-e2e.log 2>/dev/null | strings | grep 'e2e-profile-p4a' | grep '\[PROXY\]' | head -1)
+echo "Profile 1 request: $LOG_P1"
+
+# Switch to profile 2, send request
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE2_ID\"}" > /dev/null
+
+curl -s -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -H "x-opencode-session: e2e-profile-p4b" \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"stream":false,
+       "messages":[{"role":"user","content":"say ok"}]}' > /dev/null
+
+LOG_P2=$(cat /tmp/proxy-e2e.log 2>/dev/null | strings | grep 'e2e-profile-p4b' | grep '\[PROXY\]' | head -1)
+echo "Profile 2 request: $LOG_P2"
+
+# Both should have returned 200 (no errors)
+test -n "$LOG_P1" && test -n "$LOG_P2" && echo "PASS: both profiles handled requests" || echo "FAIL: missing log lines"
+```
+
+**Pass criteria:**
+- Both requests return 200
+- Proxy log shows both requests processed
+
+---
+
+## P5: Profile Per-Request Header Override
+
+**Verifies:** `x-meridian-profile` header routes a single request to a different profile without changing the active profile.
+
+```bash
+PROFILE1_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['id'])")
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+
+# Set active to profile 1
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE1_ID\"}" > /dev/null
+
+# Send request with header override to profile 2
+curl -sf -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -H "x-meridian-profile: $PROFILE2_ID" \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"stream":false,
+       "messages":[{"role":"user","content":"say ok"}]}' > /dev/null \
+  && echo "PASS: header override request succeeded" || echo "FAIL: request failed"
+
+# Active profile should still be profile 1
+ACTIVE=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['activeProfile'])")
+test "$ACTIVE" = "$PROFILE1_ID" && echo "PASS: active unchanged=$ACTIVE" || echo "FAIL: active changed to $ACTIVE"
+```
+
+**Pass criteria:**
+- Override request returns 200
+- Active profile remains unchanged
+
+---
+
+## P6: Profile Session Isolation
+
+**Verifies:** The same conversation messages on different profiles create separate SDK sessions (no cross-profile resume).
+
+```bash
+PROFILE1_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['id'])")
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+MSGS='[{"role":"user","content":"session isolation test e2e-p6"}]'
+
+# Request on profile 1
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE1_ID\"}" > /dev/null
+
+curl -s -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d "{\"model\":\"claude-haiku-4-5-20251001\",\"max_tokens\":10,\"stream\":false,\"messages\":$MSGS}" > /dev/null
+
+# Same messages on profile 2 — should be lineage=new, NOT continuation
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE2_ID\"}" > /dev/null
+
+curl -s -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d "{\"model\":\"claude-haiku-4-5-20251001\",\"max_tokens\":10,\"stream\":false,\"messages\":$MSGS}" > /dev/null
+
+# Both requests should show session=new in the proxy log (not continuation)
+# The last 2 request log lines should both be fresh sessions
+COUNT=$(tail -10 /tmp/proxy-e2e.log 2>/dev/null | strings | grep '\[PROXY\].*adapter=.*session=new' | tail -2 | wc -l | tr -d ' ')
+test "$COUNT" -ge 2 && echo "PASS: both requests got fresh sessions" || echo "FAIL: expected 2 session=new lines, got $COUNT"
+```
+
+**Pass criteria:**
+- Second request (profile 2) shows `session=new` in proxy log, NOT `lineage=continuation`
+
+---
+
+## P7: Profile Invalid Profile Rejection
+
+**Verifies:** Switching to a nonexistent profile returns 400. Invalid persisted profile is handled gracefully on restart.
+
+```bash
+# Try to switch to nonexistent profile
+RES=$(curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d '{"profile":"nonexistent_profile_xyz"}')
+STATUS=$(echo "$RES" | python3 -c "import json,sys; print('error' if 'error' in json.load(sys.stdin) else 'success')")
+test "$STATUS" = "error" && echo "PASS: nonexistent profile rejected" || echo "FAIL: expected error, got $RES"
+
+# Write invalid profile to settings.json, restart, verify fallback
+ORIG=$(cat ~/.config/meridian/settings.json)
+echo '{"activeProfile":"does_not_exist_abc"}' > ~/.config/meridian/settings.json
+
+kill $(lsof -ti :3456) 2>/dev/null; sleep 1
+MERIDIAN_PORT=3456 bun run ./bin/cli.ts &
+sleep 3
+
+# Should fall back to first profile, not crash
+ACTIVE=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['activeProfile'])")
+HEALTH=$(curl -s http://127.0.0.1:3456/health | python3 -c "import json,sys; print(json.load(sys.stdin)['status'])")
+test "$HEALTH" = "healthy" && echo "PASS: proxy healthy after invalid profile (active=$ACTIVE)" || echo "FAIL: proxy unhealthy"
+
+# Restore
+echo "$ORIG" > ~/.config/meridian/settings.json
+```
+
+**Pass criteria:**
+- Switch to nonexistent profile returns error response (not 200)
+- Proxy starts healthy with invalid `settings.json`; falls back to first profile
+
+---
+
+## P8: Profile Settings Persistence
+
+**Verifies:** `settings.json` is updated when profile is switched; CLI `meridian profile list` shows correct state.
+
+```bash
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+
+# Switch via API
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE2_ID\"}" > /dev/null
+
+# Verify settings.json
+SAVED=$(python3 -c "import json; print(json.load(open('$HOME/.config/meridian/settings.json'))['activeProfile'])")
+test "$SAVED" = "$PROFILE2_ID" && echo "PASS: settings.json=$SAVED" || echo "FAIL: expected $PROFILE2_ID, got $SAVED"
+
+# Verify CLI shows profiles (non-interactive, just list)
+meridian profile list 2>&1 | grep -q "$PROFILE2_ID" && echo "PASS: CLI shows profile" || echo "FAIL: CLI missing profile"
+```
+
+**Pass criteria:**
+- `settings.json` contains the switched profile ID
+- `meridian profile list` output includes the profile
+
+---
+
+## P9: Profile Health Reflects Active
+
+**Verifies:** `/health` endpoint email changes when active profile changes.
+
+```bash
+PROFILE1_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['id'])")
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+PROFILE1_EMAIL=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['email'])")
+PROFILE2_EMAIL=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['email'])")
+
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE1_ID\"}" > /dev/null
+E1=$(curl -s http://127.0.0.1:3456/health | python3 -c "import json,sys; print(json.load(sys.stdin)['auth']['email'])")
+
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE2_ID\"}" > /dev/null
+E2=$(curl -s http://127.0.0.1:3456/health | python3 -c "import json,sys; print(json.load(sys.stdin)['auth']['email'])")
+
+test "$E1" = "$PROFILE1_EMAIL" && test "$E2" = "$PROFILE2_EMAIL" && test "$E1" != "$E2" \
+  && echo "PASS: health switches ($E1 → $E2)" \
+  || echo "FAIL: expected $PROFILE1_EMAIL/$PROFILE2_EMAIL, got $E1/$E2"
+```
+
+**Pass criteria:**
+- Health email matches profile 1 email after switching to profile 1
+- Health email matches profile 2 email after switching to profile 2
+- The two emails are different
+
+---
+
+## P10: Profile Telemetry Records After Switch
+
+**Verifies:** Requests on both profiles appear in telemetry.
+
+```bash
+PROFILE1_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][0]['id'])")
+PROFILE2_ID=$(curl -s http://127.0.0.1:3456/profiles/list | python3 -c "import json,sys; print(json.load(sys.stdin)['profiles'][1]['id'])")
+
+# Note starting request count
+BEFORE=$(curl -s 'http://127.0.0.1:3456/telemetry/requests?limit=100' | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+
+# Request on profile 1
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE1_ID\"}" > /dev/null
+curl -s -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"stream":false,
+       "messages":[{"role":"user","content":"telemetry test p10a"}]}' > /dev/null
+
+# Request on profile 2 (streaming)
+curl -s -X POST http://127.0.0.1:3456/profiles/active \
+  -H "Content-Type: application/json" -d "{\"profile\":\"$PROFILE2_ID\"}" > /dev/null
+curl -s -N -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"stream":true,
+       "messages":[{"role":"user","content":"telemetry test p10b"}]}' > /dev/null
+
+sleep 1
+
+# Should have 2 more requests
+AFTER=$(curl -s 'http://127.0.0.1:3456/telemetry/requests?limit=100' | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+NEW=$((AFTER - BEFORE))
+test "$NEW" -ge 2 && echo "PASS: $NEW new telemetry records (non-stream + stream)" || echo "FAIL: expected >=2 new records, got $NEW"
+
+# Verify both modes present
+curl -s 'http://127.0.0.1:3456/telemetry/requests?limit=5' | python3 -c "
+import json, sys
+reqs = json.load(sys.stdin)
+modes = {r['mode'] for r in reqs[:5]}
+assert 'stream' in modes or 'non-stream' in modes, f'unexpected modes: {modes}'
+print(f'Modes seen: {modes}  PASS')
+"
+```
+
+**Pass criteria:**
+- At least 2 new telemetry request records after the two requests
+- Both streaming and non-streaming modes recorded

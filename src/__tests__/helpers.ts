@@ -108,7 +108,7 @@ export function assistantMessage(content: Array<Record<string, unknown>>): SDKMe
     parent_tool_use_id: null,
     uuid: crypto.randomUUID(),
     session_id: "test-session",
-  } as SDKMessage
+  } as unknown as SDKMessage
 }
 
 /** Convert an assistantMessage-style content array into a full stream event sequence.

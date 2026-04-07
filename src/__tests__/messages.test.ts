@@ -83,7 +83,7 @@ describe("getLastUserMessage", () => {
     ]
     const result = getLastUserMessage(messages)
     expect(result).toHaveLength(1)
-    expect(result[0].content).toBe("second")
+    expect(result[0]!.content).toBe("second")
   })
 
   it("returns last message as fallback when no user messages", () => {
@@ -92,7 +92,7 @@ describe("getLastUserMessage", () => {
     ]
     const result = getLastUserMessage(messages)
     expect(result).toHaveLength(1)
-    expect(result[0].content).toBe("reply")
+    expect(result[0]!.content).toBe("reply")
   })
 
   it("handles empty array", () => {
@@ -104,7 +104,7 @@ describe("getLastUserMessage", () => {
     const messages = [{ role: "user", content: "only" }]
     const result = getLastUserMessage(messages)
     expect(result).toHaveLength(1)
-    expect(result[0].content).toBe("only")
+    expect(result[0]!.content).toBe("only")
   })
 })
 

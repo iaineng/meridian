@@ -27,7 +27,9 @@ type MockSdkMessage = Record<string, unknown>
 type TestApp = { fetch: (req: Request) => Promise<Response> }
 
 let mockMessages: MockSdkMessage[] = []
-let capturedQueryParams: { prompt?: any; options?: { resume?: string } } | null = null
+interface CapturedFPQueryParams { prompt?: unknown; options?: { resume?: string; forkSession?: boolean } }
+let capturedQueryParams: CapturedFPQueryParams | null = null
+function getCaptured(): CapturedFPQueryParams | null { return capturedQueryParams }
 let queuedSessionIds: string[] = []
 
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
@@ -131,7 +133,7 @@ describe("Fingerprint resume: stable across dynamic systemContext", () => {
     ], "sdk-1", "System v2: file tree has 15 files, 3 diagnostics")
 
     // MUST resume — fingerprint doesn't include systemContext
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-1")
+    expect(getCaptured()?.options?.resume).toBe("sdk-1")
   })
 
   it("resumes when systemContext changes between requests (stream)", async () => {
@@ -148,7 +150,7 @@ describe("Fingerprint resume: stable across dynamic systemContext", () => {
       { role: "user", content: "what can you do?" },
     ], "sdk-stream-1", "System v2 with more context", true)
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-stream-1")
+    expect(getCaptured()?.options?.resume).toBe("sdk-stream-1")
   })
 
   it("resumes when systemContext is added where there was none", async () => {
@@ -166,7 +168,7 @@ describe("Fingerprint resume: stable across dynamic systemContext", () => {
     ], "sdk-no-ctx", "You are a helpful assistant.")
 
     // MUST resume — systemContext not in fingerprint
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-no-ctx")
+    expect(getCaptured()?.options?.resume).toBe("sdk-no-ctx")
   })
 
   it("resumes when systemContext is removed", async () => {
@@ -183,7 +185,7 @@ describe("Fingerprint resume: stable across dynamic systemContext", () => {
       { role: "user", content: "thanks" },
     ], "sdk-ctx")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-ctx")
+    expect(getCaptured()?.options?.resume).toBe("sdk-ctx")
   })
 })
 
@@ -213,8 +215,8 @@ describe("Fingerprint resume: cross-project safety via lineage", () => {
     ], "sdk-project-b")
 
     // Prefix overlap ("hello") → undo/branch detected → forks from project A
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-project-a")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resume).toBe("sdk-project-a")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
   })
 
   it("resumes correctly after cross-project rejection creates new session", async () => {
@@ -247,7 +249,7 @@ describe("Fingerprint resume: cross-project safety via lineage", () => {
       { role: "user", content: "more B work" },
     ], "sdk-project-b")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-project-b")
+    expect(getCaptured()?.options?.resume).toBe("sdk-project-b")
   })
 })
 
@@ -266,7 +268,7 @@ describe("Fingerprint resume: different first messages", () => {
       { role: "user", content: "wait" },
     ], "sdk-goodbye")
 
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCaptured()?.options?.resume).toBeUndefined()
   })
 })
 
@@ -295,7 +297,7 @@ describe("Fingerprint resume: multi-turn with tool_use blocks", () => {
     ], "sdk-tools", "System prompt v2 with updated file tree")
 
     // MUST resume even though system changed and history has tool blocks
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-tools")
+    expect(getCaptured()?.options?.resume).toBe("sdk-tools")
   })
 
   it("does NOT resume after undo even with tool_use in history", async () => {
@@ -320,8 +322,8 @@ describe("Fingerprint resume: multi-turn with tool_use blocks", () => {
     ], "sdk-tools-undo-new")
 
     // Prefix overlap ("create a file", "I'll create that file.") → undo → fork
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-tools-undo")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resume).toBe("sdk-tools-undo")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
   })
 })
 
@@ -340,6 +342,6 @@ describe("Fingerprint resume: backward compat", () => {
       { role: "user", content: "thanks" },
     ], "sdk-no-ctx")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-no-ctx")
+    expect(getCaptured()?.options?.resume).toBe("sdk-no-ctx")
   })
 })

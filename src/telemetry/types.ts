@@ -17,6 +17,9 @@ export interface RequestMetric {
   /** When this metric was recorded */
   timestamp: number
 
+  /** Which agent adapter handled this request */
+  adapter?: string
+
   /** Model used for SDK query (sonnet, opus, haiku, sonnet[1m], etc.) */
   model: string
 

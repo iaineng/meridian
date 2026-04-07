@@ -7,10 +7,17 @@
  * GET /telemetry/logs       — Diagnostic logs (JSON)
  */
 
+import { existsSync, readFileSync } from "node:fs"
+import { resolve, dirname } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Hono } from "hono"
 import { telemetryStore } from "./store"
 import { diagnosticLog } from "./logStore"
 import { dashboardHtml } from "./dashboard"
+
+// Read once at module load — src/telemetry/ is two levels below the package root
+const _iconPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "assets", "icon.svg")
+const _iconSvg = existsSync(_iconPath) ? readFileSync(_iconPath, "utf-8") : null
 
 export function createTelemetryRoutes() {
   const routes = new Hono()
@@ -18,6 +25,15 @@ export function createTelemetryRoutes() {
   // Dashboard
   routes.get("/", (c) => {
     return c.html(dashboardHtml)
+  })
+
+  // Favicon
+  routes.get("/icon.svg", (c) => {
+    if (!_iconSvg) return c.notFound()
+    return c.body(_iconSvg, 200, {
+      "Content-Type": "image/svg+xml",
+      "Cache-Control": "public, max-age=3600",
+    })
   })
 
   // Recent requests

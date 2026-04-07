@@ -140,6 +140,43 @@ describe("extractFileChangesFromBash", () => {
     expect(extractFileChangesFromBash('printf "content" > /tmp/printf.txt'))
       .toEqual([{ operation: "wrote", path: "/tmp/printf.txt" }])
   })
+
+  it("should not capture integer comparison operand", () => {
+    expect(extractFileChangesFromBash('node -e "arr.length > 40"')).toEqual([])
+  })
+
+  it("should not capture zero comparison operand", () => {
+    expect(extractFileChangesFromBash('node -e "x > 0"')).toEqual([])
+  })
+
+  it("should not capture negative integer comparison operand", () => {
+    expect(extractFileChangesFromBash('node -e "includes(x) > -1"')).toEqual([])
+  })
+
+  it("should not capture code expressions with parens", () => {
+    expect(extractFileChangesFromBash('node -e "console.log(s.trim())"')).toEqual([])
+  })
+
+  it("should not capture bare brace", () => {
+    expect(extractFileChangesFromBash('echo x > {')).toEqual([])
+  })
+
+  it("should still capture real redirect after code comparison", () => {
+    expect(extractFileChangesFromBash('node -e "arr.length > 40" && echo done > out.txt'))
+      .toEqual([{ operation: "wrote", path: "out.txt" }])
+  })
+
+  it("should not capture arrow function with valid-looking path name", () => {
+    expect(extractFileChangesFromBash('items.forEach(item => output)')).toEqual([])
+  })
+
+  it("should not capture arrow function body with braces", () => {
+    expect(extractFileChangesFromBash('items.map(x => { return x; })')).toEqual([])
+  })
+
+  it("should not capture >= comparison operator", () => {
+    expect(extractFileChangesFromBash('if (count >= 10) echo done')).toEqual([])
+  })
 })
 
 describe("formatFileChangeSummary", () => {
@@ -463,6 +500,21 @@ describe("openCodeAdapter.extractFileChangesFromToolUse", () => {
 
   it("should return empty for bash without redirects", () => {
     expect(openCodeAdapter.extractFileChangesFromToolUse!("bash", { command: "ls -la" })).toEqual([])
+  })
+
+  it("should detect write with path parameter", () => {
+    const result = openCodeAdapter.extractFileChangesFromToolUse!("write", { path: "src/new.ts", content: "x" })
+    expect(result).toEqual([{ operation: "wrote", path: "src/new.ts" }])
+  })
+
+  it("should detect edit with path parameter", () => {
+    const result = openCodeAdapter.extractFileChangesFromToolUse!("edit", { path: "src/old.ts", oldString: "a", newString: "b" })
+    expect(result).toEqual([{ operation: "edited", path: "src/old.ts" }])
+  })
+
+  it("should prefer filePath over path", () => {
+    const result = openCodeAdapter.extractFileChangesFromToolUse!("write", { filePath: "correct.ts", path: "fallback.ts" })
+    expect(result).toEqual([{ operation: "wrote", path: "correct.ts" }])
   })
 })
 

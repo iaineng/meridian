@@ -5,6 +5,7 @@ import type { Server } from "node:http"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
 import { DEFAULT_PROXY_CONFIG } from "./types"
+import { envBool } from "../env"
 import type { ProxyConfig, ProxyInstance, ProxyServer } from "./types"
 export type { ProxyConfig, ProxyInstance, ProxyServer }
 import { claudeLog } from "../logger"
@@ -17,21 +18,28 @@ import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASST
 
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
-import { classifyError, isStaleSessionError, isRateLimitError, isMaxTurnsError, isMaxOutputTokensError } from './errors'
-import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext } from "./models"
+import { classifyError, isStaleSessionError, isRateLimitError, isMaxTurnsError, isMaxOutputTokensError, isExtraUsageRequiredError, isExpiredTokenError } from './errors'
+import { refreshOAuthToken } from "./tokenRefresh"
+import { checkPluginConfigured } from "./setup"
+import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
+import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, translateAnthropicSseEvent, buildModelList } from "./openai"
 import { getLastUserMessage, hasMultimodalContent, serializeToolResultContentToText, nextMultimodalLabel, type MultimodalCounter } from "./messages"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
+import { resolveProfile, listProfiles, setActiveProfile, getActiveProfileId, getEffectiveProfiles, restoreActiveProfile } from "./profiles"
+import { filterBetasForProfile, getBetaPolicyFromEnv } from "./betas"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
 import {
   computeLineageHash,
   hashMessage,
   computeMessageHashes,
   type LineageResult,
+  type TokenUsage,
 } from "./session/lineage"
 // Re-export for backwards compatibility (existing tests import from here)
 
-import { lookupSession, storeSession, clearSessionCache, getMaxSessionsLimit, evictSession } from "./session/cache"
+import { lookupSession, storeSession, clearSessionCache, getMaxSessionsLimit, evictSession, getSessionByClaudeId } from "./session/cache"
+import { lookupSessionRecovery, listStoredSessions } from "./sessionStore"
 // Re-export for backwards compatibility (existing tests import from here)
 export { computeLineageHash, hashMessage, computeMessageHashes }
 export { clearSessionCache, getMaxSessionsLimit }
@@ -232,8 +240,23 @@ function buildFreshPrompt(
   return buildTextPromptWithHistory(messages, toolNameById, freshCounter, toolPrefix)
 }
 
+function logUsage(requestId: string, usage: TokenUsage): void {
+  const fmt = (n: number) => n > 1000 ? `${Math.round(n / 1000)}k` : String(n)
+  const parts = [
+    `input=${fmt(usage.input_tokens ?? 0)}`,
+    `output=${fmt(usage.output_tokens ?? 0)}`,
+    ...(usage.cache_read_input_tokens ? [`cache_read=${fmt(usage.cache_read_input_tokens)}`] : []),
+    ...(usage.cache_creation_input_tokens ? [`cache_write=${fmt(usage.cache_creation_input_tokens)}`] : []),
+  ]
+  console.error(`[PROXY] ${requestId} usage: ${parts.join(" ")}`)
+}
+
 export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServer {
   const finalConfig = { ...DEFAULT_PROXY_CONFIG, ...config }
+
+  // Restore persisted active profile from last session
+  restoreActiveProfile(finalConfig.profiles)
+
   const app = new Hono()
 
   app.use("*", cors())
@@ -246,7 +269,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         status: "ok",
         service: "meridian",
         format: "anthropic",
-        endpoints: ["/v1/messages", "/messages", "/telemetry", "/health"]
+        endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/v1/models", "/telemetry", "/health"]
       })
     }
     return c.html(landingHtml)
@@ -285,13 +308,33 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     const requestStartAt = Date.now()
 
     return withClaudeLogContext({ requestId: requestMeta.requestId, endpoint: requestMeta.endpoint }, async () => {
+      // Hoist adapter detection before try so it's available in the catch block for telemetry
+      const adapter = detectAdapter(c)
       try {
         const body = await c.req.json()
-        const authStatus = await getClaudeAuthStatusAsync()
-        let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
+
+        // Validate required fields
+        if (!Array.isArray(body.messages)) {
+          return c.json(
+            { type: "error", error: { type: "invalid_request_error", message: "messages: Field required" } },
+            400
+          )
+        }
+
+        // Resolve profile: header > active > default > first configured
+        const profile = resolveProfile(
+          finalConfig.profiles,
+          finalConfig.defaultProfile,
+          c.req.header("x-meridian-profile") || undefined
+        )
+
+        const authStatus = await getClaudeAuthStatusAsync(
+          profile.id !== "default" ? profile.id : undefined,
+          Object.keys(profile.env).length > 0 ? profile.env : undefined
+        )
+        const agentMode = c.req.header("x-opencode-agent-mode") ?? null
+        let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType, agentMode)
         const outputFormat = body.output_config?.format
-        const thinking = body.thinking ?? { type: "disabled" }
-        const adapter = detectAdapter(c)
         // Allow adapter to override streaming preference (e.g. LiteLLM requires non-streaming)
         const adapterStreamPref = adapter.prefersStreaming?.(body)
         const stream = adapterStreamPref !== undefined ? adapterStreamPref : (body.stream ?? false)
@@ -308,6 +351,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           ...cleanEnv
         } = process.env
 
+        // Overlay profile-specific env vars (e.g. CLAUDE_CONFIG_DIR for multi-account)
+        const profileEnv = { ...cleanEnv, ...profile.env }
+
         let systemContext = ""
         if (body.system) {
           if (typeof body.system === "string") {
@@ -320,9 +366,57 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           }
         }
 
+        // --- SDK parameter passthrough ---
+        // Extract effort, thinking, taskBudget from body (standard Anthropic API fields).
+        // Header overrides take precedence over body values.
+        const effortHeader = c.req.header("x-opencode-effort")
+        const thinkingHeader = c.req.header("x-opencode-thinking")
+        const taskBudgetHeader = c.req.header("x-opencode-task-budget")
+        // NOTE: anthropic-beta header filtering is delegated to `filterBetasForProfile`.
+        // Default policy (`allow-safe`) strips only betas known to trigger Extra-Usage
+        // billing (see BILLABLE_BETA_PREFIXES_ON_MAX in betas.ts). Free betas like
+        // prompt-caching, context-1m, fine-grained-tool-streaming, and
+        // interleaved-thinking pass through so the SDK's caching and 1M context
+        // continue to work — blanket stripping caused ~3x TTFB and ~3x token
+        // consumption on long conversations.
+        //
+        // Operators can override the policy at runtime via the MERIDIAN_BETA_POLICY
+        // env var: `strip-all` restores the pre-fix behaviour (kill switch),
+        // `allow-all` forwards everything unconditionally.
+        // See: https://github.com/rynfar/meridian/issues/278
+        const rawBetaHeader = c.req.header("anthropic-beta")
+        const betaFilter = filterBetasForProfile(rawBetaHeader, profile.type, getBetaPolicyFromEnv())
+        if (betaFilter.stripped.length > 0) {
+          console.error(`[PROXY] ${requestMeta.requestId} stripped anthropic-beta(s) for Max profile: ${betaFilter.stripped.join(", ")}`)
+        }
+
+        const effort = effortHeader
+          || body.effort
+          || undefined
+        let thinking: QueryContext['thinking'] = body.thinking ?? { type: "disabled" }
+        if (thinkingHeader !== undefined) {
+          try {
+            thinking = JSON.parse(thinkingHeader) as QueryContext["thinking"]
+          } catch (e) {
+            console.error(`[PROXY] ${requestMeta.requestId} ignoring malformed x-opencode-thinking header: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+        const parsedBudget = taskBudgetHeader ? Number.parseInt(taskBudgetHeader, 10) : NaN
+        const taskBudget = Number.isFinite(parsedBudget)
+          ? { total: parsedBudget }
+          : body.task_budget ? { total: body.task_budget.total ?? body.task_budget } : undefined
+        const betas = betaFilter.forwarded
+
         // Session resume: look up cached Claude SDK session and classify mutation
         const agentSessionId = adapter.getSessionId(c)
-        const lineageResult = lookupSession(agentSessionId, body.messages || [], workingDirectory)
+        // Scope session keys by profile to isolate resume state across accounts.
+        // For agents with session IDs (OpenCode): prefix the key.
+        // For agents without (Pi): pass profile-scoped workingDirectory to fingerprint lookup.
+        const profileSessionId = profile.id !== "default" && agentSessionId
+          ? `${profile.id}:${agentSessionId}` : agentSessionId
+        const profileScopedCwd = profile.id !== "default"
+          ? `${workingDirectory}::profile=${profile.id}` : workingDirectory
+        const lineageResult = lookupSession(profileSessionId, body.messages || [], profileScopedCwd)
         const isResume = lineageResult.type === "continuation" || lineageResult.type === "compaction"
         const isUndo = lineageResult.type === "undo"
         const cachedSession = lineageResult.type !== "diverged" ? lineageResult.session : undefined
@@ -339,9 +433,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         }).join(" → ")
         const lineageType = lineageResult.type === "diverged" && !cachedSession ? "new" : lineageResult.type
         const msgCount = Array.isArray(body.messages) ? body.messages.length : 0
-        const requestLogLine = `${requestMeta.requestId} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
+        const requestLogLine = `${requestMeta.requestId} adapter=${adapter.name} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""}${agentMode ? ` agent=${agentMode}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
         console.error(`[PROXY] ${requestLogLine} msgs=${msgSummary}`)
         diagnosticLog.session(`${requestLogLine}`, requestMeta.requestId)
+
+        // Recovery logging: when a session diverges, check if the store has a
+        // previous session ID that the user can recover via `claude --resume`.
+        if (lineageResult.type === "diverged" && profileSessionId) {
+          const recovery = lookupSessionRecovery(profileSessionId)
+          if (recovery) {
+            const prevId = recovery.previousClaudeSessionId || recovery.claudeSessionId
+            const recoveryMsg = `${requestMeta.requestId} SESSION RECOVERY: previous conversation available. Run: claude --resume ${prevId}`
+            console.error(`[PROXY] ${recoveryMsg}`)
+            diagnosticLog.session(recoveryMsg, requestMeta.requestId)
+          }
+        }
 
         claudeLog("request.received", {
           model,
@@ -594,6 +700,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           // We capture the base from message_start and overlay output_tokens from message_delta.
           let baseUsage: Record<string, unknown> = {}
           let finalOutputTokens = 0
+          let lastUsage: TokenUsage | undefined
           const skipBlockIndices = new Set<number>()
           const sdkIndexToContentIdx = new Map<number, number>()
           const jsonBuffers = new Map<number, string>()
@@ -627,14 +734,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             const response = (async function* () {
               let rateLimitRetries = 0
 
+              let tokenRefreshed = false
               while (true) {
                 let didYieldContent = false
                 try {
                   for await (const event of query(buildQueryOptions({
                     prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
-                    passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
+                    passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
                     useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
+                    effort, taskBudget, betas,
                   }))) {
                     if ((event as any).type === "stream_event") {
                       didYieldContent = true
@@ -663,17 +772,49 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       resumeSessionId,
                     })
                     console.error(`[PROXY] Stale session UUID, evicting and retrying as fresh session`)
-                    evictSession(agentSessionId, workingDirectory, allMessages)
+                    evictSession(profileSessionId, profileScopedCwd, allMessages)
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                     yield* query(buildQueryOptions({
                       prompt: buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : ""),
                       model, workingDirectory, systemContext, claudeExecutable,
-                      passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
+                      passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
                       useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
+                      effort, taskBudget, betas,
                     }))
                     return
+                  }
+
+                  // Extra Usage required: strip [1m] and record 1-hour cooldown.
+                  // mapModelToClaudeModel will skip [1m] for the next hour so
+                  // subsequent requests don't each make one extra failed attempt.
+                  // After the hour expires a single probe fires; if the user has
+                  // enabled Extra Usage in the meantime it succeeds and the flag clears.
+                  if (isExtraUsageRequiredError(errMsg) && hasExtendedContext(model)) {
+                    const from = model
+                    model = stripExtendedContext(model)
+                    recordExtendedContextUnavailable()
+                    claudeLog("upstream.context_fallback", {
+                      mode: "non_stream",
+                      from,
+                      to: model,
+                      reason: "extra_usage_required",
+                    })
+                    console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${model} (skipping [1m] for 1h)`)
+                    continue
+                  }
+
+                  // Expired OAuth token: refresh once and retry
+                  if (isExpiredTokenError(errMsg) && !tokenRefreshed) {
+                    tokenRefreshed = true
+                    const refreshed = await refreshOAuthToken()
+                    if (refreshed) {
+                      claudeLog("token_refresh.retrying", { mode: "non_stream" })
+                      console.error(`[PROXY] ${requestMeta.requestId} OAuth token expired — refreshed, retrying`)
+                      continue
+                    }
+                    // Refresh failed — fall through and surface the error
                   }
 
                   // Rate-limit retry: first strip [1m] (free, different tier), then backoff
@@ -845,6 +986,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 if (deltaUsage?.output_tokens != null) {
                   finalOutputTokens = deltaUsage.output_tokens as number
                 }
+                if (deltaUsage) lastUsage = { ...lastUsage, ...deltaUsage }
 
                 // When outputFormat is set, skip intermediate message_delta events
                 // (multiple turns for StructuredOutput). Only capture the last output_tokens.
@@ -871,6 +1013,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               model,
               durationMs: Date.now() - upstreamStartAt
             })
+            if (lastUsage) logUsage(requestMeta.requestId, lastUsage)
           } catch (error) {
             const stderrOutput = stderrLines.join("\n").trim()
             if (stderrOutput && error instanceof Error && !error.message.includes(stderrOutput)) {
@@ -959,6 +1102,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           telemetryStore.record({
             requestId: requestMeta.requestId,
             timestamp: Date.now(),
+            adapter: adapter.name,
             model,
             requestModel: body.model || undefined,
             mode: "non-stream",
@@ -980,7 +1124,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
           // Store session for future resume
           if (currentSessionId) {
-            storeSession(agentSessionId, body.messages || [], currentSessionId, workingDirectory, sdkUuidMap)
+            storeSession(profileSessionId, body.messages || [], currentSessionId, profileScopedCwd, sdkUuidMap, lastUsage)
           }
 
           const responseSessionId = currentSessionId || resumeSessionId || `session_${Date.now()}`
@@ -1043,6 +1187,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             while (sdkUuidMap.length < allMessages.length) sdkUuidMap.push(null)
 
             let messageStartEmitted = false
+            let lastUsage: TokenUsage | undefined
 
             try {
               let currentSessionId: string | undefined
@@ -1055,6 +1200,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
               const response = (async function* () {
                 let rateLimitRetries = 0
+                let tokenRefreshed = false
 
                 while (true) {
                   // Track whether client-visible SSE events were yielded.
@@ -1065,9 +1211,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   try {
                     for await (const event of query(buildQueryOptions({
                       prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
-                      passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
+                      passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
                       resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
                       useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
+                      effort, taskBudget, betas,
                     }))) {
                       if ((event as any).type === "stream_event") {
                         didYieldClientEvent = true
@@ -1097,17 +1244,45 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         resumeSessionId,
                       })
                       console.error(`[PROXY] Stale session UUID, evicting and retrying as fresh session`)
-                      evictSession(agentSessionId, workingDirectory, allMessages)
+                      evictSession(profileSessionId, profileScopedCwd, allMessages)
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
                       yield* query(buildQueryOptions({
                         prompt: buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : ""),
                         model, workingDirectory, systemContext, claudeExecutable,
-                        passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
+                        passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
                         useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
+                        effort, taskBudget, betas,
                       }))
                       return
+                    }
+
+                    // Extra Usage required: strip [1m] and record 1-hour cooldown.
+                    if (isExtraUsageRequiredError(errMsg) && hasExtendedContext(model)) {
+                      const from = model
+                      model = stripExtendedContext(model)
+                      recordExtendedContextUnavailable()
+                      claudeLog("upstream.context_fallback", {
+                        mode: "stream",
+                        from,
+                        to: model,
+                        reason: "extra_usage_required",
+                      })
+                      console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${model} (skipping [1m] for 1h)`)
+                      continue
+                    }
+
+                    // Expired OAuth token: refresh once and retry
+                    if (isExpiredTokenError(errMsg) && !tokenRefreshed) {
+                      tokenRefreshed = true
+                      const refreshed = await refreshOAuthToken()
+                      if (refreshed) {
+                        claudeLog("token_refresh.retrying", { mode: "stream" })
+                        console.error(`[PROXY] ${requestMeta.requestId} OAuth token expired — refreshed, retrying`)
+                        continue
+                      }
+                      // Refresh failed — fall through and surface the error
                     }
 
                     // Rate-limit retry: first strip [1m] (free, different tier), then backoff
@@ -1213,8 +1388,27 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     if (eventType === "message_start") {
                       skipBlockIndices.clear()
                       sdkToClientIndex.clear()
-                      // Only emit the first message_start — subsequent ones are internal SDK turns
+                      const startUsage = (event as unknown as { message?: { usage?: TokenUsage } }).message?.usage
+                      if (startUsage) lastUsage = { ...lastUsage, ...startUsage }
+                      // Only emit the first message_start — subsequent ones are internal SDK turns.
+                      // In passthrough mode, the second message_start marks Turn 2 beginning
+                      // (SDK processed the blocked tool call and Claude is now summarising).
+                      // Close the stream immediately — before ANY Turn 2 content blocks reach
+                      // the client — and inject a clean message_delta + message_stop so the
+                      // client sees stop_reason:"tool_use" and executes the tool itself.
                       if (messageStartEmitted) {
+                        if (passthrough && streamedToolUseIds.size > 0) {
+                          safeEnqueue(encoder.encode(
+                            `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: lastUsage?.output_tokens ?? 0 } })}\n\n`
+                          ), "passthrough_turn2_stop")
+                          safeEnqueue(encoder.encode(
+                            `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`
+                          ), "passthrough_turn2_stop")
+                          claudeLog("passthrough.turn2_suppressed", { mode: "stream", toolUses: streamedToolUseIds.size })
+                          streamClosed = true
+                          controller.close()
+                          break
+                        }
                         continue
                       }
                       messageStartEmitted = true
@@ -1251,20 +1445,37 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         }
                       }
 
+                      // Strip thinking blocks in passthrough mode — non-native clients
+                      // have no renderer for type:"thinking" and may choke on the
+                      // encrypted signature field.
+                      if (
+                        passthrough &&
+                        (block?.type === "thinking" || block?.type === "redacted_thinking")
+                      ) {
+                        if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                        claudeLog("passthrough.thinking_stripped", { mode: "stream", type: block.type, index: eventIndex })
+                        continue
+                      }
                       if (block?.type === "tool_use" && typeof block.name === "string") {
                         if (passthrough && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
-                          // Passthrough mode: strip prefix and forward to OpenCode
+                          // Passthrough mode: SDK sent the name WITH the mcp__oc__ prefix.
+                          // Strip it so OpenCode sees the bare tool name.
                           block.name = stripMcpPrefix(block.name)
-                          // Track this tool_use ID so we don't emit it again from capturedToolUses
                           if (block.id) streamedToolUseIds.add(block.id)
                         } else if (block.name.startsWith("mcp__")) {
-                          // Internal mode: skip all MCP tool blocks (internal execution)
+                          // Internal MCP tool (mcp__opencode__* etc.) — skip, SDK handles it
                           if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
                           continue
                         } else if (useBuiltinWebSearch) {
                           // SDK built-in tool executed internally — mark as server_tool_use
                           // so the client doesn't try to execute it
                           block.type = "server_tool_use"
+                        } else if (passthrough && block.id) {
+                          // Passthrough mode: SDK already stripped the mcp__oc__ prefix before
+                          // emitting the stream_event (observed in practice — the SDK normalises
+                          // tool names in stream events). Track the ID so the early-break
+                          // condition fires correctly.
+                          streamedToolUseIds.add(block.id)
                         }
                       }
                       // Assign a monotonic client index for this forwarded block
@@ -1296,6 +1507,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     // Skip intermediate message_delta with stop_reason: tool_use
                     // (SDK is about to execute MCP tools and continue)
                     if (eventType === "message_delta") {
+                      const deltaUsage = (event as unknown as { usage?: TokenUsage }).usage
+                      if (deltaUsage) lastUsage = { ...lastUsage, ...deltaUsage }
+
                       // When outputFormat is set, skip ALL message_delta events —
                       // the SDK emits multiple across internal turns. We emit one
                       // final end_turn delta after the loop (like message_stop).
@@ -1349,10 +1563,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 eventsForwarded,
                 textEventsForwarded
               })
+              if (lastUsage) logUsage(requestMeta.requestId, lastUsage)
 
               // Store session for future resume
               if (currentSessionId) {
-                storeSession(agentSessionId, body.messages || [], currentSessionId, workingDirectory, sdkUuidMap)
+                storeSession(profileSessionId, body.messages || [], currentSessionId, profileScopedCwd, sdkUuidMap, lastUsage)
               }
 
               if (!streamClosed) {
@@ -1472,7 +1687,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   bytesSent,
                   durationMs: Date.now() - requestStartAt
                 })
+              }
 
+              // Record telemetry for ALL completed streams (including early-close from
+              // passthrough tool_use break and client disconnect during enqueue).
+              // Must be outside the if(!streamClosed) block.
+              {
                 const streamTotalDurationMs = Date.now() - requestStartAt
 
                 claudeLog("response.completed", {
@@ -1488,6 +1708,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 telemetryStore.record({
                   requestId: requestMeta.requestId,
                   timestamp: Date.now(),
+                  adapter: adapter.name,
                   model,
                   requestModel: body.model || undefined,
                   mode: "stream",
@@ -1598,11 +1819,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         telemetryStore.record({
           requestId: requestMeta.requestId,
           timestamp: Date.now(),
+          adapter: adapter.name,
           model: "unknown",
           requestModel: undefined,
           mode: "non-stream",
           isResume: false,
-          isPassthrough: Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH)),
+          isPassthrough: envBool("PASSTHROUGH"),
           lineageType: undefined,
           messageCount: undefined,
           sdkSessionId: undefined,
@@ -1647,12 +1869,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   // Health check endpoint — verifies auth status
   app.get("/health", async (c) => {
     try {
-      const auth = await getClaudeAuthStatusAsync()
+      // Use active profile's auth context for health check
+      const healthProfile = resolveProfile(finalConfig.profiles, finalConfig.defaultProfile)
+      const profileEnvOverrides = Object.keys(healthProfile.env).length > 0 ? healthProfile.env : undefined
+      const auth = await getClaudeAuthStatusAsync(
+          healthProfile.id !== "default" ? healthProfile.id : undefined,
+          profileEnvOverrides
+        )
       if (!auth) {
         return c.json({
           status: "degraded",
           error: "Could not verify auth status",
-          mode: (process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH) ? "passthrough" : "internal",
+          mode: envBool("PASSTHROUGH") ? "passthrough" : "internal",
         })
       }
       if (!auth.loggedIn) {
@@ -1669,15 +1897,247 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           email: auth.email,
           subscriptionType: auth.subscriptionType,
         },
-        mode: (process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH) ? "passthrough" : "internal",
+        mode: envBool("PASSTHROUGH") ? "passthrough" : "internal",
+        plugin: { opencode: checkPluginConfigured() ? "configured" : "not-configured" },
       })
     } catch {
       return c.json({
         status: "degraded",
         error: "Could not verify auth status",
-        mode: (process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH) ? "passthrough" : "internal",
+        mode: envBool("PASSTHROUGH") ? "passthrough" : "internal",
       })
     }
+  })
+
+  // --- Profile management routes ---
+
+  app.get("/profiles/list", async (c) => {
+    const profiles = listProfiles(finalConfig.profiles, finalConfig.defaultProfile)
+    // Enrich with live auth status
+    const enriched = await Promise.all(profiles.map(async (p) => {
+      const resolved = resolveProfile(finalConfig.profiles, finalConfig.defaultProfile, p.id)
+      const envOverrides = Object.keys(resolved.env).length > 0 ? resolved.env : undefined
+      const auth = await getClaudeAuthStatusAsync(
+        p.id !== "default" ? p.id : undefined,
+        envOverrides
+      )
+      const cacheInfo = getAuthCacheInfo(p.id !== "default" ? p.id : undefined)
+      return {
+        ...p,
+        email: auth?.email || null,
+        subscriptionType: auth?.subscriptionType || null,
+        loggedIn: auth?.loggedIn ?? false,
+        lastCheckedAt: cacheInfo.lastCheckedAt || null,
+        lastSuccessAt: cacheInfo.lastSuccessAt || null,
+      }
+    }))
+    return c.json({
+      profiles: enriched,
+      activeProfile: getActiveProfileId() || finalConfig.defaultProfile || profiles[0]?.id || "default",
+    })
+  })
+
+  app.get("/profiles", async (c) => {
+    const { profilePageHtml } = await import("../telemetry/profilePage")
+    return c.html(profilePageHtml)
+  })
+
+  app.post("/profiles/active", async (c) => {
+    let body: { profile?: string }
+    try {
+      body = await c.req.json() as { profile?: string }
+    } catch {
+      return c.json({ error: "Invalid JSON in request body" }, 400)
+    }
+    if (!body.profile) {
+      return c.json({ error: "Missing 'profile' in request body" }, 400)
+    }
+    const effective = getEffectiveProfiles(finalConfig.profiles)
+    if (effective.length === 0) {
+      return c.json({ error: "No profiles configured" }, 400)
+    }
+    if (!effective.find(p => p.id === body.profile)) {
+      return c.json({ error: `Unknown profile: ${body.profile}. Available: ${effective.map(p => p.id).join(", ")}` }, 400)
+    }
+    setActiveProfile(body.profile!)
+    // Evict all cached SDK sessions — they were started under the old profile's
+    // credentials and cannot be reused with different auth.
+    clearSessionCache()
+    console.error(`[PROXY] Active profile switched to: ${body.profile} (session cache cleared)`)
+    return c.json({ success: true, activeProfile: body.profile })
+  })
+
+  app.post("/auth/refresh", async (c) => {
+    const success = await refreshOAuthToken()
+    if (success) {
+      return c.json({ success: true, message: "OAuth token refreshed successfully" })
+    }
+    return c.json(
+      { success: false, message: "Token refresh failed. If the problem persists, run 'claude login'." },
+      500
+    )
+  })
+
+  // --- OpenAI Chat Completions Compatibility ---
+  // Translates OpenAI /v1/chat/completions requests to Anthropic format and
+  // routes them through the internal /v1/messages handler via app.fetch().
+  // No network roundtrip — Hono resolves the route in-process.
+  // See src/proxy/openai.ts for the translation logic and design rationale.
+  app.post("/v1/chat/completions", async (c) => {
+    const rawBody = await c.req.json() as Record<string, unknown>
+    const anthropicBody = translateOpenAiToAnthropic(rawBody)
+
+    if (!anthropicBody) {
+      return c.json(
+        { type: "error", error: { type: "invalid_request_error", message: "messages: Field required" } },
+        400
+      )
+    }
+
+    // Route internally via app.fetch() — no network roundtrip.
+    // Hono resolves the path in-process; the URL scheme/host are ignored.
+    const internalReq = new Request("http://internal/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(anthropicBody),
+    })
+    const internalRes = await app.fetch(internalReq)
+
+    if (!internalRes.ok) {
+      const errBody = await internalRes.text()
+      return c.json(
+        { type: "error", error: { type: "upstream_error", message: errBody } },
+        internalRes.status as 400 | 401 | 429 | 500
+      )
+    }
+
+    const completionId = `chatcmpl-${randomUUID()}`
+    const created = Math.floor(Date.now() / 1000)
+    const model = (typeof rawBody.model === "string" && rawBody.model) ? rawBody.model : "claude-sonnet-4-6"
+
+    if (!anthropicBody.stream) {
+      const anthropicRes = await internalRes.json() as Record<string, unknown>
+      return c.json(translateAnthropicToOpenAi(anthropicRes, completionId, model, created))
+    }
+
+    // Streaming: translate Anthropic SSE events to OpenAI SSE chunks
+    const encoder = new TextEncoder()
+    const readable = new ReadableStream({
+      async start(controller) {
+        const reader = internalRes.body?.getReader()
+        if (!reader) { controller.close(); return }
+
+        const decoder = new TextDecoder()
+        let buffer = ""
+        let streamError: Error | null = null
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split("\n")
+            buffer = lines.pop() ?? ""
+
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue
+              const dataStr = line.slice(6).trim()
+              if (!dataStr) continue
+
+              let event: Record<string, unknown>
+              try { event = JSON.parse(dataStr) as Record<string, unknown> }
+              catch { continue }
+              if (typeof event.type !== "string") continue
+
+              const chunk = translateAnthropicSseEvent(event as { type: string } & Record<string, unknown>, completionId, model, created)
+              if (chunk) controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
+            }
+          }
+        } catch (err) {
+          streamError = err instanceof Error ? err : new Error(String(err))
+        } finally {
+          if (!streamError) controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+          controller.close()
+        }
+      },
+    })
+
+    return new Response(readable, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      },
+    })
+  })
+
+  // --- Model Discovery ---
+  // Returns available Claude models in OpenAI-compatible format.
+  // Context window reflects the subscription tier (Max = 1M, others = 200k).
+  app.get("/v1/models", async (c) => {
+    const authStatus = await getClaudeAuthStatusAsync()
+    const isMax = authStatus?.subscriptionType === "max"
+    return c.json({ object: "list", data: buildModelList(isMax) })
+  })
+
+  // Returns the last observed token usage for a session, looked up by the Claude
+  // session ID that was returned in a prior /v1/messages response body.
+  app.get("/v1/sessions/:claudeSessionId/context-usage", (c) => {
+    const claudeSessionId = c.req.param("claudeSessionId")
+    const session = getSessionByClaudeId(claudeSessionId)
+    if (!session) {
+      return c.json({ error: "Session not found" }, 404)
+    }
+    if (!session.contextUsage) {
+      return c.json({ error: "No usage data available for this session" }, 404)
+    }
+    return c.json({ session_id: claudeSessionId, context_usage: session.contextUsage })
+  })
+
+  // --- Session Recovery ---
+  // Returns recovery information for a session, including CLI commands and file paths
+  // to locate the conversation if context was lost due to compaction/restart bugs.
+  app.get("/v1/sessions/recover", (c) => {
+    const sessions = listStoredSessions()
+    if (sessions.length === 0) {
+      return c.json({ error: "No sessions found in store" }, 404)
+    }
+    return c.json({
+      sessions: sessions.map(s => ({
+        key: s.key,
+        claudeSessionId: s.claudeSessionId,
+        previousClaudeSessionId: s.previousClaudeSessionId,
+        createdAt: new Date(s.createdAt).toISOString(),
+        lastUsedAt: new Date(s.lastUsedAt).toISOString(),
+        messageCount: s.messageCount,
+        recoverCommand: `claude --resume ${s.claudeSessionId}`,
+        ...(s.previousClaudeSessionId ? {
+          recoverPreviousCommand: `claude --resume ${s.previousClaudeSessionId}`,
+        } : {}),
+      })),
+    })
+  })
+
+  app.get("/v1/sessions/:key/recover", (c) => {
+    const key = c.req.param("key")
+    const recovery = lookupSessionRecovery(key)
+    if (!recovery) {
+      return c.json({ error: "Session not found", key }, 404)
+    }
+    return c.json({
+      key,
+      claudeSessionId: recovery.claudeSessionId,
+      previousClaudeSessionId: recovery.previousClaudeSessionId,
+      createdAt: new Date(recovery.createdAt).toISOString(),
+      lastUsedAt: new Date(recovery.lastUsedAt).toISOString(),
+      messageCount: recovery.messageCount,
+      recoverCommand: `claude --resume ${recovery.claudeSessionId}`,
+      ...(recovery.previousClaudeSessionId ? {
+        recoverPreviousCommand: `claude --resume ${recovery.previousClaudeSessionId}`,
+        note: "Previous session was replaced — if your current session has lost context, try the previous session ID.",
+      } : {}),
+    })
   })
 
   // Catch-all: log unhandled requests
@@ -1722,10 +2182,33 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
     }
   })
 
+  // Background auth keepalive: periodically refresh auth status for all
+  // configured profiles so switching is instant (no stale token delay).
+  let authKeepaliveInterval: ReturnType<typeof setInterval> | undefined
+  const effectiveProfiles = getEffectiveProfiles(finalConfig.profiles)
+  if (effectiveProfiles.length > 0) {
+    const AUTH_KEEPALIVE_MS = 45_000 // 45s — well within the 60s TTL
+    authKeepaliveInterval = setInterval(async () => {
+      // Re-read effective profiles on each tick (picks up new profiles from disk)
+      const currentProfiles = getEffectiveProfiles(finalConfig.profiles)
+      for (const profile of currentProfiles) {
+        const resolved = resolveProfile(finalConfig.profiles, finalConfig.defaultProfile, profile.id)
+        if (Object.keys(resolved.env).length > 0) {
+          getClaudeAuthStatusAsync(resolved.id, resolved.env).catch(() => {})
+        }
+      }
+      // Also refresh the default (no-override) context
+      getClaudeAuthStatusAsync().catch(() => {})
+    }, AUTH_KEEPALIVE_MS)
+    // Don't block process exit
+    if (authKeepaliveInterval.unref) authKeepaliveInterval.unref()
+  }
+
   return {
     server,
     config: finalConfig,
     async close() {
+      if (authKeepaliveInterval) clearInterval(authKeepaliveInterval)
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })

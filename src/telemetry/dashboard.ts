@@ -3,12 +3,15 @@
  * No framework, no build step, no CDN. Single self-contained page.
  */
 
+import { profileBarCss, profileBarHtml, profileBarJs } from "./profileBar"
+
 export const dashboardHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Meridian — Telemetry</title>
+<link rel="icon" type="image/svg+xml" href="/telemetry/icon.svg">
 <style>
   :root {
     --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -19,7 +22,7 @@ export const dashboardHtml = `<!DOCTYPE html>
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-         background: var(--bg); color: var(--text); padding: 24px; line-height: 1.5; }
+         background: var(--bg); color: var(--text); padding: 0; line-height: 1.5; }
   h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
   .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
@@ -78,9 +81,12 @@ export const dashboardHtml = `<!DOCTYPE html>
                 transition: all 0.15s; }
   .log-filter:hover { border-color: var(--accent); color: var(--text); }
   .log-filter.active { background: rgba(88,166,255,0.1); border-color: var(--accent); color: var(--accent); }
+` + profileBarCss + `
 </style>
 </head>
 <body>
+` + profileBarHtml + `
+<div style="padding:24px">
 <h1>Meridian</h1>
 <div class="subtitle">Request Performance Telemetry</div>
 
@@ -104,6 +110,8 @@ const $$ = s => document.querySelectorAll(s);
 let timer;
 let activeTab = 'requests';
 let activeLogFilter = 'all';
+
+
 
 function ms(v) {
   if (v == null) return '—';
@@ -235,7 +243,7 @@ function render(s, reqs, logs) {
     + '<span><span class="legend-dot" style="background:var(--ttfb)"></span>TTFB</span>'
     + '<span><span class="legend-dot" style="background:var(--upstream)"></span>Response</span>'
     + '</div>'
-    + '<table><thead><tr><th>Time</th><th>Model</th><th>Mode</th><th>Session</th><th>Status</th>'
+    + '<table><thead><tr><th>Time</th><th>Adapter</th><th>Model</th><th>Mode</th><th>Session</th><th>Status</th>'
     + '<th>Queue</th><th>Proxy</th><th>TTFB</th><th>Total</th><th>Waterfall</th></tr></thead><tbody>';
 
   const maxTotal = Math.max(...reqs.map(r => r.totalDurationMs), 1);
@@ -255,6 +263,7 @@ function render(s, reqs, logs) {
 
     html += '<tr>'
       + '<td class="mono">' + ago(r.timestamp) + '</td>'
+      + '<td>' + (r.adapter || '—') + '</td>'
       + '<td>' + (r.requestModel || r.model) + '<br><span style="font-size:10px;color:var(--muted)">' + r.model + '</span></td>'
       + '<td>' + r.mode + '</td>'
       + '<td class="mono">' + sessionShort + ' ' + lineageBadge + '<br><span style="font-size:10px;color:var(--muted)">' + msgCount + ' msgs</span></td>'
@@ -325,6 +334,7 @@ $('#window').addEventListener('change', refresh);
 
 refresh();
 timer = setInterval(refresh, 5000);
+` + profileBarJs + `
 </script>
 </body>
 </html>`

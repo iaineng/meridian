@@ -15,6 +15,15 @@ export interface ClassifiedError {
 export function classifyError(errMsg: string): ClassifiedError {
   const lower = errMsg.toLowerCase()
 
+  // Expired OAuth token (more specific than the generic auth check below)
+  if (lower.includes("oauth token has expired") || lower.includes("not logged in")) {
+    return {
+      status: 401,
+      type: "authentication_error",
+      message: "Claude OAuth token has expired and could not be refreshed automatically. Run 'claude login' in your terminal to re-authenticate."
+    }
+  }
+
   // Authentication failures
   if (lower.includes("401") || lower.includes("authentication") || lower.includes("invalid auth") || lower.includes("credentials")) {
     return {
@@ -26,10 +35,13 @@ export function classifyError(errMsg: string): ClassifiedError {
 
   // Rate limiting
   if (lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")) {
+    const hint = lower.includes("1m") || lower.includes("context")
+      ? " If you're frequently hitting this, set MERIDIAN_SONNET_MODEL=sonnet to use the 200k model instead."
+      : ""
     return {
       status: 429,
       type: "rate_limit_error",
-      message: "Claude Max rate limit reached. Wait a moment and try again."
+      message: `Claude Max rate limit reached. Wait a moment and try again.${hint}`
     }
   }
 
@@ -114,6 +126,20 @@ export function classifyError(errMsg: string): ClassifiedError {
 }
 
 /**
+ * Detect errors caused by an expired or missing OAuth access token.
+ * Triggers an inline token refresh + retry in server.ts.
+ *
+ * Two distinct messages from the Claude Code CLI:
+ *   - "OAuth token has expired" — CLI sent the token, Anthropic API rejected it
+ *   - "Not logged in"           — CLI checked expiresAt locally and refused to try
+ * Both are resolved by refreshing the token.
+ */
+export function isExpiredTokenError(errMsg: string): boolean {
+  const lower = errMsg.toLowerCase()
+  return lower.includes("oauth token has expired") || lower.includes("not logged in")
+}
+
+/**
  * Detect errors caused by stale session/message UUIDs.
  * These happen when the upstream Claude session no longer contains
  * the referenced message (expired, compacted server-side, etc.).
@@ -149,4 +175,14 @@ export function isMaxTurnsError(errMsg: string): boolean {
  */
 export function isMaxOutputTokensError(errMsg: string): boolean {
   return errMsg.includes("output token maximum") || errMsg.includes("max_output_tokens")
+}
+
+/**
+ * Detect errors caused by the 1M context window requiring Extra Usage.
+ * Max subscribers without Extra Usage enabled get this error when using
+ * sonnet[1m] or opus[1m]. The fix is to fall back to the base model.
+ */
+export function isExtraUsageRequiredError(errMsg: string): boolean {
+  const lower = errMsg.toLowerCase()
+  return lower.includes("extra usage") && lower.includes("1m")
 }

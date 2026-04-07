@@ -34,3 +34,5 @@ coverage/
 *.temp
 context.md
 .omc/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/target/

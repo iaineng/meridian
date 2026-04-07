@@ -20,7 +20,10 @@ type MockSdkMessage = Record<string, unknown>
 type TestApp = { fetch: (req: Request) => Promise<Response> }
 
 let mockMessages: MockSdkMessage[] = []
-let capturedQueryParams: { options?: { resume?: string } } | null = null
+interface CapturedQueryParams { options?: { resume?: string; forkSession?: boolean; resumeSessionAt?: string } }
+let capturedQueryParams: CapturedQueryParams | null = null
+/** Access capturedQueryParams without TS narrowing to `never` after null assignments */
+function getCaptured(): CapturedQueryParams | null { return capturedQueryParams }
 let queuedSessionIds: string[] = []
 
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
@@ -216,7 +219,7 @@ describe("Session lineage: normal continuation", () => {
       { role: "user", content: "Remember: Flobulator" },
     ], "sdk-1")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-1")
+    expect(getCaptured()?.options?.resume).toBe("sdk-1")
   })
 })
 
@@ -246,9 +249,9 @@ describe("Session lineage: undo detection", () => {
     ], "sdk-new")
 
     // Should resume the original session with fork
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-1")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
-    expect(capturedQueryParams?.options?.resumeSessionAt).toBeDefined()
+    expect(getCaptured()?.options?.resume).toBe("sdk-1")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resumeSessionAt).toBeDefined()
   })
 
   it("forks session on multi-undo (fewer messages)", async () => {
@@ -279,8 +282,8 @@ describe("Session lineage: undo detection", () => {
       { role: "user", content: "completely different" },
     ], "sdk-new")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-1")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resume).toBe("sdk-1")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
   })
 
   it("does NOT resume when earlier message is edited", async () => {
@@ -305,7 +308,7 @@ describe("Session lineage: undo detection", () => {
       { role: "user", content: "great" },
     ], "sdk-new")
 
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCaptured()?.options?.resume).toBeUndefined()
   })
 
   it("undo forks then subsequent turns resume the fork", async () => {
@@ -329,8 +332,8 @@ describe("Session lineage: undo detection", () => {
     ], "sdk-2")
 
     // Should fork from original session
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-1")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resume).toBe("sdk-1")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
 
     // Continuing from the fork should resume with sdk-2
     capturedQueryParams = null
@@ -342,8 +345,8 @@ describe("Session lineage: undo detection", () => {
       { role: "user", content: "what do you know?" },
     ], "sdk-2")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-2")
-    expect(capturedQueryParams?.options?.forkSession).toBeUndefined()
+    expect(getCaptured()?.options?.resume).toBe("sdk-2")
+    expect(getCaptured()?.options?.forkSession).toBeUndefined()
   })
 })
 
@@ -404,7 +407,7 @@ describe("Session lineage: compaction survival", () => {
       { role: "user", content: "topic E" },
     ], "sdk-c")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-c")
+    expect(getCaptured()?.options?.resume).toBe("sdk-c")
   })
 
   it("resumes after compaction reduces message count", async () => {
@@ -430,7 +433,7 @@ describe("Session lineage: compaction survival", () => {
       { role: "user", content: "step 6" },
     ], "sdk-s")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-s")
+    expect(getCaptured()?.options?.resume).toBe("sdk-s")
   })
 
   it("does NOT resume when both prefix AND suffix changed (real branch)", async () => {
@@ -463,9 +466,9 @@ describe("Session lineage: compaction survival", () => {
     ], "sdk-new")
 
     // Prefix overlap (hello, hi) → undo detected → forks from rollback point
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-b")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
-    expect(capturedQueryParams?.options?.resumeSessionAt).toBeDefined()
+    expect(getCaptured()?.options?.resume).toBe("sdk-b")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resumeSessionAt).toBeDefined()
   })
 
   it("rejects aggressive compaction where nothing is preserved", async () => {
@@ -486,7 +489,7 @@ describe("Session lineage: compaction survival", () => {
       { role: "user", content: "now do something new" },
     ], "sdk-new")
 
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(getCaptured()?.options?.resume).toBeUndefined()
   })
 })
 
@@ -533,7 +536,7 @@ describe("Session lineage: pruning survival", () => {
     ], "sdk-p")
 
     // Should resume — suffix (last 2+) of stored messages preserved
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-p")
+    expect(getCaptured()?.options?.resume).toBe("sdk-p")
   })
 })
 
@@ -601,7 +604,7 @@ describe("Session lineage: post-compaction behavior", () => {
       { role: "user", content: "F" },
     ], "sdk-pc")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-pc")
+    expect(getCaptured()?.options?.resume).toBe("sdk-pc")
   })
 
   it("second compaction is also detected correctly", async () => {
@@ -653,7 +656,7 @@ describe("Session lineage: post-compaction behavior", () => {
       { role: "user", content: "H" },
     ], "sdk-2c")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-2c")
+    expect(getCaptured()?.options?.resume).toBe("sdk-2c")
   })
 
   it("undo after compaction is correctly rejected", async () => {
@@ -714,8 +717,8 @@ describe("Session lineage: post-compaction behavior", () => {
     ], "sdk-new")
 
     // Prefix overlap (Summary, C done, D, D done match) → undo → fork
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-uc")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resume).toBe("sdk-uc")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
   })
 })
 
@@ -764,8 +767,8 @@ describe("Session lineage: fingerprint fallback", () => {
     await r2.json()
 
     // Prefix overlap (Good evening, Hi!) → undo → fork via fingerprint
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-fp1")
-    expect(capturedQueryParams?.options?.forkSession).toBe(true)
+    expect(getCaptured()?.options?.resume).toBe("sdk-fp1")
+    expect(getCaptured()?.options?.forkSession).toBe(true)
   })
 })
 
@@ -792,7 +795,7 @@ describe("Session lastAccess refresh on lookup", () => {
       { role: "user", content: "still here?" },
     ], "sdk-A")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-A")
+    expect(getCaptured()?.options?.resume).toBe("sdk-A")
 
     capturedQueryParams = null
     await post(app, "sess-A", [
@@ -803,6 +806,6 @@ describe("Session lastAccess refresh on lookup", () => {
       { role: "user", content: "one more" },
     ], "sdk-A")
 
-    expect(capturedQueryParams?.options?.resume).toBe("sdk-A")
+    expect(getCaptured()?.options?.resume).toBe("sdk-A")
   })
 })

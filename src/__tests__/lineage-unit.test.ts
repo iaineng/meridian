@@ -94,33 +94,76 @@ describe("computeMessageHashes", () => {
 
 describe("measurePrefixOverlap", () => {
   it("returns 0 for no overlap", () => {
-    expect(measurePrefixOverlap(["a", "b"], new Set(["x", "y"]))).toBe(0)
+    expect(measurePrefixOverlap(["a", "b"], ["x", "y"])).toBe(0)
   })
 
   it("counts consecutive prefix matches", () => {
-    expect(measurePrefixOverlap(["a", "b", "c"], new Set(["a", "b"]))).toBe(2)
+    expect(measurePrefixOverlap(["a", "b", "c"], ["a", "b"])).toBe(2)
   })
 
   it("stops at first mismatch", () => {
-    expect(measurePrefixOverlap(["a", "x", "b"], new Set(["a", "b"]))).toBe(1)
+    expect(measurePrefixOverlap(["a", "x", "b"], ["a", "b"])).toBe(1)
   })
 
   it("returns full length for complete match", () => {
-    expect(measurePrefixOverlap(["a", "b"], new Set(["a", "b"]))).toBe(2)
+    expect(measurePrefixOverlap(["a", "b"], ["a", "b"])).toBe(2)
+  })
+
+  it("does not match duplicate hashes at wrong positions", () => {
+    // stored[2]="a" is a duplicate of stored[0], but incoming[2]="x"
+    expect(measurePrefixOverlap(["a", "b", "a", "c"], ["a", "b", "x"])).toBe(2)
   })
 })
 
 describe("measureSuffixOverlap", () => {
   it("returns 0 for no overlap", () => {
-    expect(measureSuffixOverlap(["a", "b"], new Set(["x", "y"]))).toBe(0)
+    expect(measureSuffixOverlap(["a", "b"], ["x", "y"])).toBe(0)
   })
 
-  it("counts consecutive suffix matches", () => {
-    expect(measureSuffixOverlap(["a", "b", "c"], new Set(["b", "c"]))).toBe(2)
+  it("counts consecutive suffix matches at end of incoming", () => {
+    // stored=[a,b,c], incoming=[x,b,c] → stored tail [b,c] found contiguously in incoming
+    expect(measureSuffixOverlap(["a", "b", "c"], ["x", "b", "c"])).toBe(2)
   })
 
-  it("stops at first mismatch from end", () => {
-    expect(measureSuffixOverlap(["a", "x", "b"], new Set(["a", "b"]))).toBe(1)
+  it("stops at first contiguity break walking backward", () => {
+    // stored=[a,x,b], incoming=[z,y,b] → anchor at b, then x!=y → overlap=1
+    expect(measureSuffixOverlap(["a", "x", "b"], ["z", "y", "b"])).toBe(1)
+  })
+
+  it("does not false-match suffix hashes found at wrong positions (regression)", () => {
+    // stored ends with [e, f], incoming STARTS with [e, f] but ends with [x, y].
+    // The anchor search finds f at position 1, then walks back: e at position 0 → match.
+    // But this IS a valid contiguous run of [e, f] at positions 0-1 in incoming.
+    // However, this should NOT count as compaction because the last stored hash f
+    // appears at position 1 (early in incoming), not near the end.
+    // The compaction threshold (MIN_SUFFIX >= 2 AND stored >= 6) plus the
+    // verifyLineage logic handles this correctly at the caller level.
+    //
+    // At the raw measurement level, this returns 2 because [e,f] IS a contiguous
+    // run in incoming. The caller's additional checks prevent false compaction.
+    expect(measureSuffixOverlap(
+      ["a", "b", "c", "d", "e", "f"],
+      ["e", "f", "g", "x", "y"]
+    )).toBe(2)
+  })
+
+  it("handles compaction with new messages appended after preserved suffix", () => {
+    // Real-world compaction: stored=[a,b,c,d,e,f], incoming=[summary,e,f,new1,new2]
+    // Stored tail hash is f, found at incoming[2]. Walk back: e at incoming[1] → match.
+    // summary at incoming[0] != d → stop. Overlap = 2.
+    expect(measureSuffixOverlap(
+      ["a", "b", "c", "d", "e", "f"],
+      ["summary", "e", "f", "new1", "new2"]
+    )).toBe(2)
+  })
+
+  it("handles different-length arrays correctly", () => {
+    // stored=[a,b,c,d], incoming=[x,c,d] → anchor d at incoming[-1], c at incoming[-2]
+    expect(measureSuffixOverlap(["a", "b", "c", "d"], ["x", "c", "d"])).toBe(2)
+  })
+
+  it("returns 0 when last stored hash is not in incoming at all", () => {
+    expect(measureSuffixOverlap(["a", "b", "c"], ["a", "b", "x"])).toBe(0)
   })
 })
 
@@ -304,5 +347,35 @@ describe("verifyLineage", () => {
     ]
     const result = verifyLineage(session, compacted, "key", mockCache)
     expect(result.type).toBe("compaction")
+  })
+
+  it("does not false-detect compaction when suffix hashes appear at wrong positions (regression #283)", () => {
+    // Bug: Set-based suffix overlap matched stored tail hashes found at the
+    // START of incoming messages, producing false compaction. The fix uses
+    // positional comparison (stored[-i] === incoming[-i]).
+    const stored = [
+      msg("user", "a"), msg("assistant", "b"),
+      msg("user", "c"), msg("assistant", "d"),
+      msg("user", "e"), msg("assistant", "f"),
+      msg("user", "shared-1"),       // position 6
+      msg("assistant", "shared-2"),  // position 7
+    ]
+    const session = makeSession({
+      lineageHash: computeLineageHash(stored),
+      messageCount: stored.length,
+      messageHashes: computeMessageHashes(stored),
+      sdkMessageUuids: [null, "u1", null, "u2", null, "u3", null, "u4"],
+    })
+    // Incoming: stored tail hashes appear at the BEGINNING, not the end
+    const incoming = [
+      msg("user", "shared-1"),       // same hash as stored[6], but at position 0
+      msg("assistant", "shared-2"),  // same hash as stored[7], but at position 1
+      msg("user", "completely-new"),
+      msg("assistant", "also-new"),
+    ]
+    const result = verifyLineage(session, incoming, "key", mockCache)
+    // Must NOT be compaction — the suffix is at the wrong position
+    expect(result.type).not.toBe("compaction")
+    expect(result.type).toBe("diverged")
   })
 })

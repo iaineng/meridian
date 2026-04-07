@@ -6,6 +6,7 @@
  */
 
 import type { AgentAdapter } from "./adapter"
+import type { Options, SdkBeta } from "@anthropic-ai/claude-agent-sdk"
 import { createOpencodeMcpServer } from "../mcpTools"
 import { createPassthroughMcpServer, PASSTHROUGH_MCP_NAME } from "./passthroughTools"
 
@@ -50,6 +51,12 @@ export interface QueryContext {
   maxOutputTokens?: number
   /** Callback to receive stderr lines from the Claude subprocess */
   onStderr?: (line: string) => void
+  /** Effort level — controls thinking depth (low/medium/high/max) */
+  effort?: 'low' | 'medium' | 'high' | 'max'
+  /** API-side task budget in tokens — model paces tool use within this limit */
+  taskBudget?: { total: number }
+  /** Beta features to enable */
+  betas?: string[]
 }
 
 /**
@@ -57,12 +64,18 @@ export interface QueryContext {
  * This is called identically from both streaming and non-streaming paths,
  * with the only difference being `includePartialMessages` for streaming.
  */
-export function buildQueryOptions(ctx: QueryContext) {
+export interface BuildQueryResult {
+  prompt: QueryContext["prompt"]
+  options: Options
+}
+
+export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
   const {
     prompt, model, workingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv,
     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
     outputFormat, thinking, onStderr,
+    effort, taskBudget, betas,
   } = ctx
 
   let blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
@@ -75,6 +88,11 @@ export function buildQueryOptions(ctx: QueryContext) {
   return {
     prompt,
     options: {
+      // Force Node as the executable. The claude-agent-sdk auto-detects Bun
+      // via process.versions.bun and defaults to spawning `bun cli.js`.
+      // Hosts like OpenCode embed Bun, so the check fires even when `bun`
+      // is not in PATH — causing subprocess spawns to fail.
+      executable: "node" as const,
       maxTurns: passthrough ? 1 : 200,
       cwd: workingDirectory,
       model,
@@ -116,13 +134,21 @@ export function buildQueryOptions(ctx: QueryContext) {
         ...(ctx.maxOutputTokens
           ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(ctx.maxOutputTokens) }
           : {}),
+        // When running as root (Docker, Unraid, NAS), set IS_SANDBOX=1 to
+        // bypass the SDK's root check. Without this, the SDK exits with:
+        // "--dangerously-skip-permissions cannot be used with root/sudo"
+        // See: https://github.com/rynfar/meridian/issues/256
+        ...(process.getuid?.() === 0 ? { IS_SANDBOX: "1" } : {}),
       },
       ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       ...(isUndo ? { forkSession: true, ...(undoRollbackUuid ? { resumeSessionAt: undoRollbackUuid } : {}) } : {}),
       ...(sdkHooks ? { hooks: sdkHooks } : {}),
       ...(outputFormat ? { outputFormat } : {}),
+      ...(effort ? { effort } : {}),
       ...(thinking ? { thinking } : {}),
+      ...(taskBudget ? { taskBudget } : {}),
+      ...(betas && betas.length > 0 ? { betas: betas as SdkBeta[] } : {}),
     }
   }
 }

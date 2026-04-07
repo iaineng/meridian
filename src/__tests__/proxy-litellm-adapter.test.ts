@@ -203,9 +203,12 @@ describe("passthroughAdapter — passthrough and streaming", () => {
     expect(passthroughAdapter.usesPassthrough!()).toBe(true)
   })
 
-  it("prefersStreaming always returns false (LiteLLM needs non-streaming)", () => {
+  it("prefersStreaming respects body.stream", () => {
+    expect(passthroughAdapter.prefersStreaming!({ stream: true })).toBe(true)
+    expect(passthroughAdapter.prefersStreaming!({ stream: false })).toBe(false)
     expect(passthroughAdapter.prefersStreaming!({})).toBe(false)
-    expect(passthroughAdapter.prefersStreaming!({ stream: true })).toBe(false)
+    expect(passthroughAdapter.prefersStreaming!(undefined)).toBe(false)
+    expect(passthroughAdapter.prefersStreaming!(null)).toBe(false)
   })
 })
 

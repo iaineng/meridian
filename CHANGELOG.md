@@ -1,5 +1,172 @@
 # Changelog
 
+## [1.29.2](https://github.com/rynfar/meridian/compare/v1.29.1...v1.29.2) (2026-04-06)
+
+
+### Bug Fixes
+
+* allow-list safe anthropic-beta headers on claude-max profiles ([#293](https://github.com/rynfar/meridian/issues/293)) ([f28f074](https://github.com/rynfar/meridian/commit/f28f074e24714e6b3912060eb0e9362aebf66947)), closes [#278](https://github.com/rynfar/meridian/issues/278)
+
+## [1.27.6](https://github.com/rynfar/meridian/compare/v1.27.5...v1.27.6) (2026-04-05)
+
+
+### Bug Fixes
+
+* support running as root (Docker, Unraid, NAS) ([#256](https://github.com/rynfar/meridian/issues/256)) ([7dd0599](https://github.com/rynfar/meridian/commit/7dd0599e919295e467e7cab28d1716da5fb46dc1))
+
+## [1.27.5](https://github.com/rynfar/meridian/compare/v1.27.4...v1.27.5) (2026-04-05)
+
+
+### Bug Fixes
+
+* replace global claude-code install with SDK cli.js shim in Dockerfile ([5391f14](https://github.com/rynfar/meridian/commit/5391f140bfb9262da2b387d841ffb0b5384627f7))
+
+## [1.27.4](https://github.com/rynfar/meridian/compare/v1.27.3...v1.27.4) (2026-04-05)
+
+
+### Bug Fixes
+
+* add path parameter fallback in OpenCode file change tracking ([#253](https://github.com/rynfar/meridian/issues/253)) ([959a84e](https://github.com/rynfar/meridian/commit/959a84e9cfdb12a6bb47c752a468c6983fe20042))
+
+## [1.27.3](https://github.com/rynfar/meridian/compare/v1.27.2...v1.27.3) (2026-04-05)
+
+
+### Bug Fixes
+
+* use envBool() for passthrough detection — Boolean('0') was truthy ([#261](https://github.com/rynfar/meridian/issues/261)) ([41d37da](https://github.com/rynfar/meridian/commit/41d37da234f5282020b2bc9915fef3ec453cff8d))
+
+## [1.27.2](https://github.com/rynfar/meridian/compare/v1.27.1...v1.27.2) (2026-04-05)
+
+
+### Bug Fixes
+
+* respect client stream parameter in passthrough adapter ([#254](https://github.com/rynfar/meridian/issues/254)) ([1ec2abb](https://github.com/rynfar/meridian/commit/1ec2abbc0f6196fda79ba6ce631e5829e06d0b7e))
+
+## [1.27.1](https://github.com/rynfar/meridian/compare/v1.27.0...v1.27.1) (2026-04-05)
+
+
+### Bug Fixes
+
+* default sonnet to 200k — sonnet[1m] requires Extra Usage on Max ([#255](https://github.com/rynfar/meridian/issues/255)) ([e629d6c](https://github.com/rynfar/meridian/commit/e629d6cbbdcf2716a7379c33c242b2d51d2eedd3))
+* OpenCode auto-detection, adapter telemetry, pi adapter improvements ([13bd6cd](https://github.com/rynfar/meridian/commit/13bd6cd792282fdd575e7fc92bf72fbe2ee547f9))
+* strip thinking blocks and suppress Turn 2 prose in passthrough mode ([1a98fe0](https://github.com/rynfar/meridian/commit/1a98fe05975ef22e37d2266b7dd111881b8e6fb3))
+
+## [1.27.0](https://github.com/rynfar/meridian/compare/v1.26.6...v1.27.0) (2026-04-04)
+
+
+### Features
+
+* add pi coding agent adapter ([#259](https://github.com/rynfar/meridian/issues/259)) ([b20585f](https://github.com/rynfar/meridian/commit/b20585f8287a56fb62e54a1e4d4ccf2e7f35033b))
+
+## [1.26.6](https://github.com/rynfar/meridian/compare/v1.26.5...v1.26.6) (2026-04-03)
+
+
+### Bug Fixes
+
+* correct ci.yml YAML (remove stray XML artifact) ([#251](https://github.com/rynfar/meridian/issues/251)) ([207d8a3](https://github.com/rynfar/meridian/commit/207d8a3ccc55dc53d15c885d805097bd4a273ea0))
+* force executable to node in buildQueryOptions ([6e33926](https://github.com/rynfar/meridian/commit/6e33926d65d7cd3082d17f893654ae67f20504ce))
+
+## [1.26.5](https://github.com/rynfar/meridian/compare/v1.26.4...v1.26.5) (2026-04-03)
+
+
+### Bug Fixes
+
+* isolate shared store context-usage test into its own file to prevent parallel contamination ([2a1fd66](https://github.com/rynfar/meridian/commit/2a1fd66ceab736def705545994807273ed7f2dc0))
+
+## [1.26.4](https://github.com/rynfar/meridian/compare/v1.26.3...v1.26.4) (2026-04-03)
+
+
+### Bug Fixes
+
+* use MERIDIAN_SESSION_DIR env var in shared store test for parallel-safe isolation ([43d1de6](https://github.com/rynfar/meridian/commit/43d1de6eb74802c5bebf34c3244e0ba998c48f36))
+
+## [1.26.3](https://github.com/rynfar/meridian/compare/v1.26.2...v1.26.3) (2026-04-03)
+
+
+### Bug Fixes
+
+* move clearSessionCache to afterEach in shared store test to avoid wiping store before lookup ([3fe65fb](https://github.com/rynfar/meridian/commit/3fe65fb40df71773ffc14ce02f91a7f234525d0f))
+
+## [1.26.2](https://github.com/rynfar/meridian/compare/v1.26.1...v1.26.2) (2026-04-03)
+
+
+### Bug Fixes
+
+* use dynamic import for sessionStore in test to share singleton with server ([548ecc1](https://github.com/rynfar/meridian/commit/548ecc1a9336ca02a1d86099c697e855a2393124))
+
+## [1.26.1](https://github.com/rynfar/meridian/compare/v1.26.0...v1.26.1) (2026-04-03)
+
+
+### Bug Fixes
+
+* narrow event type before translateAnthropicSseEvent to satisfy tsc ([8417623](https://github.com/rynfar/meridian/commit/8417623a7404915eb16103429b892d44bae4d310))
+
+## [1.26.0](https://github.com/rynfar/meridian/compare/v1.25.1...v1.26.0) (2026-04-03)
+
+
+### Features
+
+* add OpenAI-compatible /v1/chat/completions and /v1/models endpoints ([#234](https://github.com/rynfar/meridian/issues/234)) ([16a62b4](https://github.com/rynfar/meridian/commit/16a62b4f6a29f2dc8a1edc1590d401986fa51fe1))
+* passthrough SDK params (effort, thinking, taskBudget, betas) + usage logging ([#222](https://github.com/rynfar/meridian/issues/222)) ([533323c](https://github.com/rynfar/meridian/commit/533323cb067708b132691ff3713e922dafced0d9))
+
+## [1.25.1](https://github.com/rynfar/meridian/compare/v1.25.0...v1.25.1) (2026-04-03)
+
+
+### Bug Fixes
+
+* isolate auth status tests to prevent CI flakiness ([07d8331](https://github.com/rynfar/meridian/commit/07d83311f92445922f317f60736d78dd136494e2))
+
+## [1.25.0](https://github.com/rynfar/meridian/compare/v1.24.5...v1.25.0) (2026-04-03)
+
+
+### Features
+
+* add favicon to telemetry dashboard ([#238](https://github.com/rynfar/meridian/issues/238)) ([52d2c09](https://github.com/rynfar/meridian/commit/52d2c0971a90e09c019c9a361f8407101493dad4))
+* add live smoke tests + message validation ([#226](https://github.com/rynfar/meridian/issues/226)) ([8bc83fc](https://github.com/rynfar/meridian/commit/8bc83fc33c8ce0744884b78ba8b6c92f1484e7e3))
+* subagent model selection via x-opencode-agent-mode header ([#235](https://github.com/rynfar/meridian/issues/235)) ([bfcd7a9](https://github.com/rynfar/meridian/commit/bfcd7a97c306b2e5b4b42d0597d32d4486911397))
+
+
+### Bug Fixes
+
+* default to non-streaming (JSON) when stream field is omitted ([#241](https://github.com/rynfar/meridian/issues/241)) ([f9f4b6f](https://github.com/rynfar/meridian/commit/f9f4b6ff3a53a13a09b1cd341b39bf88be8e9fad))
+* prevent false positives in file changes extraction from bash commands ([#236](https://github.com/rynfar/meridian/issues/236)) ([0464024](https://github.com/rynfar/meridian/commit/04640245945870126d1163acaeb4eb29acf52779))
+
+## [1.24.5](https://github.com/rynfar/meridian/compare/v1.24.4...v1.24.5) (2026-04-02)
+
+
+### Bug Fixes
+
+* run proxy-extra-usage-fallback in isolation to prevent mock leak ([287dd9a](https://github.com/rynfar/meridian/commit/287dd9a87676a642bcc3b87b8474a37dbb6cc5c3))
+
+## [1.24.4](https://github.com/rynfar/meridian/compare/v1.24.3...v1.24.4) (2026-04-02)
+
+
+### Bug Fixes
+
+* eliminate proxy-async-ops flaky test in CI ([4592dfd](https://github.com/rynfar/meridian/commit/4592dfda724799a7a21a4db34c8e0c529ced6717))
+* surface MERIDIAN_SONNET_MODEL hint on 1m rate limit errors ([9d4611c](https://github.com/rynfar/meridian/commit/9d4611c6b7198241cad406aebaa91a7148738e78))
+
+## [1.24.3](https://github.com/rynfar/meridian/compare/v1.24.2...v1.24.3) (2026-04-02)
+
+
+### Bug Fixes
+
+* auto-refresh expired OAuth token inline on 401 ([#230](https://github.com/rynfar/meridian/issues/230)) ([fd377a3](https://github.com/rynfar/meridian/commit/fd377a37257146b9bede11b07b64d10c5727fc9c))
+
+## [1.24.2](https://github.com/rynfar/meridian/compare/v1.24.1...v1.24.2) (2026-04-02)
+
+
+### Bug Fixes
+
+* fall back from sonnet[1m] to sonnet when extra usage not enabled ([#228](https://github.com/rynfar/meridian/issues/228)) ([7104d15](https://github.com/rynfar/meridian/commit/7104d156cbdcfb9eff16f949c29df3a26914fe20)), closes [#227](https://github.com/rynfar/meridian/issues/227)
+
+## [1.24.1](https://github.com/rynfar/meridian/compare/v1.24.0...v1.24.1) (2026-04-01)
+
+
+### Bug Fixes
+
+* prefer system claude binary over cli.js when not running under bun ([#217](https://github.com/rynfar/meridian/issues/217)) ([88a3eff](https://github.com/rynfar/meridian/commit/88a3eff1bf6e978d3442e8738982425a8470c5d6))
+
 ## [1.24.0](https://github.com/rynfar/meridian/compare/v1.23.1...v1.24.0) (2026-04-01)
 
 

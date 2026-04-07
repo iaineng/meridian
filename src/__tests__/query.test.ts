@@ -23,6 +23,14 @@ function makeContext(overrides: Partial<QueryContext> = {}): QueryContext {
 }
 
 describe("buildQueryOptions", () => {
+  it("forces node as the executable to avoid bun auto-detection on embedded hosts", () => {
+    // The SDK defaults to spawning 'bun' whenever process.versions.bun is set,
+    // even when bun is not in PATH (e.g. OpenCode embeds Bun in its native binary).
+    // Explicitly setting executable: 'node' prevents ENOENT spawn failures.
+    const result = buildQueryOptions(makeContext())
+    expect((result.options as any).executable).toBe("node")
+  })
+
   it("builds basic non-streaming options", () => {
     const result = buildQueryOptions(makeContext())
     expect(result.prompt).toBe("Hello")

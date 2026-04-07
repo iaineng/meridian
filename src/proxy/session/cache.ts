@@ -6,13 +6,20 @@
  */
 
 import { LRUMap } from "../../utils/lruMap"
-import { lookupSharedSession, storeSharedSession, clearSharedSessions, evictSharedSession } from "../sessionStore"
+import {
+  lookupSharedSession,
+  lookupSharedSessionByClaudeId,
+  storeSharedSession,
+  clearSharedSessions,
+  evictSharedSession,
+} from "../sessionStore"
 import { getConversationFingerprint } from "./fingerprint"
 import {
   computeLineageHash,
   computeMessageHashes,
   verifyLineage,
   type SessionState,
+  type TokenUsage,
   type LineageResult,
 } from "./lineage"
 
@@ -144,6 +151,7 @@ export function lookupSession(
         lineageHash: shared.lineageHash || "",
         messageHashes: shared.messageHashes,
         sdkMessageUuids: shared.sdkMessageUuids,
+        contextUsage: shared.contextUsage,
       }
       const result = verifyLineage(state, messages, sessionId, sessionCache)
       if (result.type === "continuation" || result.type === "compaction") {
@@ -171,6 +179,7 @@ export function lookupSession(
         lineageHash: shared.lineageHash || "",
         messageHashes: shared.messageHashes,
         sdkMessageUuids: shared.sdkMessageUuids,
+        contextUsage: shared.contextUsage,
       }
       const result = verifyLineage(state, messages, fp, fingerprintCache)
       if (result.type === "continuation" || result.type === "compaction") {
@@ -182,15 +191,49 @@ export function lookupSession(
   return { type: "diverged" }
 }
 
+/** Look up a session by the Claude SDK session ID returned in responses.
+ *  Searches both in-memory caches and the shared file store, returning the
+ *  freshest matching state if multiple cache keys point to the same Claude session. */
+export function getSessionByClaudeId(claudeSessionId: string): SessionState | undefined {
+  let newest: SessionState | undefined
+
+  const consider = (state: SessionState | undefined) => {
+    if (!state || state.claudeSessionId !== claudeSessionId) return
+    if (!newest || state.lastAccess > newest.lastAccess) {
+      newest = state
+    }
+  }
+
+  for (const state of sessionCache.values()) consider(state)
+  for (const state of fingerprintCache.values()) consider(state)
+
+  const shared = lookupSharedSessionByClaudeId(claudeSessionId)
+  if (shared) {
+    consider({
+      claudeSessionId: shared.claudeSessionId,
+      lastAccess: shared.lastUsedAt,
+      messageCount: shared.messageCount || 0,
+      lineageHash: shared.lineageHash || "",
+      messageHashes: shared.messageHashes,
+      sdkMessageUuids: shared.sdkMessageUuids,
+      contextUsage: shared.contextUsage,
+    })
+  }
+
+  return newest
+}
+
 /** Store a session mapping with lineage hash and SDK UUIDs for divergence detection.
  *  @param sdkMessageUuids — per-message SDK assistant UUIDs (null for user messages).
- *    If provided, merged with any previously stored UUIDs to build a complete map. */
+ *    If provided, merged with any previously stored UUIDs to build a complete map.
+ *  @param contextUsage — optional last observed token usage to attach to the session. */
 export function storeSession(
   sessionId: string | undefined,
-  messages: Array<{ role: string; content: any }>,
+  messages: Array<{ role: string; content: unknown }>,
   claudeSessionId: string,
   workingDirectory?: string,
-  sdkMessageUuids?: Array<string | null>
+  sdkMessageUuids?: Array<string | null>,
+  contextUsage?: TokenUsage
 ) {
   if (!claudeSessionId) return
   const lineageHash = computeLineageHash(messages)
@@ -202,6 +245,7 @@ export function storeSession(
     lineageHash,
     messageHashes,
     sdkMessageUuids,
+    ...(contextUsage ? { contextUsage } : {}),
   }
   // In-memory cache
   if (sessionId) sessionCache.set(sessionId, state)
@@ -209,5 +253,15 @@ export function storeSession(
   if (fp) fingerprintCache.set(fp, state)
   // Shared file store (cross-proxy resume)
   const key = sessionId || fp
-  if (key) storeSharedSession(key, claudeSessionId, state.messageCount, lineageHash, messageHashes, sdkMessageUuids)
+  if (key) {
+    storeSharedSession(
+      key,
+      claudeSessionId,
+      state.messageCount,
+      lineageHash,
+      messageHashes,
+      sdkMessageUuids,
+      contextUsage
+    )
+  }
 }
