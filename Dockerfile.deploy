@@ -22,9 +22,18 @@ RUN rm -rf dist && bun build bin/cli.ts src/proxy/server.ts --outdir dist --targ
 # ---- Runtime stage ----
 FROM node:22-slim
 
+ARG BUN_RUNTIME=false
+ENV BUN_RUNTIME=${BUN_RUNTIME}
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install bun in the runtime stage when BUN_RUNTIME=true
+RUN if [ "$BUN_RUNTIME" = "true" ]; then \
+      curl -fsSL https://bun.sh/install | bash && \
+      ln -s /root/.bun/bin/bun /usr/local/bin/bun; \
+    fi
 
 RUN userdel -r node 2>/dev/null; \
     groupdel node 2>/dev/null; \
@@ -34,11 +43,21 @@ RUN userdel -r node 2>/dev/null; \
 
 # Install Claude Code (npm by default, or native via --build-arg CLAUDE_INSTALL_METHOD=native)
 ARG CLAUDE_INSTALL_METHOD=npm
+ENV CLAUDE_INSTALL_METHOD=${CLAUDE_INSTALL_METHOD}
 RUN if [ "$CLAUDE_INSTALL_METHOD" = "npm" ]; then \
-      npm install -g @anthropic-ai/claude-code@2.1.92; \
+      npm install -g @anthropic-ai/claude-code@2.1.97; \
     fi
 
 WORKDIR /app
+
+# Native Claude Code install — placed BEFORE COPY of build artifacts so that
+# code changes don't invalidate the (slow) Claude install cache layer.
+USER claude
+ARG NATIVE_CLAUDE_VERSION=2.1.97
+RUN if [ "$CLAUDE_INSTALL_METHOD" = "native" ]; then \
+      echo "Installing native Claude Code (cache key: ${NATIVE_CLAUDE_VERSION})" && \
+      curl -fsSL https://claude.ai/install.sh | bash; \
+    fi
 
 # Copy built proxy artifacts
 USER root
@@ -51,24 +70,20 @@ RUN sed -i 's/\r$//' ./bin/docker-entrypoint.sh ./bin/claude-proxy-supervisor.sh
 
 USER claude
 
-# Native Claude Code install (runs as claude user; no-op when CLAUDE_INSTALL_METHOD=npm)
-RUN if [ "$CLAUDE_INSTALL_METHOD" = "native" ]; then \
-      curl -fsSL https://claude.ai/install.sh | bash; \
-    fi
-
-ENV PATH="/home/claude/.claude/bin:${PATH}"
+ENV PATH="/home/claude/.local/bin:/home/claude/.claude/bin:${PATH}"
 
 EXPOSE 3456
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD node -e "const r=await fetch('http://127.0.0.1:3456/health');process.exit(r.ok?0:1)"
+    CMD sh -c 'if [ "$BUN_RUNTIME" = "true" ]; then bun -e "const r=await fetch(\"http://127.0.0.1:3456/health\");process.exit(r.ok?0:1)"; else node -e "const r=await fetch(\"http://127.0.0.1:3456/health\");process.exit(r.ok?0:1)"; fi'
 
 ENV MERIDIAN_PASSTHROUGH=1 \
     MERIDIAN_HOST=0.0.0.0 \
     MERIDIAN_MAX_CONCURRENT=10 \
     MERIDIAN_SONNET_MODEL=sonnet \
     MERIDIAN_WORKDIR=/app \
-    MERIDIAN_NO_FILE_CHANGES=1
+    MERIDIAN_NO_FILE_CHANGES=1 \
+    MERIDIAN_BETA_POLICY=strip-all
 
 ENTRYPOINT ["./bin/docker-entrypoint.sh"]
 CMD ["./bin/claude-proxy-supervisor.sh"]

@@ -14,11 +14,14 @@
 #   ./bin/deploy.sh              # full build + auth + run (default instance)
 #   ./bin/deploy.sh --id 2       # instance #2 → port 3458, container claude-max-proxy-2
 #   ./bin/deploy.sh --upgrade    # rebuild image + restart (skip auth — for code/SDK updates)
+#   ./bin/deploy.sh --upgrade-all # rebuild image + restart ALL running instances
 #   ./bin/deploy.sh --auth       # re-auth only (skip build, restart proxy)
 #   ./bin/deploy.sh --no-build   # skip build, auth + run
 #   ./bin/deploy.sh --proxy http://host:port          # use HTTP proxy
 #   ./bin/deploy.sh --proxy socks5://host:port        # use SOCKS5 proxy
 #   ./bin/deploy.sh --proxy http://host:port --no-proxy "localhost,127.0.0.1"
+#   ./bin/deploy.sh --bun-runtime                        # use bun as the runtime instead of Node.js
+#   ./bin/deploy.sh --obfuscation camelcase             # use CamelCase obfuscation mode
 #   ./bin/deploy.sh --console                          # attach to default instance shell
 #   ./bin/deploy.sh --console --id 2                   # attach to instance #2 shell
 #   ./bin/deploy.sh --id 3 --auth                     # re-auth instance #3
@@ -34,6 +37,7 @@
 #   MERIDIAN_PORT    Host port to expose (default: 3456, added by --id N)
 #   IMAGE_NAME           Docker image name (default: claude-max-proxy)
 #   CONTAINER_NAME       Docker container name (default: claude-max-proxy[-N])
+#   MERIDIAN_OBFUSCATION Obfuscation mode: homoglyph (default) or camelcase
 #   HTTP_PROXY           HTTP proxy (overridden by --proxy flag)
 #   HTTPS_PROXY          HTTPS proxy (overridden by --proxy flag)
 #   ALL_PROXY            SOCKS5 proxy (overridden by --proxy flag)
@@ -55,6 +59,9 @@ CLEAN_MODE=false
 STATUS_MODE=false
 NATIVE_CLAUDE=false
 CONSOLE_MODE=false
+BUN_RUNTIME=false
+OBFUSCATION_MODE=""
+UPGRADE_ALL=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -74,10 +81,20 @@ while [[ $# -gt 0 ]]; do
       NETWORK_PROXY="$2"; shift 2 ;;
     --no-proxy)
       NETWORK_NO_PROXY="$2"; shift 2 ;;
+    --upgrade-all) UPGRADE_ALL=true; shift ;;
     --clean)     CLEAN_MODE=true; shift ;;
     --status)    STATUS_MODE=true; shift ;;
     --console)   CONSOLE_MODE=true; SKIP_BUILD=true; shift ;;
     --native-claude) NATIVE_CLAUDE=true; shift ;;
+    --bun-runtime)   BUN_RUNTIME=true; shift ;;
+    --obfuscation)
+      OBFUSCATION_MODE="$2"
+      if [ "$OBFUSCATION_MODE" != "homoglyph" ] && [ "$OBFUSCATION_MODE" != "camelcase" ]; then
+        echo "Error: --obfuscation must be 'homoglyph' or 'camelcase', got '$OBFUSCATION_MODE'"
+        exit 1
+      fi
+      shift 2
+      ;;
     --help|-h)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -86,6 +103,7 @@ while [[ $# -gt 0 ]]; do
       echo "                        Each ID gets its own port, container, and volume"
       echo "  --upgrade             Rebuild image + restart container (skip auth)"
       echo "                        Use after code changes or SDK version bumps"
+      echo "  --upgrade-all         Rebuild image + restart ALL running instances"
       echo "  --auth                Re-authenticate only (skip build, restart proxy)"
       echo "  --no-build            Skip Docker image build"
       echo "  --proxy URL           HTTP/SOCKS5 proxy (e.g. http://host:port, socks5://host:port)"
@@ -93,6 +111,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --console             Attach to a running container's shell (use with --id)"
       echo "  --clean               Remove container and volumes for an instance"
       echo "  --status              Show status of all instances (default when no flags)"
+      echo "  --obfuscation MODE    System message obfuscation: 'homoglyph' (default) or 'camelcase'"
+      echo "  --bun-runtime          Use bun as the runtime instead of Node.js"
       echo "  --native-claude       Use native install (curl) instead of npm for Claude Code"
       echo "  --help                Show this help"
       echo ""
@@ -100,6 +120,7 @@ while [[ $# -gt 0 ]]; do
       echo "  $0                    # show status of all instances"
       echo "  $0 --id 1            # instance 1 → port 3457"
       echo "  $0 --upgrade          # rebuild + restart (code/SDK update)"
+      echo "  $0 --upgrade-all     # rebuild + restart ALL instances"
       echo "  $0 --id 2 --upgrade  # upgrade instance 2"
       echo "  $0 --id 2 --auth     # re-auth instance 2"
       echo "  $0 --console          # attach to default instance shell"
@@ -109,7 +130,8 @@ while [[ $# -gt 0 ]]; do
       echo "  $0 --native-claude   # build with native Claude Code install"
       echo ""
       echo "Environment variables:"
-      echo "  MERIDIAN_PORT    Base port (default: 3456), offset by --id N"
+      echo "  MERIDIAN_PORT           Base port (default: 3456), offset by --id N"
+      echo "  MERIDIAN_OBFUSCATION    System message obfuscation mode (homoglyph|camelcase)"
       echo "  HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY"
       echo "  These are overridden by the --proxy / --no-proxy flags."
       exit 0
@@ -123,10 +145,10 @@ done
 
 # ── Default: show status panel when no action flags given ──────
 if [ "$STATUS_MODE" = false ] && [ "$CLEAN_MODE" = false ] && \
-   [ "$CONSOLE_MODE" = false ] && \
+   [ "$CONSOLE_MODE" = false ] && [ "$UPGRADE_ALL" = false ] && \
    [ "$AUTH_ONLY" = false ] && [ "$SKIP_AUTH" = false ] && \
    [ "$SKIP_BUILD" = false ] && [ -z "$INSTANCE_ID" ] && \
-   [ "$NATIVE_CLAUDE" = false ]; then
+   [ "$NATIVE_CLAUDE" = false ] && [ "$BUN_RUNTIME" = false ]; then
   STATUS_MODE=true
 fi
 
@@ -192,6 +214,70 @@ if [ "$STATUS_MODE" = true ]; then
   echo "    $0 --id N --auth      # re-authenticate instance N"
   echo "    $0 --id N --console   # attach to instance N shell"
   echo "    $0 --clean --id N     # remove instance N (container + volumes)"
+  echo "==========================================="
+  exit 0
+fi
+
+# ── Upgrade-all mode ────────────────────────────────────────────
+if [ "$UPGRADE_ALL" = true ]; then
+  CONTAINERS=$(docker ps --filter "name=^claude-max-proxy" --format '{{.Names}}' 2>/dev/null | sort)
+
+  if [ -z "$CONTAINERS" ]; then
+    echo "  No running instances found. Nothing to upgrade."
+    exit 0
+  fi
+
+  # Collect instance IDs
+  INSTANCE_IDS=()
+  for CNAME in $CONTAINERS; do
+    if [ "$CNAME" = "claude-max-proxy" ]; then
+      INSTANCE_IDS+=("0")
+    else
+      INSTANCE_IDS+=("${CNAME##claude-max-proxy-}")
+    fi
+  done
+
+  echo "==========================================="
+  echo "  Upgrading ALL instances: ${INSTANCE_IDS[*]}"
+  echo "==========================================="
+  echo ""
+
+  # Step 1: Build image once
+  echo "  [1/2] Building Docker image..."
+  BUILD_ARGS=()
+  if [ "$NATIVE_CLAUDE" = true ]; then
+    BUILD_ARGS+=(--build-arg CLAUDE_INSTALL_METHOD=native)
+  fi
+  if [ "$BUN_RUNTIME" = true ]; then
+    BUILD_ARGS+=(--build-arg BUN_RUNTIME=true)
+  fi
+  docker build -f Dockerfile.deploy "${BUILD_ARGS[@]}" -t "${IMAGE_NAME:-claude-max-proxy}" .
+  echo "  Build complete."
+  echo ""
+
+  # Step 2: Restart each instance
+  echo "  [2/2] Restarting instances..."
+  echo ""
+
+  FAILED=()
+  for IID in "${INSTANCE_IDS[@]}"; do
+    echo "  ── Upgrading instance ${IID} ──"
+    if "$0" --id "$IID" --upgrade --no-build; then
+      echo "  ✓ Instance ${IID} upgraded."
+    else
+      echo "  ✗ Instance ${IID} failed."
+      FAILED+=("$IID")
+    fi
+    echo ""
+  done
+
+  echo "==========================================="
+  if [ ${#FAILED[@]} -eq 0 ]; then
+    echo "  All ${#INSTANCE_IDS[@]} instances upgraded successfully."
+  else
+    echo "  ${#FAILED[@]} instance(s) failed: ${FAILED[*]}"
+    echo "  Check logs: docker logs claude-max-proxy-<ID>"
+  fi
   echo "==========================================="
   exit 0
 fi
@@ -299,6 +385,41 @@ echo ""
 NETWORK_PROXY="${NETWORK_PROXY:-${ALL_PROXY:-${HTTPS_PROXY:-${HTTP_PROXY:-}}}}"
 NETWORK_NO_PROXY="${NETWORK_NO_PROXY:-${NO_PROXY:-}}"
 
+# ── Inherit native-claude setting from existing container (upgrade mode) ──
+# When upgrading, if --native-claude was not explicitly passed, check the
+# existing container's CLAUDE_INSTALL_METHOD env var so the build method persists.
+if [ "$SKIP_AUTH" = true ] && [ "$NATIVE_CLAUDE" = false ]; then
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    INHERITED_METHOD=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -m1 "^CLAUDE_INSTALL_METHOD=" | cut -d= -f2-)
+    if [ "$INHERITED_METHOD" = "native" ]; then
+      NATIVE_CLAUDE=true
+      echo "  Inherited native Claude install from existing container."
+    fi
+  fi
+fi
+
+# ── Inherit bun-runtime setting from existing container (upgrade mode) ──
+if [ "$SKIP_AUTH" = true ] && [ "$BUN_RUNTIME" = false ]; then
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    INHERITED_BUN=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -m1 "^BUN_RUNTIME=" | cut -d= -f2-)
+    if [ "$INHERITED_BUN" = "true" ]; then
+      BUN_RUNTIME=true
+      echo "  Inherited bun runtime from existing container."
+    fi
+  fi
+fi
+
+# ── Inherit obfuscation setting from existing container (upgrade mode) ──
+if [ "$SKIP_AUTH" = true ] && [ -z "$OBFUSCATION_MODE" ]; then
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    INHERITED_OBFUSCATION=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -m1 "^MERIDIAN_OBFUSCATION=" | cut -d= -f2-)
+    if [ -n "$INHERITED_OBFUSCATION" ]; then
+      OBFUSCATION_MODE="$INHERITED_OBFUSCATION"
+      echo "  Inherited obfuscation mode from existing container: $OBFUSCATION_MODE"
+    fi
+  fi
+fi
+
 # ── Inherit proxy settings from existing container (upgrade mode) ──
 # When upgrading, if no --proxy was explicitly passed, read the proxy
 # config from the running container so the user doesn't have to repeat it.
@@ -346,6 +467,9 @@ if [ "$SKIP_BUILD" = false ]; then
   BUILD_ARGS=()
   if [ "$NATIVE_CLAUDE" = true ]; then
     BUILD_ARGS+=(--build-arg CLAUDE_INSTALL_METHOD=native)
+  fi
+  if [ "$BUN_RUNTIME" = true ]; then
+    BUILD_ARGS+=(--build-arg BUN_RUNTIME=true)
   fi
   docker build -f Dockerfile.deploy "${BUILD_ARGS[@]}" -t "$IMAGE_NAME" .
   echo ""
@@ -444,12 +568,24 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1
 fi
 
+OBFUSCATION_ENVS=()
+if [ -n "$OBFUSCATION_MODE" ]; then
+  OBFUSCATION_ENVS+=(-e "MERIDIAN_OBFUSCATION=$OBFUSCATION_MODE")
+fi
+
+BUN_RUNTIME_ENVS=()
+if [ "$BUN_RUNTIME" = true ]; then
+  BUN_RUNTIME_ENVS+=(-e "BUN_RUNTIME=true")
+fi
+
 docker run -d \
   --name "$CONTAINER_NAME" \
   -p "$PORT:3456" \
   -v "$AUTH_VOLUME:/home/claude/.claude" \
   -v "$SESSION_VOLUME:/home/claude/.cache/meridian" \
   "${PROXY_RUN_ENVS[@]}" \
+  "${OBFUSCATION_ENVS[@]}" \
+  "${BUN_RUNTIME_ENVS[@]}" \
   --restart unless-stopped \
   "$IMAGE_NAME"
 

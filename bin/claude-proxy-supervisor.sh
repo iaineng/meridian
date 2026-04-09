@@ -12,8 +12,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 # Auto-detect: compiled dist (Docker/npm) or TypeScript source (local dev)
+# When BUN_RUNTIME=true, use bun as the runtime instead of node
 if [ -f dist/cli.js ]; then
-  PROXY_CMD="node dist/cli.js"
+  if [ "$BUN_RUNTIME" = "true" ]; then
+    PROXY_CMD="bun dist/cli.js"
+  else
+    PROXY_CMD="node dist/cli.js"
+  fi
 else
   PROXY_CMD="bun run ./bin/cli.ts"
 fi
