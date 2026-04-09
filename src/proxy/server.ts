@@ -28,6 +28,7 @@ import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { resolveProfile, listProfiles, setActiveProfile, getActiveProfileId, getEffectiveProfiles, restoreActiveProfile } from "./profiles"
 import { filterBetasForProfile, getBetaPolicyFromEnv } from "./betas"
+import { obfuscateSystemMessage } from "./obfuscate"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
 import {
   computeLineageHash,
@@ -59,37 +60,6 @@ const exec = promisify(execCallback)
 
 let claudeExecutable = ""
 
-/**
- * Homoglyph substitution map: replaces Latin characters with visually
- * identical Cyrillic/Greek counterparts to prevent regex/keyword matching
- * while keeping content human-readable.
- */
-const HOMOGLYPH_MAP: Record<string, string> = {
-  // Lowercase: exact Cyrillic/Greek matches
-  'a': '\u0430', 'c': '\u0441', 'e': '\u0435', 'i': '\u0456',
-  'j': '\u0458', 'o': '\u043e', 'p': '\u0440', 's': '\u0455',
-  'x': '\u0445', 'y': '\u0443',
-  // Uppercase: exact Cyrillic/Greek matches
-  'A': '\u0410', 'B': '\u0412', 'C': '\u0421', 'E': '\u0415',
-  'H': '\u041d', 'I': '\u0406', 'J': '\u0408', 'K': '\u041a',
-  'M': '\u041c', 'N': '\u039d', 'O': '\u041e', 'P': '\u0420',
-  'S': '\u0405', 'T': '\u0422', 'X': '\u0425', 'Z': '\u0396',
-  // Lowercase: high-similarity approximations
-  'd': '\u0501', 'g': '\u0261', 'h': '\u04bb', 'q': '\u051b',
-  'v': '\u03bd', 'w': '\u051d',
-  // Uppercase: high-similarity approximations
-  'V': '\u0474', 'W': '\u051c',
-  // Punctuation/symbols
-  ' ': '\u3000', ':': '\uff1a',
-}
-
-function homoglyphEncode(content: string): string {
-  let result = ''
-  for (const ch of content) {
-    result += HOMOGLYPH_MAP[ch] ?? ch
-  }
-  return result
-}
 
 
 /**
@@ -465,10 +435,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         claudeLog("debug.agents", { names: validAgentNames, count: validAgentNames.length })
       }
       systemContext += adapter.buildSystemContextAddendum?.(body, sdkAgents) ?? ""
-      // Homoglyph-encode system context so the model doesn't misinterpret
+      // Obfuscate system context so the model doesn't misinterpret
       // embedded tags or special characters
       if (systemContext) {
-        systemContext = homoglyphEncode(systemContext)
+        systemContext = obfuscateSystemMessage(systemContext)
       }
 
 
