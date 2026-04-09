@@ -322,6 +322,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const agentMode = c.req.header("x-opencode-agent-mode") ?? null
         let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType, agentMode)
         const outputFormat = body.output_config?.format
+        if (outputFormat?.schema?.$schema) delete outputFormat.schema.$schema
         // Allow adapter to override streaming preference (e.g. LiteLLM requires non-streaming)
         const adapterStreamPref = adapter.prefersStreaming?.(body)
         const stream = adapterStreamPref !== undefined ? adapterStreamPref : (body.stream ?? false)
@@ -380,7 +381,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const effort = effortHeader
           || body.effort
           || undefined
-        let thinking: QueryContext['thinking'] | undefined = body.thinking || undefined
+        // Default to disabled — the SDK internally enables thinking when no
+        // config is provided, which fails when max_tokens is below the 1024
+        // budget_tokens minimum required by the API.
+        let thinking: QueryContext['thinking'] = body.thinking || { type: "disabled" }
         if (thinkingHeader !== undefined) {
           try {
             thinking = JSON.parse(thinkingHeader) as QueryContext["thinking"]
