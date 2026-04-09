@@ -873,13 +873,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               if (eventType === "content_block_start") {
                 const block = { ...(event as any).content_block } as Record<string, unknown>
 
-                // Strip thinking/redacted_thinking in passthrough mode — non-native
-                // clients have no renderer for these and may misinterpret them.
-                if (passthrough && (block.type === "thinking" || block.type === "redacted_thinking")) {
-                  if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
-                  claudeLog("passthrough.thinking_stripped", { mode: "non_stream", type: block.type, index: eventIndex })
-                  continue
-                }
 
                 // outputFormat: StructuredOutput → accumulate as text block
                 if (outputFormat) {
@@ -1414,17 +1407,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         }
                       }
 
-                      // Strip thinking blocks in passthrough mode — non-native clients
-                      // have no renderer for type:"thinking" and may choke on the
-                      // encrypted signature field.
-                      if (
-                        passthrough &&
-                        (block?.type === "thinking" || block?.type === "redacted_thinking")
-                      ) {
-                        if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
-                        claudeLog("passthrough.thinking_stripped", { mode: "stream", type: block.type, index: eventIndex })
-                        continue
-                      }
                       if (block?.type === "tool_use" && typeof block.name === "string") {
                         if (passthrough && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
                           // Passthrough mode: SDK sent the name WITH the mcp__oc__ prefix.
