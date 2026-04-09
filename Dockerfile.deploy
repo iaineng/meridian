@@ -54,9 +54,18 @@ WORKDIR /app
 # code changes don't invalidate the (slow) Claude install cache layer.
 USER claude
 ARG NATIVE_CLAUDE_VERSION=2.1.97
+# Proxy settings scoped to native Claude install only (custom names to avoid
+# Docker's predefined HTTP_PROXY args which would affect ALL RUN steps).
+ARG NATIVE_INSTALL_PROXY=""
+ARG NATIVE_INSTALL_NO_PROXY=""
 RUN if [ "$CLAUDE_INSTALL_METHOD" = "native" ]; then \
       echo "Installing native Claude Code (cache key: ${NATIVE_CLAUDE_VERSION})" && \
-      curl -fsSL https://claude.ai/install.sh | bash; \
+      if [ -n "$NATIVE_INSTALL_PROXY" ]; then \
+        export http_proxy="$NATIVE_INSTALL_PROXY" https_proxy="$NATIVE_INSTALL_PROXY" && \
+        curl -fsSL https://claude.ai/install.sh | bash; \
+      else \
+        curl -fsSL https://claude.ai/install.sh | bash; \
+      fi; \
     fi
 
 # Copy built proxy artifacts

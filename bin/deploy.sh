@@ -251,6 +251,12 @@ if [ "$UPGRADE_ALL" = true ]; then
   if [ "$BUN_RUNTIME" = true ]; then
     BUILD_ARGS+=(--build-arg BUN_RUNTIME=true)
   fi
+  if [ -n "$NETWORK_PROXY" ]; then
+    BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_PROXY=$NETWORK_PROXY")
+  fi
+  if [ -n "$NETWORK_NO_PROXY" ]; then
+    BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_NO_PROXY=$NETWORK_NO_PROXY")
+  fi
   docker build -f Dockerfile.deploy "${BUILD_ARGS[@]}" -t "${IMAGE_NAME:-claude-max-proxy}" .
   echo "  Build complete."
   echo ""
@@ -470,6 +476,12 @@ if [ "$SKIP_BUILD" = false ]; then
   fi
   if [ "$BUN_RUNTIME" = true ]; then
     BUILD_ARGS+=(--build-arg BUN_RUNTIME=true)
+  fi
+  if [ -n "$NETWORK_PROXY" ]; then
+    BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_PROXY=$NETWORK_PROXY")
+  fi
+  if [ -n "$NETWORK_NO_PROXY" ]; then
+    BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_NO_PROXY=$NETWORK_NO_PROXY")
   fi
   docker build -f Dockerfile.deploy "${BUILD_ARGS[@]}" -t "$IMAGE_NAME" .
   echo ""
