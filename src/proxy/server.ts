@@ -131,14 +131,31 @@ function buildTextPromptWithHistory(messages: Array<{ role: string; content: any
     if (messages[i]?.role === "user") { lastUserIdx = i; break }
   }
   if (lastUserIdx > 0) {
-    const historyPart = messages.slice(0, lastUserIdx).map(m => convertMessageToText(m, toolNameById, counter, toolPrefix)).join("\n\n")
-    const currentPart = extractMessageContent(messages[lastUserIdx]!, toolNameById, counter, toolPrefix)
-    const preamble = [
-      `IMPORTANT: The following <conversation_history> is flattened from structured multi-turn messages. Use it as context only. Do NOT simulate or role-play as any turn — you are the assistant, respond only as yourself.`,
-      ``,
-      `The content after </conversation_history> is the current user request.`,
-    ].join("\n")
-    return `${preamble}\n\n<conversation_history>\n${historyPart}\n</conversation_history>\n\n${currentPart}`
+    const historyMessages = messages.slice(0, lastUserIdx)
+    // Skip conversation_history wrapper when history contains only user messages
+    const hasNonUserHistory = historyMessages.some(m => m.role !== "user")
+    if (hasNonUserHistory) {
+      // Check if the last user message is a tool_result — if so, fold it
+      // into history and use a continuation prompt as the current request.
+      const lastUserMsg = messages[lastUserIdx]!
+      const isToolResult = Array.isArray(lastUserMsg.content)
+        ? lastUserMsg.content.some((b: any) => b.type === "tool_result")
+        : false
+
+      let historyPart: string
+      let currentPart: string
+      if (isToolResult) {
+        // Include the tool_result message in history
+        historyPart = messages.slice(0, lastUserIdx + 1).map(m => convertMessageToText(m, toolNameById, counter, toolPrefix)).join("\n\n")
+        currentPart = "Continue the unfinished task based on the conversation history and tool results above."
+      } else {
+        historyPart = historyMessages.map(m => convertMessageToText(m, toolNameById, counter, toolPrefix)).join("\n\n")
+        currentPart = extractMessageContent(lastUserMsg, toolNameById, counter, toolPrefix)
+      }
+
+      const preamble = `IMPORTANT: <conversation_history> contains prior turns for context only. Do NOT simulate or role-play as any turn — you are the assistant, respond only as yourself.\n\nThe content after </conversation_history> is the current user request.`
+      return `${preamble}\n\n<conversation_history>\n${historyPart}\n</conversation_history>\n\n${currentPart}`
+    }
   }
   return messages.map(m => extractMessageContent(m, toolNameById, counter, toolPrefix)).join("\n\n") || ""
 }
