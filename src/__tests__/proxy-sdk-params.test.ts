@@ -87,6 +87,42 @@ describe("SDK param passthrough — body fields", () => {
     expect(capturedOptions.effort).toBe("low")
   })
 
+  it("forwards effort from body.output_config.effort", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, output_config: { effort: "high" } })
+    expect(capturedOptions.effort).toBe("high")
+  })
+
+  it("body.effort takes precedence over output_config.effort", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, effort: "low", output_config: { effort: "high" } })
+    expect(capturedOptions.effort).toBe("low")
+  })
+
+  it("defaults effort to high when adaptive thinking is active but no effort set", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, thinking: { type: "adaptive" } })
+    expect(capturedOptions.effort).toBe("high")
+  })
+
+  it("does not default effort when thinking is enabled (non-adaptive)", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, thinking: { type: "enabled", budgetTokens: 2048 } })
+    expect(capturedOptions.effort).toBeUndefined()
+  })
+
+  it("does not default effort when thinking is disabled", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, thinking: { type: "disabled" } })
+    expect(capturedOptions.effort).toBeUndefined()
+  })
+
+  it("explicit effort is not overridden by adaptive thinking default", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, effort: "low", thinking: { type: "adaptive" } })
+    expect(capturedOptions.effort).toBe("low")
+  })
+
   it("forwards thinking from body", async () => {
     const thinking = { type: "enabled", budgetTokens: 2048 }
     const app = createTestApp()

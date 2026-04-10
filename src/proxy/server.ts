@@ -378,8 +378,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           console.error(`[PROXY] ${requestMeta.requestId} stripped anthropic-beta(s) for Max profile: ${betaFilter.stripped.join(", ")}`)
         }
 
-        const effort = effortHeader
+        const explicitEffort = effortHeader
           || body.effort
+          || body.output_config?.effort
           || undefined
         // Default to disabled — the SDK internally enables thinking when no
         // config is provided, which fails when max_tokens is below the 1024
@@ -392,6 +393,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             console.error(`[PROXY] ${requestMeta.requestId} ignoring malformed x-opencode-thinking header: ${e instanceof Error ? e.message : String(e)}`)
           }
         }
+        // Default effort to "high" when adaptive thinking is active but no
+        // effort was explicitly provided — matches the Anthropic API default.
+        const effort = explicitEffort
+          || (thinking?.type === "adaptive" ? "high" : undefined)
         const parsedBudget = taskBudgetHeader ? Number.parseInt(taskBudgetHeader, 10) : NaN
         const taskBudget = Number.isFinite(parsedBudget)
           ? { total: parsedBudget }
