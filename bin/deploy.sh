@@ -517,7 +517,7 @@ if [ "$SKIP_AUTH" = true ]; then
 
   # Verify existing auth is still valid
   echo "  Verifying existing authentication..."
-  AUTH_CHECK=$(docker run --rm \
+  AUTH_CHECK=$(docker run --rm --runtime=runsc \
     -v "$AUTH_VOLUME:/home/claude/.claude" \
     "${PROXY_RUN_ENVS[@]}" \
     "$IMAGE_NAME" \
@@ -545,7 +545,7 @@ else
   # Pre-create symlink so `claude login` writes .claude.json into the
   # persistent volume (via symlink) instead of the ephemeral container layer.
   # This ensures device_id survives container restarts.
-  docker run -it --rm \
+  docker run -it --rm --runtime=runsc \
     -v "$AUTH_VOLUME:/home/claude/.claude" \
     "${PROXY_RUN_ENVS[@]}" \
     --entrypoint sh \
@@ -555,7 +555,7 @@ else
   # Quick sanity check: verify auth succeeded
   echo ""
   echo "  Verifying authentication..."
-  AUTH_CHECK=$(docker run --rm \
+  AUTH_CHECK=$(docker run --rm --runtime=runsc \
     -v "$AUTH_VOLUME:/home/claude/.claude" \
     "${PROXY_RUN_ENVS[@]}" \
     "$IMAGE_NAME" \
@@ -600,6 +600,7 @@ if [ "$BUN_RUNTIME" = true ]; then
 fi
 
 docker run -d \
+  --runtime=runsc \
   --name "$CONTAINER_NAME" \
   -p "$PORT:3456" \
   -v "$AUTH_VOLUME:/home/claude/.claude" \
