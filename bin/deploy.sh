@@ -62,6 +62,7 @@ CONSOLE_MODE=false
 BUN_RUNTIME=false
 OBFUSCATION_MODE=""
 UPGRADE_ALL=false
+UNIFIED_BUILD=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -82,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --no-proxy)
       NETWORK_NO_PROXY="$2"; shift 2 ;;
     --upgrade-all) UPGRADE_ALL=true; shift ;;
+    --_unified-build) UNIFIED_BUILD=true; shift ;;
     --clean)     CLEAN_MODE=true; shift ;;
     --status)    STATUS_MODE=true; shift ;;
     --console)   CONSOLE_MODE=true; SKIP_BUILD=true; shift ;;
@@ -268,7 +270,14 @@ if [ "$UPGRADE_ALL" = true ]; then
   FAILED=()
   for IID in "${INSTANCE_IDS[@]}"; do
     echo "  ── Upgrading instance ${IID} ──"
-    if "$0" --id "$IID" --upgrade --no-build; then
+    FORWARD_ARGS=(--id "$IID" --upgrade --no-build --_unified-build)
+    if [ "$BUN_RUNTIME" = true ]; then
+      FORWARD_ARGS+=(--bun-runtime)
+    fi
+    if [ "$NATIVE_CLAUDE" = true ]; then
+      FORWARD_ARGS+=(--native-claude)
+    fi
+    if "$0" "${FORWARD_ARGS[@]}"; then
       echo "  ✓ Instance ${IID} upgraded."
     else
       echo "  ✗ Instance ${IID} failed."
@@ -394,7 +403,7 @@ NETWORK_NO_PROXY="${NETWORK_NO_PROXY:-${NO_PROXY:-}}"
 # ── Inherit native-claude setting from existing container (upgrade mode) ──
 # When upgrading, if --native-claude was not explicitly passed, check the
 # existing container's CLAUDE_INSTALL_METHOD env var so the build method persists.
-if [ "$SKIP_AUTH" = true ] && [ "$NATIVE_CLAUDE" = false ]; then
+if [ "$SKIP_AUTH" = true ] && [ "$NATIVE_CLAUDE" = false ] && [ "$UNIFIED_BUILD" = false ]; then
   if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     INHERITED_METHOD=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -m1 "^CLAUDE_INSTALL_METHOD=" | cut -d= -f2-)
     if [ "$INHERITED_METHOD" = "native" ]; then
@@ -405,7 +414,7 @@ if [ "$SKIP_AUTH" = true ] && [ "$NATIVE_CLAUDE" = false ]; then
 fi
 
 # ── Inherit bun-runtime setting from existing container (upgrade mode) ──
-if [ "$SKIP_AUTH" = true ] && [ "$BUN_RUNTIME" = false ]; then
+if [ "$SKIP_AUTH" = true ] && [ "$BUN_RUNTIME" = false ] && [ "$UNIFIED_BUILD" = false ]; then
   if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     INHERITED_BUN=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -m1 "^BUN_RUNTIME=" | cut -d= -f2-)
     if [ "$INHERITED_BUN" = "true" ]; then
