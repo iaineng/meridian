@@ -32,7 +32,9 @@ RUN apt-get update \
 # Install bun in the runtime stage when BUN_RUNTIME=true
 RUN if [ "$BUN_RUNTIME" = "true" ]; then \
       curl -fsSL https://bun.sh/install | bash && \
-      ln -s /root/.bun/bin/bun /usr/local/bin/bun; \
+      cp /root/.bun/bin/bun /usr/local/bin/bun && \
+      chmod +x /usr/local/bin/bun && \
+      rm -rf /root/.bun; \
     fi
 
 RUN userdel -r node 2>/dev/null; \
