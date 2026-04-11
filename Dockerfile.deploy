@@ -26,7 +26,7 @@ ARG BUN_RUNTIME=false
 ENV BUN_RUNTIME=${BUN_RUNTIME}
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates unzip \
+    && apt-get install -y --no-install-recommends curl ca-certificates unzip gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Install bun in the runtime stage when BUN_RUNTIME=true
@@ -44,10 +44,12 @@ RUN userdel -r node 2>/dev/null; \
     && chown -R claude:claude /home/claude
 
 # Install Claude Code (npm by default, or native via --build-arg CLAUDE_INSTALL_METHOD=native)
+# When CLAUDE_INSTALL_METHOD=host, no install is performed — the host binary
+# is bind-mounted at runtime via --host-claude.
 ARG CLAUDE_INSTALL_METHOD=npm
 ENV CLAUDE_INSTALL_METHOD=${CLAUDE_INSTALL_METHOD}
 RUN if [ "$CLAUDE_INSTALL_METHOD" = "npm" ]; then \
-      npm install -g @anthropic-ai/claude-code@2.1.97; \
+      npm install -g @anthropic-ai/claude-code@2.1.100; \
     fi
 
 WORKDIR /app
@@ -55,7 +57,7 @@ WORKDIR /app
 # Native Claude Code install — placed BEFORE COPY of build artifacts so that
 # code changes don't invalidate the (slow) Claude install cache layer.
 USER claude
-ARG NATIVE_CLAUDE_VERSION=2.1.97
+ARG NATIVE_CLAUDE_VERSION=2.1.100
 # Proxy settings scoped to native Claude install only (custom names to avoid
 # Docker's predefined HTTP_PROXY args which would affect ALL RUN steps).
 ARG NATIVE_INSTALL_PROXY=""
@@ -67,7 +69,9 @@ RUN if [ "$CLAUDE_INSTALL_METHOD" = "native" ]; then \
         curl -fsSL https://claude.ai/install.sh | bash; \
       else \
         curl -fsSL https://claude.ai/install.sh | bash; \
-      fi; \
+      fi && \
+      rm -f /home/claude/.claude.json && \
+      rm -rf /home/claude/.claude/*; \
     fi
 
 # Copy built proxy artifacts
@@ -78,8 +82,6 @@ COPY --from=build --chown=claude:claude /app/package.json ./
 COPY --chown=claude:claude bin/docker-entrypoint.sh bin/claude-proxy-supervisor.sh ./bin/
 RUN sed -i 's/\r$//' ./bin/docker-entrypoint.sh ./bin/claude-proxy-supervisor.sh \
     && chmod +x ./bin/docker-entrypoint.sh ./bin/claude-proxy-supervisor.sh
-
-USER claude
 
 ENV PATH="/home/claude/.local/bin:/home/claude/.claude/bin:${PATH}"
 
@@ -94,7 +96,8 @@ ENV MERIDIAN_PASSTHROUGH=1 \
     MERIDIAN_SONNET_MODEL=sonnet \
     MERIDIAN_WORKDIR=/app \
     MERIDIAN_NO_FILE_CHANGES=1 \
-    MERIDIAN_BETA_POLICY=strip-all
+    MERIDIAN_BETA_POLICY=strip-all \
+    MERIDIAN_OBFUSCATION=cr
 
 ENTRYPOINT ["./bin/docker-entrypoint.sh"]
 CMD ["./bin/claude-proxy-supervisor.sh"]

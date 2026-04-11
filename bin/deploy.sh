@@ -63,6 +63,8 @@ BUN_RUNTIME=false
 OBFUSCATION_MODE=""
 UPGRADE_ALL=false
 UNIFIED_BUILD=false
+NATIVE_PROXY=false
+HOST_CLAUDE_PATH=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -88,6 +90,8 @@ while [[ $# -gt 0 ]]; do
     --status)    STATUS_MODE=true; shift ;;
     --console)   CONSOLE_MODE=true; SKIP_BUILD=true; shift ;;
     --native-claude) NATIVE_CLAUDE=true; shift ;;
+    --native-proxy)  NATIVE_PROXY=true; shift ;;
+    --host-claude)   HOST_CLAUDE_PATH="$2"; shift 2 ;;
     --bun-runtime)   BUN_RUNTIME=true; shift ;;
     --obfuscation)
       OBFUSCATION_MODE="$2"
@@ -116,6 +120,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --obfuscation MODE    System message obfuscation: 'homoglyph' (default) or 'camelcase'"
       echo "  --bun-runtime          Use bun as the runtime instead of Node.js"
       echo "  --native-claude       Use native install (curl) instead of npm for Claude Code"
+      echo "  --native-proxy        Route native Claude install through --proxy (default: off)"
+      echo "  --host-claude PATH    Mount host Claude install into container (skip install)"
+      echo "                        Example: --host-claude /root/.local"
       echo "  --help                Show this help"
       echo ""
       echo "Examples:"
@@ -144,6 +151,27 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ── Validate --host-claude path ─────────────────────────────────
+# The native install creates a symlink bin/claude → share/claude/versions/X
+# using an ABSOLUTE path, so we mount at the same path inside the container.
+if [ -n "$HOST_CLAUDE_PATH" ]; then
+  HOST_CLAUDE_PATH=$(cd "$HOST_CLAUDE_PATH" && pwd)
+  if [ ! -f "$HOST_CLAUDE_PATH/bin/claude" ]; then
+    echo "Error: Claude binary not found at $HOST_CLAUDE_PATH/bin/claude"
+    echo "  Install Claude on the host first: curl -fsSL https://claude.ai/install.sh | bash"
+    echo "  Then use: --host-claude ~/.local"
+    exit 1
+  fi
+fi
+
+# ── Build host-claude mount and env arrays ─────────────────────
+HOST_CLAUDE_MOUNT=()
+HOST_CLAUDE_ENVS=()
+if [ -n "$HOST_CLAUDE_PATH" ]; then
+  HOST_CLAUDE_MOUNT+=(-v "$HOST_CLAUDE_PATH:$HOST_CLAUDE_PATH:ro")
+  HOST_CLAUDE_ENVS+=(-e "HOST_CLAUDE_PATH=$HOST_CLAUDE_PATH")
+fi
 
 # ── Default: show status panel when no action flags given ──────
 if [ "$STATUS_MODE" = false ] && [ "$CLEAN_MODE" = false ] && \
@@ -247,16 +275,18 @@ if [ "$UPGRADE_ALL" = true ]; then
   # Step 1: Build image once
   echo "  [1/2] Building Docker image..."
   BUILD_ARGS=()
-  if [ "$NATIVE_CLAUDE" = true ]; then
+  if [ -n "$HOST_CLAUDE_PATH" ]; then
+    BUILD_ARGS+=(--build-arg CLAUDE_INSTALL_METHOD=host)
+  elif [ "$NATIVE_CLAUDE" = true ]; then
     BUILD_ARGS+=(--build-arg CLAUDE_INSTALL_METHOD=native)
   fi
   if [ "$BUN_RUNTIME" = true ]; then
     BUILD_ARGS+=(--build-arg BUN_RUNTIME=true)
   fi
-  if [ -n "$NETWORK_PROXY" ]; then
+  if [ "$NATIVE_PROXY" = true ] && [ -n "$NETWORK_PROXY" ]; then
     BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_PROXY=$NETWORK_PROXY")
   fi
-  if [ -n "$NETWORK_NO_PROXY" ]; then
+  if [ "$NATIVE_PROXY" = true ] && [ -n "$NETWORK_NO_PROXY" ]; then
     BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_NO_PROXY=$NETWORK_NO_PROXY")
   fi
   docker build -f Dockerfile.deploy "${BUILD_ARGS[@]}" -t "${IMAGE_NAME:-claude-max-proxy}" .
@@ -276,6 +306,9 @@ if [ "$UPGRADE_ALL" = true ]; then
     fi
     if [ "$NATIVE_CLAUDE" = true ]; then
       FORWARD_ARGS+=(--native-claude)
+    fi
+    if [ -n "$HOST_CLAUDE_PATH" ]; then
+      FORWARD_ARGS+=(--host-claude "$HOST_CLAUDE_PATH")
     fi
     if "$0" "${FORWARD_ARGS[@]}"; then
       echo "  ✓ Instance ${IID} upgraded."
@@ -435,6 +468,19 @@ if [ "$SKIP_AUTH" = true ] && [ -z "$OBFUSCATION_MODE" ]; then
   fi
 fi
 
+# ── Inherit host-claude setting from existing container (upgrade mode) ──
+if [ "$SKIP_AUTH" = true ] && [ -z "$HOST_CLAUDE_PATH" ] && [ "$UNIFIED_BUILD" = false ]; then
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    INHERITED_HOST_CLAUDE=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -m1 "^HOST_CLAUDE_PATH=" | cut -d= -f2-)
+    if [ -n "$INHERITED_HOST_CLAUDE" ]; then
+      HOST_CLAUDE_PATH="$INHERITED_HOST_CLAUDE"
+      HOST_CLAUDE_MOUNT=(-v "$HOST_CLAUDE_PATH:$HOST_CLAUDE_PATH:ro")
+      HOST_CLAUDE_ENVS=(-e "HOST_CLAUDE_PATH=$HOST_CLAUDE_PATH")
+      echo "  Inherited host-claude from existing container: $HOST_CLAUDE_PATH"
+    fi
+  fi
+fi
+
 # ── Inherit proxy settings from existing container (upgrade mode) ──
 # When upgrading, if no --proxy was explicitly passed, read the proxy
 # config from the running container so the user doesn't have to repeat it.
@@ -480,16 +526,18 @@ if [ "$SKIP_BUILD" = false ]; then
   echo "  [1/3] Building Docker image..."
   echo "==========================================="
   BUILD_ARGS=()
-  if [ "$NATIVE_CLAUDE" = true ]; then
+  if [ -n "$HOST_CLAUDE_PATH" ]; then
+    BUILD_ARGS+=(--build-arg CLAUDE_INSTALL_METHOD=host)
+  elif [ "$NATIVE_CLAUDE" = true ]; then
     BUILD_ARGS+=(--build-arg CLAUDE_INSTALL_METHOD=native)
   fi
   if [ "$BUN_RUNTIME" = true ]; then
     BUILD_ARGS+=(--build-arg BUN_RUNTIME=true)
   fi
-  if [ -n "$NETWORK_PROXY" ]; then
+  if [ "$NATIVE_PROXY" = true ] && [ -n "$NETWORK_PROXY" ]; then
     BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_PROXY=$NETWORK_PROXY")
   fi
-  if [ -n "$NETWORK_NO_PROXY" ]; then
+  if [ "$NATIVE_PROXY" = true ] && [ -n "$NETWORK_NO_PROXY" ]; then
     BUILD_ARGS+=(--build-arg "NATIVE_INSTALL_NO_PROXY=$NETWORK_NO_PROXY")
   fi
   docker build -f Dockerfile.deploy "${BUILD_ARGS[@]}" -t "$IMAGE_NAME" .
@@ -520,6 +568,7 @@ if [ "$SKIP_AUTH" = true ]; then
   AUTH_CHECK=$(docker run --rm --runtime=runsc \
     -v "$AUTH_VOLUME:/home/claude/.claude" \
     "${PROXY_RUN_ENVS[@]}" \
+    "${HOST_CLAUDE_MOUNT[@]}" "${HOST_CLAUDE_ENVS[@]}" \
     "$IMAGE_NAME" \
     claude auth status 2>&1) || true
 
@@ -545,12 +594,14 @@ else
   # Pre-create symlink so `claude login` writes .claude.json into the
   # persistent volume (via symlink) instead of the ephemeral container layer.
   # This ensures device_id survives container restarts.
+  # The entrypoint handles .claude.json symlink, host-claude copy,
+  # and privilege drop — then execs bash for interactive login.
   docker run -it --rm --runtime=runsc \
     -v "$AUTH_VOLUME:/home/claude/.claude" \
     "${PROXY_RUN_ENVS[@]}" \
-    --entrypoint sh \
+    "${HOST_CLAUDE_MOUNT[@]}" "${HOST_CLAUDE_ENVS[@]}" \
     "$IMAGE_NAME" \
-    -c 'ln -sf /home/claude/.claude/.claude.json /home/claude/.claude.json; exec bash'
+    bash
 
   # Quick sanity check: verify auth succeeded
   echo ""
@@ -558,6 +609,7 @@ else
   AUTH_CHECK=$(docker run --rm --runtime=runsc \
     -v "$AUTH_VOLUME:/home/claude/.claude" \
     "${PROXY_RUN_ENVS[@]}" \
+    "${HOST_CLAUDE_MOUNT[@]}" "${HOST_CLAUDE_ENVS[@]}" \
     "$IMAGE_NAME" \
     claude auth status 2>&1) || true
 
@@ -575,6 +627,17 @@ else
       *)     echo "  Aborted."; exit 1 ;;
     esac
   fi
+
+  # Ensure onboarding flag is set so Claude doesn't prompt interactively
+  docker run --rm --runtime=runsc \
+    -v "$AUTH_VOLUME:/home/claude/.claude" \
+    "$IMAGE_NAME" \
+    sh -c '
+      F=/home/claude/.claude/.claude.json
+      if [ -f "$F" ] && ! grep -q "hasCompletedOnboarding" "$F"; then
+        sed -i "s/^{/{\"hasCompletedOnboarding\":true,/" "$F"
+      fi
+    '
 fi
 
 # ── Step 3: Start proxy ──────────────────────────────────────
@@ -606,6 +669,7 @@ docker run -d \
   -v "$AUTH_VOLUME:/home/claude/.claude" \
   -v "$SESSION_VOLUME:/home/claude/.cache/meridian" \
   "${PROXY_RUN_ENVS[@]}" \
+  "${HOST_CLAUDE_MOUNT[@]}" "${HOST_CLAUDE_ENVS[@]}" \
   "${OBFUSCATION_ENVS[@]}" \
   "${BUN_RUNTIME_ENVS[@]}" \
   --restart unless-stopped \
