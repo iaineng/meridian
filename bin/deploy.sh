@@ -37,7 +37,7 @@
 #   MERIDIAN_PORT    Host port to expose (default: 3456, added by --id N)
 #   IMAGE_NAME           Docker image name (default: claude-max-proxy)
 #   CONTAINER_NAME       Docker container name (default: claude-max-proxy[-N])
-#   MERIDIAN_OBFUSCATION Obfuscation mode: homoglyph (default) or camelcase
+#   MERIDIAN_OBFUSCATION Obfuscation mode: cr (default), camelcase, homoglyph, or urlencode
 #   HTTP_PROXY           HTTP proxy (overridden by --proxy flag)
 #   HTTPS_PROXY          HTTPS proxy (overridden by --proxy flag)
 #   ALL_PROXY            SOCKS5 proxy (overridden by --proxy flag)
@@ -95,8 +95,8 @@ while [[ $# -gt 0 ]]; do
     --bun-runtime)   BUN_RUNTIME=true; shift ;;
     --obfuscation)
       OBFUSCATION_MODE="$2"
-      if [ "$OBFUSCATION_MODE" != "homoglyph" ] && [ "$OBFUSCATION_MODE" != "camelcase" ]; then
-        echo "Error: --obfuscation must be 'homoglyph' or 'camelcase', got '$OBFUSCATION_MODE'"
+      if [ "$OBFUSCATION_MODE" != "homoglyph" ] && [ "$OBFUSCATION_MODE" != "camelcase" ] && [ "$OBFUSCATION_MODE" != "urlencode" ] && [ "$OBFUSCATION_MODE" != "cr" ]; then
+        echo "Error: --obfuscation must be 'homoglyph', 'camelcase', 'urlencode', or 'cr', got '$OBFUSCATION_MODE'"
         exit 1
       fi
       shift 2
@@ -117,7 +117,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --console             Attach to a running container's shell (use with --id)"
       echo "  --clean               Remove container and volumes for an instance"
       echo "  --status              Show status of all instances (default when no flags)"
-      echo "  --obfuscation MODE    System message obfuscation: 'homoglyph' (default) or 'camelcase'"
+      echo "  --obfuscation MODE    System message obfuscation: 'cr' (default), 'camelcase', 'homoglyph', or 'urlencode'"
       echo "  --bun-runtime          Use bun as the runtime instead of Node.js"
       echo "  --native-claude       Use native install (curl) instead of npm for Claude Code"
       echo "  --native-proxy        Route native Claude install through --proxy (default: off)"
@@ -140,7 +140,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Environment variables:"
       echo "  MERIDIAN_PORT           Base port (default: 3456), offset by --id N"
-      echo "  MERIDIAN_OBFUSCATION    System message obfuscation mode (homoglyph|camelcase)"
+      echo "  MERIDIAN_OBFUSCATION    System message obfuscation mode (cr|camelcase|homoglyph|urlencode)"
       echo "  HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY"
       echo "  These are overridden by the --proxy / --no-proxy flags."
       exit 0
@@ -309,6 +309,9 @@ if [ "$UPGRADE_ALL" = true ]; then
     fi
     if [ -n "$HOST_CLAUDE_PATH" ]; then
       FORWARD_ARGS+=(--host-claude "$HOST_CLAUDE_PATH")
+    fi
+    if [ -n "$OBFUSCATION_MODE" ]; then
+      FORWARD_ARGS+=(--obfuscation "$OBFUSCATION_MODE")
     fi
     if "$0" "${FORWARD_ARGS[@]}"; then
       echo "  ✓ Instance ${IID} upgraded."
