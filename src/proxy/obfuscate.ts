@@ -1,9 +1,11 @@
 /**
  * System-message obfuscation strategies.
  *
- * Two modes are available, selected by the MERIDIAN_OBFUSCATION env var:
+ * Three modes are available, selected by the MERIDIAN_OBFUSCATION env var:
  *   - "camelcase" (default): capitalize + strip inter-word spaces, isolate single-letter words
  *   - "homoglyph": replace Latin chars with Cyrillic/Greek lookalikes
+ *   - "urlencode": encode ASCII chars using application/x-www-form-urlencoded (space → "+")
+ *   - "cr": insert \r before every ASCII/fullwidth symbol and space
  */
 
 /**
@@ -117,6 +119,54 @@ function camelCaseSegment(content: string): string {
 }
 
 /**
+ * URL-encode obfuscation using the application/x-www-form-urlencoded convention.
+ *
+ * Per spec, the following ASCII characters are left as-is:
+ *   - Letters (a-z, A-Z), digits (0-9), and `*`, `-`, `.`, `_`
+ * Space → "+", all other ASCII → %XX hex.
+ * Non-ASCII characters pass through unchanged.
+ */
+export function urlEncode(content: string): string {
+  let result = ''
+  for (let i = 0; i < content.length; i++) {
+    const code = content.charCodeAt(i)
+    const ch = content.charAt(i)
+    if (code > 0x7f) {
+      result += ch
+    } else if (code === 0x20) {
+      result += '+'
+    } else if (
+      (code >= 0x30 && code <= 0x39) || // 0-9
+      (code >= 0x41 && code <= 0x5a) || // A-Z
+      (code >= 0x61 && code <= 0x7a) || // a-z
+      ch === '*' || ch === '-' || ch === '.' || ch === '_'
+    ) {
+      result += ch
+    } else {
+      result += '%' + code.toString(16).toUpperCase().padStart(2, '0')
+    }
+  }
+  return result
+}
+
+/**
+ * CR-insertion obfuscation: insert \r before every ASCII symbol (including
+ * space) and their fullwidth counterparts.
+ *
+ * Targeted character ranges:
+ *   - ASCII symbols + space: \x20-\x2f  \x3a-\x40  \x5b-\x60  \x7b-\x7e
+ *   - Fullwidth space: \u3000
+ *   - Fullwidth symbols (excluding letters/digits):
+ *       \uff01-\uff0f  \uff1a-\uff20  \uff3b-\uff40  \uff5b-\uff5e
+ */
+export function crEncode(content: string): string {
+  return content.replace(
+    /[\x20-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e\u3000\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff5e]/g,
+    '\r$&',
+  )
+}
+
+/**
  * Obfuscate a system message using the mode selected by MERIDIAN_OBFUSCATION.
  * Defaults to "camelcase" if unset.
  */
@@ -125,6 +175,10 @@ export function obfuscateSystemMessage(content: string): string {
   switch (mode) {
     case 'homoglyph':
       return homoglyphEncode(content)
+    case 'urlencode':
+      return urlEncode(content)
+    case 'cr':
+      return crEncode(content)
     case 'camelcase':
     default:
       return camelCaseEncode(content)
