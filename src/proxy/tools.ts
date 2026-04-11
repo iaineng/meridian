@@ -14,7 +14,7 @@ export const BLOCKED_BUILTIN_TOOLS = [
   "Read", "Write", "Edit", "MultiEdit",
   "Bash", "Glob", "Grep", "NotebookEdit",
   "WebFetch", "WebSearch", "TodoWrite",
-  "RemoteTrigger"
+  "RemoteTrigger", "Monitor"
 ]
 
 /**
