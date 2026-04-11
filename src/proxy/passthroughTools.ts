@@ -13,7 +13,7 @@
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod"
 
-export const PASSTHROUGH_MCP_NAME = "p-tools"
+export const PASSTHROUGH_MCP_NAME = "tools"
 export const PASSTHROUGH_MCP_PREFIX = `mcp__${PASSTHROUGH_MCP_NAME}__`
 
 /**
