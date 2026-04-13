@@ -215,17 +215,26 @@ describe("Droid adapter: CWD extraction from system-reminder", () => {
     clearSessionCache()
   })
 
-  it("uses CWD from system-reminder for workdir in SDK options", async () => {
+  it("defaults to sandbox dir when no MERIDIAN_WORKDIR set", async () => {
     const app = createTestApp()
     await (await post(app, DROID_BODY, { "User-Agent": DROID_UA })).json()
-    // The proxy passes cwd to the SDK options
-    expect(capturedQueryParams.options.cwd).toBe("/Users/dev/my-project")
+    // Without MERIDIAN_WORKDIR, falls back to sandbox dir (not adapter CWD)
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    expect(capturedQueryParams.options.cwd).toBe(join(tmpdir(), "meridian-sandbox"))
   })
 
-  it("OpenCode uses CWD from env block in system prompt", async () => {
-    const app = createTestApp()
-    await (await post(app, OPENCODE_BODY)).json()
-    expect(capturedQueryParams.options.cwd).toBe("/Users/dev/opencode-project")
+  it("uses MERIDIAN_WORKDIR when set", async () => {
+    const prev = process.env.MERIDIAN_WORKDIR
+    process.env.MERIDIAN_WORKDIR = "/Users/dev/my-project"
+    try {
+      const app = createTestApp()
+      await (await post(app, DROID_BODY, { "User-Agent": DROID_UA })).json()
+      expect(capturedQueryParams.options.cwd).toBe("/Users/dev/my-project")
+    } finally {
+      if (prev === undefined) delete process.env.MERIDIAN_WORKDIR
+      else process.env.MERIDIAN_WORKDIR = prev
+    }
   })
 })
 

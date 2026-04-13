@@ -90,7 +90,7 @@ describe("Working directory", () => {
     }
   })
 
-  it("should default to process.cwd() when CLAUDE_PROXY_WORKDIR is not set", async () => {
+  it("should default to sandbox dir when CLAUDE_PROXY_WORKDIR is not set", async () => {
     const original = process.env.CLAUDE_PROXY_WORKDIR
     delete process.env.CLAUDE_PROXY_WORKDIR
 
@@ -103,7 +103,11 @@ describe("Working directory", () => {
         messages: [{ role: "user", content: "hello" }],
       })).json()
 
-      expect(capturedQueryParams.options.cwd).toBe(process.cwd())
+      // Falls back to a temp sandbox dir (not process.cwd()) to avoid
+      // picking up CLAUDE.md from the deployment directory.
+      const { tmpdir } = await import("node:os")
+      const { join } = await import("node:path")
+      expect(capturedQueryParams.options.cwd).toBe(join(tmpdir(), "meridian-sandbox"))
     } finally {
       if (original) process.env.CLAUDE_PROXY_WORKDIR = original
     }

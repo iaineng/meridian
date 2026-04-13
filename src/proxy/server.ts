@@ -11,6 +11,9 @@ export type { ProxyConfig, ProxyInstance, ProxyServer }
 import { claudeLog } from "../logger"
 import { exec as execCallback } from "child_process"
 import { promisify } from "util"
+import { tmpdir } from "node:os"
+import { mkdirSync } from "node:fs"
+import { join } from "node:path"
 
 import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
@@ -58,9 +61,29 @@ export type { LineageResult }
 
 const exec = promisify(execCallback)
 
+// Empty sandbox directory for SDK subprocess — avoids picking up
+// CLAUDE.md or other project files from the deployment directory.
+const SANDBOX_DIR = join(tmpdir(), "meridian-sandbox")
+mkdirSync(SANDBOX_DIR, { recursive: true })
+
 let claudeExecutable = ""
 
-
+/**
+ * Normalize a thinking config object so both snake_case (Anthropic API)
+ * and camelCase (Agent SDK) field names are accepted.
+ * e.g. { type: "enabled", budget_tokens: 21333 } → { type: "enabled", budgetTokens: 21333 }
+ */
+function normalizeThinking(raw: any): QueryContext['thinking'] | undefined {
+  if (!raw || typeof raw !== "object" || !raw.type) return undefined
+  if (raw.type === "enabled") {
+    const budget = raw.budgetTokens ?? raw.budget_tokens
+    return { type: "enabled", ...(budget !== undefined ? { budgetTokens: budget } : {}) }
+  }
+  if (raw.type === "adaptive" || raw.type === "disabled") {
+    return { type: raw.type }
+  }
+  return undefined
+}
 
 /**
  * Extract the text content of a message, serializing tool_use/tool_result
@@ -326,7 +349,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // Allow adapter to override streaming preference (e.g. LiteLLM requires non-streaming)
         const adapterStreamPref = adapter.prefersStreaming?.(body)
         const stream = adapterStreamPref !== undefined ? adapterStreamPref : (body.stream ?? false)
-        const workingDirectory = (process.env.MERIDIAN_WORKDIR ?? process.env.CLAUDE_PROXY_WORKDIR) || adapter.extractWorkingDirectory(body) || process.cwd()
+        // Default to empty sandbox dir to avoid picking up CLAUDE.md from
+        // the deployment directory (e.g. /app in Docker).
+        const workingDirectory = (process.env.MERIDIAN_WORKDIR ?? process.env.CLAUDE_PROXY_WORKDIR) || SANDBOX_DIR
 
         // Strip env vars that would cause the SDK subprocess to loop back through
         // the proxy instead of using its native Claude Max auth. Also strip vars
@@ -385,10 +410,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // Default to disabled — the SDK internally enables thinking when no
         // config is provided, which fails when max_tokens is below the 1024
         // budget_tokens minimum required by the API.
-        let thinking: QueryContext['thinking'] = body.thinking || { type: "disabled" }
+        let thinking: QueryContext['thinking'] = normalizeThinking(body.thinking) || { type: "disabled" }
         if (thinkingHeader !== undefined) {
           try {
-            thinking = JSON.parse(thinkingHeader) as QueryContext["thinking"]
+            thinking = normalizeThinking(JSON.parse(thinkingHeader)) || thinking
           } catch (e) {
             console.error(`[PROXY] ${requestMeta.requestId} ignoring malformed x-opencode-thinking header: ${e instanceof Error ? e.message : String(e)}`)
           }
