@@ -174,6 +174,23 @@ describe("verifyLineage", () => {
     expect(result.type).toBe("continuation")
   })
 
+  it("returns diverged for legacy session when message count shrinks", () => {
+    // Legacy session with no lineage hash but messageCount > 0.
+    // If incoming has fewer messages, it's an undo or new conversation
+    // we can't verify — safer to start fresh.
+    const session = makeSession({ lineageHash: "", messageCount: 20 })
+    const result = verifyLineage(session, [msg("user", "hi")], "key", mockCache)
+    expect(result.type).toBe("diverged")
+  })
+
+  it("returns continuation for legacy session when message count grows", () => {
+    // Legacy session without lineage data — if messages grew, allow resume.
+    const session = makeSession({ lineageHash: "", messageCount: 2 })
+    const incoming = [msg("user", "a"), msg("assistant", "b"), msg("user", "c")]
+    const result = verifyLineage(session, incoming, "key", mockCache)
+    expect(result.type).toBe("continuation")
+  })
+
   it("returns continuation when prefix matches exactly", () => {
     const msgs = [msg("user", "hello"), msg("assistant", "hi")]
     const session = makeSession({
@@ -212,6 +229,45 @@ describe("verifyLineage", () => {
     expect(result.type).toBe("undo")
     if (result.type === "undo") {
       expect(result.prefixOverlap).toBe(2)
+      expect(result.rollbackUuid).toBe("uuid-1")
+    }
+  })
+
+  it("returns diverged when undo detected but no rollback UUID available", () => {
+    // When only user messages are in the prefix overlap, there's no assistant
+    // UUID to roll back to. forkSession:true without resumeSessionAt would
+    // resume from the end (model sees everything), so degrade to diverged.
+    const msgs = [msg("user", "a"), msg("assistant", "b"), msg("user", "c"), msg("assistant", "d")]
+    const hashes = computeMessageHashes(msgs)
+    const session = makeSession({
+      lineageHash: computeLineageHash(msgs),
+      messageCount: msgs.length,
+      messageHashes: hashes,
+      // Only user messages have UUIDs — but user messages are null
+      sdkMessageUuids: [null, "uuid-1", null, "uuid-2"],
+    })
+    // Undo back to just the first user message — only index 0 in overlap, which is null
+    const undone = [msg("user", "a")]
+    const result = verifyLineage(session, undone, "key", mockCache)
+    expect(result.type).toBe("diverged")
+  })
+
+  it("returns undo when rollback UUID exists in prefix overlap", () => {
+    // Contrast with the above: when the prefix overlap includes an assistant
+    // message with a UUID, undo should work normally.
+    const msgs = [msg("user", "a"), msg("assistant", "b"), msg("user", "c"), msg("assistant", "d")]
+    const hashes = computeMessageHashes(msgs)
+    const session = makeSession({
+      lineageHash: computeLineageHash(msgs),
+      messageCount: msgs.length,
+      messageHashes: hashes,
+      sdkMessageUuids: [null, "uuid-1", null, "uuid-2"],
+    })
+    // Undo: keep first 2 messages (user+assistant), new user message
+    const undone = [msg("user", "a"), msg("assistant", "b"), msg("user", "new")]
+    const result = verifyLineage(session, undone, "key", mockCache)
+    expect(result.type).toBe("undo")
+    if (result.type === "undo") {
       expect(result.rollbackUuid).toBe("uuid-1")
     }
   })

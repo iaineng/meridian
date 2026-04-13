@@ -214,9 +214,10 @@ describe("Fingerprint resume: cross-project safety via lineage", () => {
       { role: "user", content: "list the project B files" },
     ], "sdk-project-b")
 
-    // Prefix overlap ("hello") → undo/branch detected → forks from project A
-    expect(getCaptured()?.options?.resume).toBe("sdk-project-a")
-    expect(getCaptured()?.options?.forkSession).toBe(true)
+    // Prefix overlap ("hello") but no rollback UUID (only user msg in overlap)
+    // → degraded to diverged → fresh session (no cross-project contamination)
+    expect(getCaptured()?.options?.resume).toBeUndefined()
+    expect(getCaptured()?.options?.forkSession).toBeUndefined()
   })
 
   it("resumes correctly after cross-project rejection creates new session", async () => {

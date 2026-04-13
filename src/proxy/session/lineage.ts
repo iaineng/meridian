@@ -205,8 +205,17 @@ export function verifyLineage(
   cacheKey: string,
   cache: SessionCacheLike
 ): LineageResult {
-  // No stored lineage (legacy entry or first request) — allow resume
+  // No stored lineage (legacy entry or first request) — allow resume,
+  // unless the conversation shrank (fewer messages than cached), which
+  // indicates an undo or new conversation we can't verify without hashes.
   if (!cached.lineageHash || cached.messageCount === 0) {
+    if (cached.messageCount > 0 && messages.length < cached.messageCount) {
+      const msg = `Legacy session without lineage data has fewer messages (${messages.length} < ${cached.messageCount}). Treating as diverged.`
+      console.error(`[PROXY] ${msg}`)
+      diagnosticLog.lineage(msg)
+      cache.delete(cacheKey)
+      return { type: "diverged" }
+    }
     return { type: "continuation", session: cached }
   }
 
@@ -275,7 +284,17 @@ export function verifyLineage(
         }
       }
     }
-    const undoMsg = `Undo detected (key=${cacheKey.slice(0, 8)}…): prefix overlap ${prefixOverlap}/${cached.messageHashes.length}, rollback UUID: ${rollbackUuid || "none (legacy session)"}.`
+    // Without a rollback UUID, forkSession:true resumes from the end of the
+    // conversation — the model sees the full history, defeating the undo.
+    // Degrade to diverged so the proxy starts a fresh session instead.
+    if (!rollbackUuid) {
+      const degradeMsg = `Undo without rollback UUID (key=${cacheKey.slice(0, 8)}…): prefix overlap ${prefixOverlap}/${cached.messageHashes.length}. Degrading to diverged.`
+      console.error(`[PROXY] ${degradeMsg}`)
+      diagnosticLog.lineage(degradeMsg)
+      cache.delete(cacheKey)
+      return { type: "diverged" }
+    }
+    const undoMsg = `Undo detected (key=${cacheKey.slice(0, 8)}…): prefix overlap ${prefixOverlap}/${cached.messageHashes.length}, rollback UUID: ${rollbackUuid}.`
     console.error(`[PROXY] ${undoMsg}`)
     diagnosticLog.lineage(undoMsg)
     return { type: "undo", session: cached, prefixOverlap, rollbackUuid }
