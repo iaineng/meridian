@@ -94,7 +94,7 @@ async function fetchPassthrough(stream: boolean, extra: Record<string, unknown> 
 }
 
 // SDK prefix for passthrough MCP tools — must match PASSTHROUGH_MCP_PREFIX from passthroughTools.ts
-const PREFIX = "mcp__p-tools__"
+const PREFIX = "mcp__tools__"
 
 // Helper: a complete tool_use block (streamed)
 function streamedToolUse(index: number, toolId: string) {
