@@ -9,7 +9,6 @@ import {
   translateOpenAiToAnthropic,
   translateAnthropicToOpenAi,
   translateAnthropicSseEvent,
-  buildModelList,
 } from "../proxy/openai"
 
 // ---------------------------------------------------------------------------
@@ -363,43 +362,3 @@ describe("translateAnthropicSseEvent", () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// buildModelList
-// ---------------------------------------------------------------------------
-
-describe("buildModelList", () => {
-  it("returns 3 models", () => {
-    expect(buildModelList(true).length).toBe(3)
-    expect(buildModelList(false).length).toBe(3)
-  })
-
-  it("Max subscription gets 1M context for sonnet and opus", () => {
-    const models = buildModelList(true)
-    const sonnet = models.find(m => m.id === "claude-sonnet-4-6")!
-    const opus = models.find(m => m.id === "claude-opus-4-6")!
-    expect(sonnet.context_window).toBe(1_000_000)
-    expect(opus.context_window).toBe(1_000_000)
-  })
-
-  it("non-Max gets 200k context for sonnet and opus", () => {
-    const models = buildModelList(false)
-    const sonnet = models.find(m => m.id === "claude-sonnet-4-6")!
-    const opus = models.find(m => m.id === "claude-opus-4-6")!
-    expect(sonnet.context_window).toBe(200_000)
-    expect(opus.context_window).toBe(200_000)
-  })
-
-  it("haiku is always 200k regardless of subscription", () => {
-    expect(buildModelList(true).find(m => m.id === "claude-haiku-4-5-20251001")!.context_window).toBe(200_000)
-    expect(buildModelList(false).find(m => m.id === "claude-haiku-4-5-20251001")!.context_window).toBe(200_000)
-  })
-
-  it("all models have correct object type", () => {
-    buildModelList(true).forEach(m => expect(m.object).toBe("model"))
-  })
-
-  it("uses provided timestamp", () => {
-    const ts = 9999999
-    buildModelList(true, ts).forEach(m => expect(m.created).toBe(ts))
-  })
-})

@@ -10,7 +10,6 @@ import { promisify } from "util"
 
 const exec = promisify(execCallback)
 
-export type ClaudeModel = "sonnet" | "sonnet[1m]" | "opus" | "opus[1m]" | "haiku"
 export interface ClaudeAuthStatus {
   loggedIn?: boolean
   subscriptionType?: string
@@ -23,54 +22,25 @@ const AUTH_STATUS_CACHE_TTL_MS = 60_000
 const AUTH_STATUS_FAILURE_TTL_MS = 5_000
 
 let cachedAuthStatus: ClaudeAuthStatus | null = null
-/** Last successfully retrieved auth status — survives transient failures
- *  so model selection doesn't degrade from sonnet[1m] to sonnet. */
+/** Last successfully retrieved auth status — survives transient failures */
 let lastKnownGoodAuthStatus: ClaudeAuthStatus | null = null
 let cachedAuthStatusAt = 0
 let cachedAuthStatusIsFailure = false
 let cachedAuthStatusPromise: Promise<ClaudeAuthStatus | null> | null = null
 
 /**
- * Only Claude 4.6 models support the 1M extended context window.
- * Older models (4.5 and earlier) do not.
+ * Pass through the client model and append [1m] when:
+ * - The model contains "opus-4-6" (always gets 1m context), or
+ * - The anthropic-beta header contains a context-1m beta.
+ * Skips [1m] during the cooldown window after a confirmed Extra Usage failure.
  */
-function supports1mContext(model: string): boolean {
-  // Explicit older versions (4-5, 4.5, etc.) do not support 1M
-  if (model.includes("4-5") || model.includes("4.5")) return false
-  // Everything else (bare names, 4-6, unknown) defaults to latest (1M capable)
-  return true
-}
-
-export function mapModelToClaudeModel(model: string, subscriptionType?: string | null, agentMode?: string | null): ClaudeModel {
-  if (model.includes("haiku")) return "haiku"
-
-  const use1m = supports1mContext(model)
-  // Subagents handle focused subtasks and don't benefit from 1M context.
-  // Using the base model preserves rate limit budget for the primary agent.
-  const isSubagent = agentMode === "subagent"
-
-  // Opus [1m]: included with Max, Team, and Enterprise subscriptions per
-  // Anthropic docs (https://code.claude.com/docs/en/model-config#extended-context).
-  // Safe to default to [1m] for Max users — no Extra Usage charges.
-  // NOTE: There is a known upstream bug (anthropics/claude-code#39841) where
-  // Claude Code currently gates opus[1m] behind Extra Usage even on Max.
-  // We follow the documented behavior; the bug is Anthropic's to fix.
-  if (model.includes("opus")) {
-    if (use1m && !isSubagent && !isExtendedContextKnownUnavailable()) return "opus[1m]"
-    return "opus"
+export function resolveModel(model: string, rawBetaHeader?: string): string {
+  if (model.includes("opus-4-6")) return model + "[1m]"
+  if (isExtendedContextKnownUnavailable()) return model
+  if (rawBetaHeader && rawBetaHeader.includes("context-1m")) {
+    return model + "[1m]"
   }
-
-  // Sonnet [1m]: requires Extra Usage on Max plans per Anthropic docs.
-  // Unlike Opus, Sonnet 1M is NOT included with the Max subscription —
-  // it is always billed as Extra Usage. Default to sonnet (200k) to
-  // avoid unexpected charges. Users opt in via MERIDIAN_SONNET_MODEL=sonnet[1m].
-  const sonnetOverride = process.env.MERIDIAN_SONNET_MODEL ?? process.env.CLAUDE_PROXY_SONNET_MODEL
-  if (sonnetOverride === "sonnet[1m]") {
-    if (!use1m || isSubagent || isExtendedContextKnownUnavailable()) return "sonnet"
-    return "sonnet[1m]"
-  }
-
-  return "sonnet"
+  return model
 }
 
 // ---------------------------------------------------------------------------
@@ -84,10 +54,10 @@ let extraUsageUnavailableAt = 0
 
 /**
  * Record that Extra Usage is not enabled on this subscription.
- * For the next hour, mapModelToClaudeModel will return the base model
- * directly — no failed [1m] attempt per request. After the cooldown
- * the next request probes [1m] once; if Extra Usage was enabled in the
- * meantime it succeeds and the flag is never set again.
+ * For the next hour, resolveModel will skip [1m] — no failed attempt
+ * per request. After the cooldown the next request probes [1m] once;
+ * if Extra Usage was enabled in the meantime it succeeds and the flag
+ * is never set again.
  */
 export function recordExtendedContextUnavailable(): void {
   extraUsageUnavailableAt = Date.now()
@@ -112,16 +82,14 @@ export function resetExtendedContextUnavailable(): void {
  * Strip the [1m] suffix from a model, returning the base variant.
  * Used for fallback when the 1M context window is rate-limited.
  */
-export function stripExtendedContext(model: ClaudeModel): ClaudeModel {
-  if (model === "opus[1m]") return "opus"
-  if (model === "sonnet[1m]") return "sonnet"
-  return model
+export function stripExtendedContext(model: string): string {
+  return model.endsWith("[1m]") ? model.slice(0, -4) : model
 }
 
 /**
  * Check whether a model is using extended (1M) context.
  */
-export function hasExtendedContext(model: ClaudeModel): boolean {
+export function hasExtendedContext(model: string): boolean {
   return model.endsWith("[1m]")
 }
 

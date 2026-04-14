@@ -27,16 +27,18 @@ let mockBehavior: "extra_usage_then_succeed" | "always_extra_usage" | "succeed" 
 
 const EXTRA_USAGE_ERROR = "Claude Code returned an error result: API Error: Extra usage is required for 1M context · enable extra usage at claude.ai/settings/usage, or use --model to switch"
 
-// Force sonnet[1m] regardless of auth status so tests are self-contained.
+// Force [1m] by simulating context-1m beta header detection.
 mock.module("../proxy/models", () => ({
-  mapModelToClaudeModel: () => "sonnet[1m]",
+  resolveModel: (model: string, rawBetaHeader?: string) => {
+    if (rawBetaHeader && rawBetaHeader.includes("context-1m")) return model + "[1m]"
+    return model
+  },
   resolveClaudeExecutableAsync: async () => "claude",
   getClaudeAuthStatusAsync: async () => ({ loggedIn: true, subscriptionType: "max" }),
   hasExtendedContext: (model: string) => model.endsWith("[1m]"),
   stripExtendedContext: (model: string) => model.replace("[1m]", ""),
   isClosedControllerError: () => false,
   recordExtendedContextUnavailable: () => {},
-  isExtendedContextKnownUnavailable: () => false,
   getAuthCacheInfo: () => ({ lastCheckedAt: 0, lastSuccessAt: 0, isFailure: false }),
 }))
 
@@ -142,6 +144,9 @@ describe("Extra usage required fallback", () => {
     mockBehavior = "succeed"
   })
 
+  // All tests that need [1m] must include the context-1m beta header
+  const BETA_1M = { "anthropic-beta": "context-1m-2025-08-07" }
+
   describe("Non-streaming", () => {
     it("falls back from [1m] to base model on extra usage error", async () => {
       mockBehavior = "extra_usage_then_succeed"
@@ -151,7 +156,7 @@ describe("Extra usage required fallback", () => {
         model: "sonnet",
         stream: false,
         messages: [{ role: "user", content: "hello" }],
-      })
+      }, BETA_1M)
 
       // Should succeed after fallback (no backoff delay)
       expect(response.status).toBe(200)
@@ -169,8 +174,7 @@ describe("Extra usage required fallback", () => {
         messages: [{ role: "user", content: "hello" }],
       })
 
-      // After stripping [1m] (if applicable) and retrying, the error
-      // should eventually propagate since the base model also fails
+      // No context-1m beta → model stays "sonnet" → error propagates
       expect(response.status).toBe(500)
     })
   })
@@ -184,7 +188,7 @@ describe("Extra usage required fallback", () => {
         model: "sonnet",
         stream: true,
         messages: [{ role: "user", content: "hello" }],
-      })
+      }, BETA_1M)
 
       expect(response.status).toBe(200)
       const text = await response.text()
@@ -220,7 +224,7 @@ describe("Extra usage required fallback", () => {
         model: "sonnet",
         stream: false,
         messages: [{ role: "user", content: "hello" }],
-      })
+      }, BETA_1M)
       const elapsed = Date.now() - start
 
       // Should complete nearly instantly (no 1s+ backoff delay)
@@ -242,7 +246,7 @@ describe("Extra usage required fallback", () => {
         model: "sonnet",
         stream: false,
         messages: [{ role: "user", content: "hello" }],
-      })
+      }, BETA_1M)
 
       // Should succeed after stripping [1m] and retrying with sonnet
       expect(response.status).toBe(200)

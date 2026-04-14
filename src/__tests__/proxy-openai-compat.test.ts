@@ -1,8 +1,8 @@
 /**
  * Integration tests for OpenAI-compatible endpoints.
  *
- * Tests /v1/chat/completions (streaming + non-streaming) and /v1/models
- * through the full HTTP layer with a mocked SDK.
+ * Tests /v1/chat/completions (streaming + non-streaming) through the full
+ * HTTP layer with a mocked SDK.
  *
  * These tests verify:
  *   1. Correct OpenAI response shapes (no regressions in the translation)
@@ -319,56 +319,6 @@ describe("POST /v1/chat/completions — streaming", () => {
     const uniqueIds = new Set(ids)
     expect(uniqueIds.size).toBe(1)
     expect([...uniqueIds][0]).toMatch(/^chatcmpl-/)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// GET /v1/models
-// ---------------------------------------------------------------------------
-
-describe("GET /v1/models", () => {
-  it("returns model list in OpenAI format", async () => {
-    const app = createTestApp()
-    const res = await app.fetch(new Request("http://localhost/v1/models"))
-
-    expect(res.status).toBe(200)
-    const body = await res.json() as Record<string, unknown>
-    expect(body.object).toBe("list")
-    const data = body.data as Array<Record<string, unknown>>
-    expect(data).toBeArray()
-    expect(data.length).toBeGreaterThan(0)
-  })
-
-  it("includes claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5-20251001", async () => {
-    const app = createTestApp()
-    const res = await app.fetch(new Request("http://localhost/v1/models"))
-    const body = await res.json() as Record<string, unknown>
-    const ids = (body.data as Array<Record<string, unknown>>).map(m => m.id)
-    expect(ids).toContain("claude-sonnet-4-6")
-    expect(ids).toContain("claude-opus-4-6")
-    expect(ids).toContain("claude-haiku-4-5-20251001")
-  })
-
-  it("each model has required fields", async () => {
-    const app = createTestApp()
-    const res = await app.fetch(new Request("http://localhost/v1/models"))
-    const body = await res.json() as Record<string, unknown>
-    for (const model of body.data as Array<Record<string, unknown>>) {
-      expect(model.object).toBe("model")
-      expect(typeof model.id).toBe("string")
-      expect(typeof model.context_window).toBe("number")
-      expect(typeof model.created).toBe("number")
-    }
-  })
-
-  it("context_window is a positive number for all models", async () => {
-    // Subscription-dependent value tested in openai.test.ts unit tests
-    const app = createTestApp()
-    const res = await app.fetch(new Request("http://localhost/v1/models"))
-    const body = await res.json() as Record<string, unknown>
-    for (const model of body.data as Array<Record<string, unknown>>) {
-      expect(model.context_window as number).toBeGreaterThan(0)
-    }
   })
 })
 

@@ -24,13 +24,13 @@ import type { RequestMetric } from "../telemetry"
 import { classifyError, isStaleSessionError, isRateLimitError, isMaxTurnsError, isMaxOutputTokensError, isExtraUsageRequiredError, isExpiredTokenError } from './errors'
 import { refreshOAuthToken } from "./tokenRefresh"
 import { checkPluginConfigured } from "./setup"
-import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
-import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, translateAnthropicSseEvent, buildModelList } from "./openai"
+import { resolveModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, getAuthCacheInfo, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
+import { translateOpenAiToAnthropic, translateAnthropicToOpenAi, translateAnthropicSseEvent } from "./openai"
 import { getLastUserMessage, hasMultimodalContent, serializeToolResultContentToText, nextMultimodalLabel, type MultimodalCounter } from "./messages"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { resolveProfile, listProfiles, setActiveProfile, getActiveProfileId, getEffectiveProfiles, restoreActiveProfile } from "./profiles"
-import { filterBetasForProfile, getBetaPolicyFromEnv } from "./betas"
+import { filterBetasForProfile } from "./betas"
 import { obfuscateSystemMessage } from "./obfuscate"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
 import {
@@ -279,7 +279,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         status: "ok",
         service: "meridian",
         format: "anthropic",
-        endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/v1/models", "/telemetry", "/health"]
+        endpoints: ["/v1/messages", "/messages", "/v1/chat/completions", "/telemetry", "/health"]
       })
     }
     return c.html(landingHtml)
@@ -338,12 +338,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           c.req.header("x-meridian-profile") || undefined
         )
 
-        const authStatus = await getClaudeAuthStatusAsync(
-          profile.id !== "default" ? profile.id : undefined,
-          Object.keys(profile.env).length > 0 ? profile.env : undefined
-        )
+        const rawBetaHeader = c.req.header("anthropic-beta")
+        let model = resolveModel(body.model || "sonnet", rawBetaHeader)
         const agentMode = c.req.header("x-opencode-agent-mode") ?? null
-        let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType, agentMode)
         const outputFormat = body.output_config?.format
         if (outputFormat?.schema?.$schema) delete outputFormat.schema.$schema
         // Allow adapter to override streaming preference (e.g. LiteLLM requires non-streaming)
@@ -385,20 +382,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const effortHeader = c.req.header("x-opencode-effort")
         const thinkingHeader = c.req.header("x-opencode-thinking")
         const taskBudgetHeader = c.req.header("x-opencode-task-budget")
-        // NOTE: anthropic-beta header filtering is delegated to `filterBetasForProfile`.
-        // Default policy (`allow-safe`) strips only betas known to trigger Extra-Usage
-        // billing (see BILLABLE_BETA_PREFIXES_ON_MAX in betas.ts). Free betas like
-        // prompt-caching, context-1m, fine-grained-tool-streaming, and
-        // interleaved-thinking pass through so the SDK's caching and 1M context
-        // continue to work — blanket stripping caused ~3x TTFB and ~3x token
-        // consumption on long conversations.
-        //
-        // Operators can override the policy at runtime via the MERIDIAN_BETA_POLICY
-        // env var: `strip-all` restores the pre-fix behaviour (kill switch),
-        // `allow-all` forwards everything unconditionally.
-        // See: https://github.com/rynfar/meridian/issues/278
-        const rawBetaHeader = c.req.header("anthropic-beta")
-        const betaFilter = filterBetasForProfile(rawBetaHeader, profile.type, getBetaPolicyFromEnv())
+        const betaFilter = filterBetasForProfile(rawBetaHeader, profile.type)
         if (betaFilter.stripped.length > 0) {
           console.error(`[PROXY] ${requestMeta.requestId} stripped anthropic-beta(s) for Max profile: ${betaFilter.stripped.join(", ")}`)
         }
@@ -807,11 +791,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     return
                   }
 
-                  // Extra Usage required: strip [1m] and record 1-hour cooldown.
-                  // mapModelToClaudeModel will skip [1m] for the next hour so
-                  // subsequent requests don't each make one extra failed attempt.
-                  // After the hour expires a single probe fires; if the user has
-                  // enabled Extra Usage in the meantime it succeeds and the flag clears.
+                  // Extra Usage required: strip [1m], record 1-hour cooldown, and retry.
                   if (isExtraUsageRequiredError(errMsg) && hasExtendedContext(model)) {
                     const from = model
                     model = stripExtendedContext(model)
@@ -1288,7 +1268,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       return
                     }
 
-                    // Extra Usage required: strip [1m] and record 1-hour cooldown.
+                    // Extra Usage required: strip [1m], record 1-hour cooldown, and retry.
                     if (isExtraUsageRequiredError(errMsg) && hasExtendedContext(model)) {
                       const from = model
                       model = stripExtendedContext(model)
@@ -2072,15 +2052,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         "Connection": "keep-alive",
       },
     })
-  })
-
-  // --- Model Discovery ---
-  // Returns available Claude models in OpenAI-compatible format.
-  // Context window reflects the subscription tier (Max = 1M, others = 200k).
-  app.get("/v1/models", async (c) => {
-    const authStatus = await getClaudeAuthStatusAsync()
-    const isMax = authStatus?.subscriptionType === "max"
-    return c.json({ object: "list", data: buildModelList(isMax) })
   })
 
   // Returns the last observed token usage for a session, looked up by the Claude

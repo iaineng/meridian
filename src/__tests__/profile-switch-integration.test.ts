@@ -31,7 +31,7 @@ mock.module("../logger", () => ({
 
 // Mock models to avoid real auth checks
 mock.module("../proxy/models", () => ({
-  mapModelToClaudeModel: () => "sonnet",
+  resolveModel: (model: string) => model,
   resolveClaudeExecutableAsync: async () => "claude",
   getClaudeAuthStatusAsync: async () => ({ loggedIn: true, email: "test@test.com", subscriptionType: "max" }),
   getAuthCacheInfo: () => ({ lastCheckedAt: 0, lastSuccessAt: 0, isFailure: false }),
@@ -39,7 +39,6 @@ mock.module("../proxy/models", () => ({
   stripExtendedContext: (m: string) => m,
   isClosedControllerError: (e: unknown) => e instanceof Error && e.message.includes("controller is closed"),
   recordExtendedContextUnavailable: () => {},
-  isExtendedContextKnownUnavailable: () => false,
 }))
 
 const { createProxyServer } = await import("../proxy/server")

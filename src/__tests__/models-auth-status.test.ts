@@ -8,7 +8,6 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test"
 import {
-  mapModelToClaudeModel,
   resetCachedClaudeAuthStatus,
   getClaudeAuthStatusAsync,
   expireAuthStatusCache,
@@ -124,39 +123,3 @@ describe("getClaudeAuthStatusAsync", () => {
   })
 })
 
-describe("Auth status resilience - model selection", () => {
-  beforeEach(() => {
-    resetCachedClaudeAuthStatus()
-  })
-
-  afterEach(() => {
-    resetCachedClaudeAuthStatus()
-  })
-
-  it("model stays sonnet (200k) when auth degrades — sonnet[1m] is opt-in", async () => {
-    // Sonnet defaults to 200k regardless of subscription (1M requires Extra Usage).
-    // Auth resilience preserves subscriptionType for opus[1m] selection, but
-    // sonnet is always 200k unless MERIDIAN_SONNET_MODEL=sonnet[1m] is set.
-    const authResult = await getClaudeAuthStatusAsync()
-
-    if (authResult?.subscriptionType !== "max") {
-      return
-    }
-
-    const model1 = mapModelToClaudeModel("sonnet", authResult.subscriptionType)
-    expect(model1).toBe("sonnet")
-
-    // Auth degrades — sonnet should still be 200k
-    const originalPath = process.env.PATH
-    expireAuthStatusCache()
-    process.env.PATH = ""
-    try {
-      const degradedAuth = await getClaudeAuthStatusAsync()
-      expect(degradedAuth).not.toBeNull()
-      const model2 = mapModelToClaudeModel("sonnet", degradedAuth?.subscriptionType)
-      expect(model2).toBe("sonnet")
-    } finally {
-      process.env.PATH = originalPath
-    }
-  })
-})

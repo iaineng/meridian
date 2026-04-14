@@ -102,15 +102,6 @@ export interface OpenAiCompletion {
   }
 }
 
-export interface OpenAiModel {
-  id: string
-  object: "model"
-  created: number
-  owned_by: string
-  display_name: string
-  context_window: number
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -300,40 +291,3 @@ export function translateAnthropicSseEvent(
   return null
 }
 
-// ---------------------------------------------------------------------------
-// Model list
-// ---------------------------------------------------------------------------
-
-/**
- * Return the static list of available Claude models in OpenAI format.
- * Context windows reflect subscription capabilities.
- */
-export function buildModelList(isMaxSubscription: boolean, now = Math.floor(Date.now() / 1000)): OpenAiModel[] {
-  const extendedContext = isMaxSubscription ? 1_000_000 : 200_000
-  return [
-    {
-      id: "claude-sonnet-4-6",
-      object: "model",
-      created: now,
-      owned_by: "anthropic",
-      display_name: "Claude Sonnet 4.6",
-      context_window: extendedContext,
-    },
-    {
-      id: "claude-opus-4-6",
-      object: "model",
-      created: now,
-      owned_by: "anthropic",
-      display_name: "Claude Opus 4.6",
-      context_window: extendedContext,
-    },
-    {
-      id: "claude-haiku-4-5-20251001",
-      object: "model",
-      created: now,
-      owned_by: "anthropic",
-      display_name: "Claude Haiku 4.5",
-      context_window: 200_000,
-    },
-  ]
-}
