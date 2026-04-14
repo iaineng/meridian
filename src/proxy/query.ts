@@ -139,6 +139,10 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
         // "--dangerously-skip-permissions cannot be used with root/sudo"
         // See: https://github.com/rynfar/meridian/issues/256
         ...(process.getuid?.() === 0 ? { IS_SANDBOX: "1" } : {}),
+        // NOTE: Agent-specific — prevent the CLI from overriding non-adaptive
+        // thinking to adaptive. Without this, the CLI ignores the caller's
+        // { type: "enabled", budgetTokens } and forces adaptive on supported models.
+        ...(thinking?.type === "enabled" ? { CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1" } : {}),
       },
       ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
