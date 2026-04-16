@@ -12,7 +12,7 @@
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
 
-import { obfuscateSystemMessage } from "../proxy/obfuscate"
+import { obfuscateSystemMessage, crEncode } from "../proxy/obfuscate"
 
 import {
   messageStart,
@@ -210,6 +210,6 @@ describe("Phase 2: Message format preservation", () => {
 
     // The prompt sent to SDK should include the tool result context
     expect(capturedQueryParams).toBeDefined()
-    expect(capturedQueryParams.prompt).toContain("file contents here")
+    expect(capturedQueryParams.prompt).toContain(crEncode("file contents here"))
   })
 })

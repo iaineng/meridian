@@ -31,7 +31,7 @@ import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
 import { resolveProfile, listProfiles, setActiveProfile, getActiveProfileId, getEffectiveProfiles, restoreActiveProfile } from "./profiles"
 import { filterBetasForProfile } from "./betas"
-import { obfuscateSystemMessage } from "./obfuscate"
+import { obfuscateSystemMessage, crEncode } from "./obfuscate"
 import { createFileChangeHook, extractFileChangesFromMessages, formatFileChangeSummary, type FileChange } from "./fileChanges"
 import {
   computeLineageHash,
@@ -90,14 +90,15 @@ function normalizeThinking(raw: any): QueryContext['thinking'] | undefined {
  * blocks as XML tags. Returns raw content without a role prefix.
  */
 function extractMessageContent(m: any, toolNameById: Map<string, string>, counter?: MultimodalCounter, toolPrefix?: string): string {
-  if (typeof m.content === "string") return m.content
+  const encodeText = m.role === "user" ? crEncode : (s: string) => s
+  if (typeof m.content === "string") return encodeText(m.content)
   if (Array.isArray(m.content)) {
     const parts: string[] = []
     let i = 0
     while (i < m.content.length) {
       const block = m.content[i]
       if (block.type === "text" && block.text) {
-        parts.push(block.text)
+        parts.push(encodeText(block.text))
         i++
       } else if (block.type === "tool_use") {
         const invokes: string[] = []
@@ -106,7 +107,8 @@ function extractMessageContent(m: any, toolNameById: Map<string, string>, counte
           const params = Object.entries(b.input ?? {}).map(([k, v]: [string, any]) =>
             `<parameter name="${k}">${typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? String(v) : JSON.stringify(v)}</parameter>`
           ).join("\n")
-          invokes.push(`<invoke name="${b.name}">\n${params}\n</invoke>`)
+          const name = toolNameById.get(b.id) ?? b.name
+          invokes.push(`<invoke name="${name}">\n${params}\n</invoke>`)
           i++
         }
         parts.push(`<function_calls>\n${invokes.join("\n")}\n</function_calls>`)
@@ -115,7 +117,7 @@ function extractMessageContent(m: any, toolNameById: Map<string, string>, counte
         while (i < m.content.length && m.content[i].type === "tool_result") {
           const b = m.content[i]
           const body = counter ? serializeToolResultContentToText(b.content, counter, toolPrefix) : (typeof b.content === "string" ? b.content : JSON.stringify(b.content))
-          results.push(b.is_error ? `<error>${body}</error>` : `<output>${body}</output>`)
+          results.push(b.is_error ? `<error>${encodeText(body)}</error>` : `<output>${encodeText(body)}</output>`)
           i++
         }
         parts.push(`<function_results>\n${results.join("\n")}\n</function_results>`)
@@ -134,7 +136,7 @@ function extractMessageContent(m: any, toolNameById: Map<string, string>, counte
     }
     return parts.filter(Boolean).join("\n")
   }
-  return String(m.content)
+  return encodeText(String(m.content))
 }
 
 /** Convert a message to an XML-tagged turn for conversation history. */

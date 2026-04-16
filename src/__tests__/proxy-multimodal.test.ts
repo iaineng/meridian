@@ -8,7 +8,7 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test"
 import { assistantMessage } from "./helpers"
 
-import { obfuscateSystemMessage } from "../proxy/obfuscate"
+import { obfuscateSystemMessage, crEncode } from "../proxy/obfuscate"
 
 let capturedQueryParams: any = null
 
@@ -157,9 +157,9 @@ describe("Multimodal content", () => {
     const content = messages[0].message.content
     // Text block contains all roles via <turn> tags + <conversation_history>
     expect(content[0].type).toBe("text")
-    expect(content[0].text).toContain("look at this")
+    expect(content[0].text).toContain(crEncode("look at this"))
     expect(content[0].text).toContain("I see it")
-    expect(content[0].text).toContain("what color is it?")
+    expect(content[0].text).toContain(crEncode("what color is it?"))
     expect(content[0].text).toContain("<conversation_history>")
     expect(content[0].text).toContain('<turn role="assistant">')
   })
@@ -326,7 +326,7 @@ describe("Multimodal content", () => {
     expect(content).toHaveLength(2)
     expect(content[0].type).toBe("text")
     expect(content[0].text).toContain("<function_results>")
-    expect(content[0].text).toContain("[Image 1]")
+    expect(content[0].text).toContain(crEncode("[Image 1]"))
     expect(content[1].type).toBe("image")
   })
 })

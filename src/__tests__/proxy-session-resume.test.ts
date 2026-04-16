@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
+import { crEncode } from "../proxy/obfuscate"
 import {
   assistantMessage,
   messageStart,
@@ -313,7 +314,7 @@ describe("Session resume: only send last user message on resume", () => {
     }, { "x-opencode-session": "oc-resume-test" })).json()
 
     // The prompt should only contain the last user message, not the full history
-    expect(capturedQueryParams.prompt).toContain("Second message - this is the new one")
+    expect(capturedQueryParams.prompt).toContain(crEncode("Second message - this is the new one"))
     expect(capturedQueryParams.prompt).not.toContain("First message")
   })
 
@@ -351,7 +352,7 @@ describe("Session resume: only send last user message on resume", () => {
 
     await readStreamFull(r2)
     expect(capturedQueryParams.options.resume).toBe(MOCK_SDK_SESSION)
-    expect(capturedQueryParams.prompt).toContain("Continue please")
+    expect(capturedQueryParams.prompt).toContain(crEncode("Continue please"))
     expect(capturedQueryParams.prompt).not.toContain("Start conversation")
   })
 
@@ -370,8 +371,8 @@ describe("Session resume: only send last user message on resume", () => {
     }, { "x-opencode-session": "oc-new-session" })).json()
 
     // No resume — should include full history
-    expect(capturedQueryParams.prompt).toContain("First message")
-    expect(capturedQueryParams.prompt).toContain("Second message")
+    expect(capturedQueryParams.prompt).toContain(crEncode("First message"))
+    expect(capturedQueryParams.prompt).toContain(crEncode("Second message"))
     expect(capturedQueryParams.options.resume).toBeUndefined()
   })
 })

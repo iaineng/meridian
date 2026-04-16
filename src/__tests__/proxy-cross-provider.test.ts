@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
+import { crEncode } from "../proxy/obfuscate"
 import { assistantMessage } from "./helpers"
 
 // --- Capture SDK calls ---
@@ -115,7 +116,7 @@ describe("Cross-provider: position-based assistant message handling", () => {
     expect(typeof prompt).toBe("string")
     // Leading assistant (SDK response) should be skipped
     expect(prompt).not.toContain("SDK response")
-    expect(prompt).toContain("Follow up")
+    expect(prompt).toContain(crEncode("Follow up"))
   })
 
   it("should preserve non-leading assistant messages (external provider)", async () => {
@@ -156,8 +157,8 @@ describe("Cross-provider: position-based assistant message handling", () => {
     expect(prompt).toContain("GPT says hi")
     expect(prompt).toContain("<conversation_history>")
     expect(prompt).toContain('<turn role="user">')
-    expect(prompt).toContain("Switched to GPT")
-    expect(prompt).toContain("Back to Claude")
+    expect(prompt).toContain(crEncode("Switched to GPT"))
+    expect(prompt).toContain(crEncode("Back to Claude"))
   })
 
   it("should preserve multiple external assistant messages", async () => {
@@ -196,9 +197,9 @@ describe("Cross-provider: position-based assistant message handling", () => {
     expect(prompt).not.toContain("SDK response")
     expect(prompt).toContain("GPT answer 1")
     expect(prompt).toContain("Gemini answer 2")
-    expect(prompt).toContain("Q1 for GPT")
-    expect(prompt).toContain("Q2 for Gemini")
-    expect(prompt).toContain("Back to Claude now")
+    expect(prompt).toContain(crEncode("Q1 for GPT"))
+    expect(prompt).toContain(crEncode("Q2 for Gemini"))
+    expect(prompt).toContain(crEncode("Back to Claude now"))
   })
 
   it("should handle delta starting with user message (no SDK assistant echoed)", async () => {
@@ -232,7 +233,7 @@ describe("Cross-provider: position-based assistant message handling", () => {
     expect(capturedQueryParams.options.resume).toBe(MOCK_SDK_SESSION)
     const prompt = capturedQueryParams.prompt
     expect(typeof prompt).toBe("string")
-    expect(prompt).toContain("More context")
+    expect(prompt).toContain(crEncode("More context"))
   })
 
   it("should skip leading assistant in legacy session (no stored hash)", async () => {
@@ -268,6 +269,6 @@ describe("Cross-provider: position-based assistant message handling", () => {
     expect(typeof prompt).toBe("string")
     // Leading assistant skipped even for legacy sessions
     expect(prompt).not.toContain("Some assistant response")
-    expect(prompt).toContain("Follow up")
+    expect(prompt).toContain(crEncode("Follow up"))
   })
 })

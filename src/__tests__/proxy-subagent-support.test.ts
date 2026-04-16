@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, mock, beforeEach } from "bun:test"
+import { crEncode } from "../proxy/obfuscate"
 import {
   messageStart,
   textBlockStart,
@@ -186,9 +187,9 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     const prompt = capturedQueryParams.prompt
     // Should contain the tool use context
     expect(prompt).toContain("Read")
-    expect(prompt).toContain("test.ts")
+    expect(prompt).toContain(crEncode("test.ts"))
     // Should contain the tool result
-    expect(prompt).toContain("console.log('hello')")
+    expect(prompt).toContain(crEncode("console.log('hello')"))
   })
 
   it("should handle multiple tool results in a single message", async () => {
@@ -220,8 +221,8 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     await response.json()
 
     const prompt = capturedQueryParams.prompt
-    expect(prompt).toContain("file a contents")
-    expect(prompt).toContain("file b contents")
+    expect(prompt).toContain(crEncode("file a contents"))
+    expect(prompt).toContain(crEncode("file b contents"))
   })
 
   it("should handle error tool results", async () => {
@@ -251,8 +252,8 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     await response.json()
 
     const prompt = capturedQueryParams.prompt
-    expect(prompt).toContain("Unknown agent type")
-    expect(prompt).toContain("general-purpose")
+    expect(prompt).toContain(crEncode("Unknown agent type"))
+    expect(prompt).toContain(crEncode("general-purpose"))
   })
 })
 

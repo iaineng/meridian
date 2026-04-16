@@ -21,6 +21,7 @@ import {
   assistantStreamEvents,
   parseSSE,
 } from "./helpers"
+import { crEncode } from "../proxy/obfuscate"
 
 // --- Mock SDK ---
 let mockMessages: any[] = []
@@ -152,7 +153,7 @@ describe("Integration: Full Anthropic API tool loop", () => {
 
     // Verify the prompt includes the tool result
     expect(capturedQueryParams.prompt).toContain("meridian")
-    expect(capturedQueryParams.prompt).toContain("1.1.0")
+    expect(capturedQueryParams.prompt).toContain(crEncode("1.1.0"))
   })
 
   it("Step 3: Error tool_result → Claude recovers", async () => {
@@ -181,7 +182,7 @@ describe("Integration: Full Anthropic API tool loop", () => {
     // Claude should recover with a new tool call or text
     expect(body.content.length).toBeGreaterThanOrEqual(1)
     // The prompt should contain the error so Claude can learn from it
-    expect(capturedQueryParams.prompt).toContain("Unknown agent type")
+    expect(capturedQueryParams.prompt).toContain(crEncode("Unknown agent type"))
   })
 })
 
