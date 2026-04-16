@@ -643,11 +643,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         passthroughMcp = createPassthroughMcpServer(body.tools)
       }
 
-      // In passthrough mode with tools, hint the model to use prefixed tool names
-      if (passthrough && passthroughMcp) {
-        systemContext += `\n\nIMPORTANT: Every tool name is prefixed with "${PASSTHROUGH_MCP_PREFIX}". You should call ${PASSTHROUGH_MCP_PREFIX}Read instead of Read, ${PASSTHROUGH_MCP_PREFIX}mcp__*__* instead of mcp__*__*. Always use the full prefixed name when calling tools.`
-      }
-
       // In passthrough mode: block ALL tools, capture them for forwarding (agent-agnostic).
       // In normal mode: delegate hook construction to the adapter.
       // PostToolUse hook tracks file changes from MCP tools (internal mode only).
@@ -655,6 +650,40 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       const mcpPrefix = `mcp__${adapter.getMcpServerName()}__`
       const trackFileChanges = !(process.env.MERIDIAN_NO_FILE_CHANGES ?? process.env.CLAUDE_PROXY_NO_FILE_CHANGES)
       const fileChangeHook = trackFileChanges ? createFileChangeHook(fileChanges, mcpPrefix) : undefined
+
+      // WebSearch: capture results from PostToolUse for synthetic SSE injection.
+      // SDK's internal WebSearch sub-API-call events are not yielded to the outer
+      // generator, so we intercept the final result via hook and synthesize native
+      // server_tool_use + web_search_tool_result SSE events for the client.
+      const pendingWebSearchResults: Array<{
+        query: string
+        results: Array<{ tool_use_id: string; content: Array<{ title: string; url: string }> }>
+      }> = []
+      const webSearchHook = useBuiltinWebSearch ? {
+        matcher: "WebSearch",
+        hooks: [async (input: any) => {
+          const response = input.tool_response
+          // SDK WebSearch tool returns { data: WebSearchOutput } — extract defensively
+          const output = (response?.data ?? response) as Record<string, unknown> | undefined
+          if (output && typeof output === "object") {
+            const query = (output.query as string) ?? (input.tool_input as any)?.query ?? ""
+            const results: typeof pendingWebSearchResults[number]["results"] = []
+            if (Array.isArray(output.results)) {
+              for (const r of output.results) {
+                if (typeof r === "object" && r !== null && "tool_use_id" in r && Array.isArray((r as any).content)) {
+                  results.push({ tool_use_id: (r as any).tool_use_id, content: (r as any).content })
+                }
+              }
+            }
+            pendingWebSearchResults.push({ query, results })
+          }
+          return {}
+        }],
+      } : undefined
+
+      const postToolUseHooks: any[] = []
+      if (fileChangeHook) postToolUseHooks.push(fileChangeHook)
+      if (webSearchHook) postToolUseHooks.push(webSearchHook)
 
       const sdkHooks = passthrough
         ? {
@@ -675,7 +704,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           }
         : {
             ...(adapter.buildSdkHooks?.(body, sdkAgents) ?? {}),
-            ...(fileChangeHook ? { PostToolUse: [fileChangeHook] } : {}),
+            ...(postToolUseHooks.length > 0 ? { PostToolUse: postToolUseHooks } : {}),
           }
 
         // Capture subprocess stderr for all paths — used to surface the real
@@ -934,7 +963,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
                     continue
                   } else if (useBuiltinWebSearch) {
-                    block.type = "server_tool_use"
+                    // Skip SDK's internal WebSearch tool_use — synthetic blocks
+                    // will be prepended from PostToolUse hook results
+                    if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                    continue
                   }
                 }
 
@@ -1056,6 +1088,35 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           }
 
           // When outputFormat is set, the StructuredOutput was already accumulated
+          // Prepend synthetic WebSearch blocks (server_tool_use + web_search_tool_result)
+          // captured from the PostToolUse hook into the non-stream response.
+          if (pendingWebSearchResults.length > 0) {
+            const syntheticBlocks: Array<Record<string, unknown>> = []
+            while (pendingWebSearchResults.length > 0) {
+              const ws = pendingWebSearchResults.shift()!
+              for (const result of ws.results) {
+                syntheticBlocks.push({
+                  type: "server_tool_use",
+                  id: result.tool_use_id,
+                  name: "web_search",
+                  input: { query: ws.query },
+                })
+                syntheticBlocks.push({
+                  type: "web_search_tool_result",
+                  tool_use_id: result.tool_use_id,
+                  content: result.content.map((c: { title: string; url: string }) => ({
+                    type: "web_search_result",
+                    title: c.title,
+                    url: c.url,
+                    encrypted_content: "",
+                    page_age: null,
+                  })),
+                })
+              }
+            }
+            contentBlocks.unshift(...syntheticBlocks)
+          }
+
           // as a text block during stream processing. Safety fallback: if a
           // tool_use block with name "StructuredOutput" still exists, convert it.
           if (outputFormat) {
@@ -1404,6 +1465,60 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       if (startUsage) lastUsage = { ...lastUsage, ...startUsage }
                       // Only emit the first message_start — subsequent ones are internal SDK turns.
                       if (messageStartEmitted) {
+                        // Drain pending WebSearch results — inject synthetic
+                        // server_tool_use + web_search_tool_result SSE events
+                        while (pendingWebSearchResults.length > 0) {
+                          const ws = pendingWebSearchResults.shift()!
+                          for (const result of ws.results) {
+                            // server_tool_use block
+                            const stuIdx = nextClientBlockIndex++
+                            safeEnqueue(encoder.encode(
+                              `event: content_block_start\ndata: ${JSON.stringify({
+                                type: "content_block_start",
+                                index: stuIdx,
+                                content_block: {
+                                  type: "server_tool_use",
+                                  id: result.tool_use_id,
+                                  name: "web_search",
+                                  input: { query: ws.query },
+                                },
+                              })}\n\n`
+                            ), "websearch_server_tool_use")
+                            safeEnqueue(encoder.encode(
+                              `event: content_block_stop\ndata: ${JSON.stringify({
+                                type: "content_block_stop",
+                                index: stuIdx,
+                              })}\n\n`
+                            ), "websearch_server_tool_use_stop")
+
+                            // web_search_tool_result block
+                            const wstrIdx = nextClientBlockIndex++
+                            safeEnqueue(encoder.encode(
+                              `event: content_block_start\ndata: ${JSON.stringify({
+                                type: "content_block_start",
+                                index: wstrIdx,
+                                content_block: {
+                                  type: "web_search_tool_result",
+                                  tool_use_id: result.tool_use_id,
+                                  content: result.content.map((c: { title: string; url: string }) => ({
+                                    type: "web_search_result",
+                                    title: c.title,
+                                    url: c.url,
+                                    encrypted_content: "",
+                                    page_age: null,
+                                  })),
+                                },
+                              })}\n\n`
+                            ), "websearch_tool_result")
+                            safeEnqueue(encoder.encode(
+                              `event: content_block_stop\ndata: ${JSON.stringify({
+                                type: "content_block_stop",
+                                index: wstrIdx,
+                              })}\n\n`
+                            ), "websearch_tool_result_stop")
+                            eventsForwarded += 4
+                          }
+                        }
                         continue
                       }
                       messageStartEmitted = true
@@ -1451,9 +1566,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
                           continue
                         } else if (useBuiltinWebSearch) {
-                          // SDK built-in tool executed internally — mark as server_tool_use
-                          // so the client doesn't try to execute it
-                          block.type = "server_tool_use"
+                          // Skip SDK's internal WebSearch tool_use — synthetic
+                          // server_tool_use + web_search_tool_result events will be
+                          // injected from PostToolUse hook results at the next message_start
+                          if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                          continue
                         } else if (passthrough && block.id) {
                           // Passthrough mode: SDK already stripped the mcp__oc__ prefix before
                           // emitting the stream_event (observed in practice — the SDK normalises
