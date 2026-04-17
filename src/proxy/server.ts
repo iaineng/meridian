@@ -75,12 +75,20 @@ let claudeExecutable = ""
  */
 function normalizeThinking(raw: any): QueryContext['thinking'] | undefined {
   if (!raw || typeof raw !== "object" || !raw.type) return undefined
+  const display = raw.display === "summarized" || raw.display === "omitted" ? raw.display : undefined
   if (raw.type === "enabled") {
     const budget = raw.budgetTokens ?? raw.budget_tokens
-    return { type: "enabled", ...(budget !== undefined ? { budgetTokens: budget } : {}) }
+    return {
+      type: "enabled",
+      ...(budget !== undefined ? { budgetTokens: budget } : {}),
+      ...(display ? { display } : {}),
+    }
   }
-  if (raw.type === "adaptive" || raw.type === "disabled") {
-    return { type: raw.type }
+  if (raw.type === "adaptive") {
+    return { type: "adaptive", ...(display ? { display } : {}) }
+  }
+  if (raw.type === "disabled") {
+    return { type: "disabled" }
   }
   return undefined
 }

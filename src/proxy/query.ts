@@ -44,7 +44,10 @@ export interface QueryContext {
   /** Output format configuration (e.g. json_schema for structured output) */
   outputFormat?: { type: "json_schema"; schema: Record<string, unknown> }
   /** Thinking/reasoning configuration */
-  thinking?: { type: "adaptive" } | { type: "enabled"; budgetTokens?: number } | { type: "disabled" }
+  thinking?:
+    | { type: "adaptive"; display?: "summarized" | "omitted" }
+    | { type: "enabled"; budgetTokens?: number; display?: "summarized" | "omitted" }
+    | { type: "disabled" }
   /** Whether to enable the SDK's built-in WebSearch (removes it from blocked tools) */
   useBuiltinWebSearch?: boolean
   /** Max output tokens from client request (body.max_tokens) */
@@ -57,6 +60,20 @@ export interface QueryContext {
   taskBudget?: { total: number }
   /** Beta features to enable */
   betas?: string[]
+}
+
+/**
+ * Default `display` to `"summarized"` when thinking is active but the client
+ * didn't specify one. Opus 4.7+ defaults to `"omitted"` server-side, which
+ * suppresses `thinking_delta` events — clients expecting the thinking stream
+ * see only `signature_delta`. Only applied when thinking is enabled.
+ */
+function withDefaultThinkingDisplay(
+  thinking: NonNullable<QueryContext['thinking']>
+): NonNullable<QueryContext['thinking']> {
+  if (thinking.type === "disabled") return thinking
+  if (thinking.display !== undefined) return thinking
+  return { ...thinking, display: "summarized" }
 }
 
 /**
@@ -149,7 +166,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...(isUndo ? { forkSession: true, ...(undoRollbackUuid ? { resumeSessionAt: undoRollbackUuid } : {}) } : {}),
       ...(sdkHooks ? { hooks: sdkHooks } : {}),
       ...(outputFormat ? { outputFormat } : {}),
-      ...(thinking ? { thinking } : {}),
+      ...(thinking ? { thinking: withDefaultThinkingDisplay(thinking) } : {}),
       ...(taskBudget ? { taskBudget } : {}),
       ...(betas && betas.length > 0 ? { betas: betas as SdkBeta[] } : {}),
     }

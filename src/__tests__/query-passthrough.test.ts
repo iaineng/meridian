@@ -31,7 +31,7 @@ describe("buildQueryOptions — SDK parameter passthrough", () => {
   it("passes thinking config to SDK options when provided", () => {
     const thinking = { type: "enabled" as const, budgetTokens: 4096 }
     const result = buildQueryOptions(makeContext({ thinking }))
-    expect(result.options.thinking).toEqual(thinking)
+    expect(result.options.thinking).toEqual({ ...thinking, display: "summarized" })
   })
 
   it("passes taskBudget to SDK options when provided", () => {
@@ -61,7 +61,7 @@ describe("buildQueryOptions — SDK parameter passthrough", () => {
       betas: ["context-1m-2025-08-07"],
     }))
     expect(result.options.effort).toBe("low")
-    expect(result.options.thinking).toEqual(thinking)
+    expect(result.options.thinking).toEqual({ ...thinking, display: "summarized" })
     expect(result.options.taskBudget).toEqual({ total: 5000 })
     expect(result.options.betas).toEqual(["context-1m-2025-08-07"])
   })
@@ -85,8 +85,14 @@ describe("buildQueryOptions — SDK parameter passthrough", () => {
     expect(result.options.thinking).toEqual(thinking)
   })
 
-  it("thinking adaptive config is passed through", () => {
+  it("thinking adaptive config defaults display to summarized", () => {
     const thinking = { type: "adaptive" as const }
+    const result = buildQueryOptions(makeContext({ thinking }))
+    expect(result.options.thinking).toEqual({ type: "adaptive", display: "summarized" })
+  })
+
+  it("thinking display omitted is preserved (client override)", () => {
+    const thinking = { type: "adaptive" as const, display: "omitted" as const }
     const result = buildQueryOptions(makeContext({ thinking }))
     expect(result.options.thinking).toEqual(thinking)
   })

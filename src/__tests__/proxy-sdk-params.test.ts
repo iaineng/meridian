@@ -127,7 +127,25 @@ describe("SDK param passthrough — body fields", () => {
     const thinking = { type: "enabled", budgetTokens: 2048 }
     const app = createTestApp()
     await post(app, { ...BASE_BODY, thinking })
-    expect(capturedOptions.thinking).toEqual(thinking)
+    expect(capturedOptions.thinking).toEqual({ ...thinking, display: "summarized" })
+  })
+
+  it("defaults thinking display to summarized when unset (adaptive)", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, thinking: { type: "adaptive" } })
+    expect(capturedOptions.thinking).toEqual({ type: "adaptive", display: "summarized" })
+  })
+
+  it("client can override thinking display to omitted", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, thinking: { type: "adaptive", display: "omitted" } })
+    expect(capturedOptions.thinking).toEqual({ type: "adaptive", display: "omitted" })
+  })
+
+  it("does not set display when thinking is disabled", async () => {
+    const app = createTestApp()
+    await post(app, { ...BASE_BODY, thinking: { type: "disabled" } })
+    expect(capturedOptions.thinking).toEqual({ type: "disabled" })
   })
 
   it("forwards task_budget from body as taskBudget object", async () => {
@@ -173,7 +191,7 @@ describe("SDK param passthrough — header overrides", () => {
     await post(app, { ...BASE_BODY, thinking: { type: "disabled" } }, {
       "x-opencode-thinking": JSON.stringify(thinking),
     })
-    expect(capturedOptions.thinking).toEqual(thinking)
+    expect(capturedOptions.thinking).toEqual({ ...thinking, display: "summarized" })
   })
 
   it("x-opencode-task-budget header overrides body task_budget", async () => {
@@ -244,12 +262,12 @@ describe("SDK param passthrough — header overrides", () => {
     const app = createTestApp()
     const thinking = { type: "enabled", budgetTokens: 1024 }
 
-    const res = await post(app, { ...BASE_BODY, thinking }, {
+    const res = await post(app, { ...BASE_BODY, thinking: { ...thinking } }, {
       "x-opencode-thinking": "not-valid-json{{{",
     })
 
     expect(res.status).toBe(200)
-    expect(capturedOptions.thinking).toEqual(thinking)
+    expect(capturedOptions.thinking).toEqual({ ...thinking, display: "summarized" })
     const calls = errorSpy.mock.calls.map(c => String(c[0]))
     expect(calls.some(msg => msg.includes("malformed x-opencode-thinking"))).toBe(true)
     errorSpy.mockRestore()
