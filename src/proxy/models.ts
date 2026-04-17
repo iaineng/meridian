@@ -35,7 +35,7 @@ let cachedAuthStatusPromise: Promise<ClaudeAuthStatus | null> | null = null
  * Skips [1m] during the cooldown window after a confirmed Extra Usage failure.
  */
 export function resolveModel(model: string, rawBetaHeader?: string): string {
-  if (model.includes("opus-4-6")) return model + "[1m]"
+  if (model.includes("opus-4-6") || model.includes("opus-4-7")) return model + "[1m]"
   if (isExtendedContextKnownUnavailable()) return model
   if (rawBetaHeader && rawBetaHeader.includes("context-1m")) {
     return model + "[1m]"
