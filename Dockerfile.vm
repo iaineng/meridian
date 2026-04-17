@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM debian:13
 
 # Pre-baked base image for deploy-vm.sh
 # Contains: system packages, Node.js 22, Bun, claude user
