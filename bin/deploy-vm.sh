@@ -19,6 +19,7 @@
 #   ./bin/deploy-vm.sh restart                  # restart proxy
 #   ./bin/deploy-vm.sh status                   # show status table
 #   ./bin/deploy-vm.sh shell                    # interactive shell
+#   ./bin/deploy-vm.sh migrate-tmpfs            # snapshot → recreate with --tmpfs JSONL (preserves data)
 #   ./bin/deploy-vm.sh delete                   # remove container (with confirmation)
 #   ./bin/deploy-vm.sh list                     # list all meridian-vm containers
 #
@@ -33,6 +34,14 @@
 #   --image IMAGE   Base image (default: meridian-vm-base, built from ubuntu:22.04)
 #   --proxy URL     HTTP/SOCKS5 proxy (e.g. http://host:port, socks5://host:port)
 #   --no-proxy LIST Comma-separated proxy bypass list
+#   --tmpfs-jsonl   Mount the JSONL session directory on a tmpfs (RAM disk)
+#                   inside the container. Only takes effect at `create` /
+#                   `deploy` time — existing containers must be recreated.
+#                   Pair with MERIDIAN_EPHEMERAL_JSONL=1 for zero-disk
+#                   transcript churn.
+#   --tmpfs-jsonl-size SIZE
+#                   tmpfs size for --tmpfs-jsonl (default: 128m). Accepts
+#                   any `--tmpfs` size suffix (k, m, g).
 #   --force         Skip confirmations (for delete)
 #
 # Environment variables:
@@ -53,12 +62,18 @@ VM_IMAGE_NAME="meridian-vm-base"
 FORCE=false
 NETWORK_PROXY=""
 NETWORK_NO_PROXY=""
+TMPFS_JSONL=false
+TMPFS_JSONL_SIZE="128m"
+# JSONL session transcripts live under $HOME/.claude/projects for the in-
+# container claude user. When --tmpfs-jsonl is set, this path is mounted on
+# a tmpfs so transcripts never touch the container's writable layer.
+TMPFS_JSONL_PATH="/home/claude/.claude/projects"
 
 # ─── Argument parsing ────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|deploy|create|setup|auth|install|update|start|stop|restart|status|shell|root-shell|delete|list)
+    build|deploy|create|setup|auth|install|update|start|stop|restart|status|shell|root-shell|delete|list|migrate-tmpfs)
       COMMAND="$1"; shift ;;
     --id)
       INSTANCE_ID="$2"
@@ -77,10 +92,14 @@ while [[ $# -gt 0 ]]; do
       NETWORK_PROXY="$2"; shift 2 ;;
     --no-proxy)
       NETWORK_NO_PROXY="$2"; shift 2 ;;
+    --tmpfs-jsonl)
+      TMPFS_JSONL=true; shift ;;
+    --tmpfs-jsonl-size)
+      TMPFS_JSONL_SIZE="$2"; shift 2 ;;
     --force)
       FORCE=true; shift ;;
     --help|-h)
-      head -28 "$0" | tail -27
+      head -49 "$0" | tail -48
       exit 0 ;;
     *)
       echo "Error: Unknown option '$1'"
@@ -119,6 +138,18 @@ fi
 if [ -n "$NETWORK_NO_PROXY" ]; then
   echo "  No-proxy list: $NETWORK_NO_PROXY"
 fi
+if [ "$TMPFS_JSONL" = true ]; then
+  echo "  tmpfs JSONL:   $TMPFS_JSONL_PATH (size=$TMPFS_JSONL_SIZE)"
+fi
+
+# Emit the `docker run --tmpfs ...` flag when --tmpfs-jsonl is set. Nothing
+# otherwise. mode=0700 + chowning to claude inside the container keeps the
+# mount private to the claude user.
+tmpfs_mount_args() {
+  if [ "$TMPFS_JSONL" = true ]; then
+    echo "--tmpfs ${TMPFS_JSONL_PATH}:rw,size=${TMPFS_JSONL_SIZE},mode=0700"
+  fi
+}
 
 # Build proxy export string for injection into docker exec commands
 proxy_env() {
@@ -235,6 +266,7 @@ start_quiet() {
     export MERIDIAN_NO_FILE_CHANGES=1
     export MERIDIAN_OBFUSCATION=cr
     export MERIDIAN_BETA_POLICY=strip-all
+    export MERIDIAN_EPHEMERAL_JSONL=1
     export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
     cd /app
     nohup ./bin/claude-proxy-supervisor.sh > /tmp/meridian.log 2>&1 &
@@ -283,8 +315,11 @@ cmd_deploy() {
       --name "$CONTAINER_NAME" \
       --runtime=runsc \
       -p "${HOST_PORT}:3456" \
+      $(tmpfs_mount_args) \
       "$BASE_IMAGE" \
       sleep infinity > /dev/null
+    [ "$TMPFS_JSONL" = true ] && docker exec "$CONTAINER_NAME" \
+      chown claude:claude "$TMPFS_JSONL_PATH" > /dev/null 2>&1
     echo "  Container created."
   fi
   echo ""
@@ -326,8 +361,12 @@ cmd_create() {
     --name "$CONTAINER_NAME" \
     --runtime=runsc \
     -p "${HOST_PORT}:3456" \
+    $(tmpfs_mount_args) \
     "$BASE_IMAGE" \
     sleep infinity
+
+  [ "$TMPFS_JSONL" = true ] && docker exec "$CONTAINER_NAME" \
+    chown claude:claude "$TMPFS_JSONL_PATH" > /dev/null 2>&1
 
   echo ""
   echo "  Container created."
@@ -556,6 +595,99 @@ cmd_update() {
   echo "  Update complete."
 }
 
+# Snapshot the running container into a temporary image, then recreate it
+# with --tmpfs mounted at the JSONL session directory. Preserves all data
+# from the writable layer (auth, /app build, ~/.claude config) because
+# `docker commit` captures everything except explicit volume/tmpfs mounts.
+#
+# The snapshot image is retained on success so the user has a manual rollback
+# point; remove with `docker rmi` once they're confident.
+cmd_migrate_tmpfs() {
+  require_container
+
+  # Force the flag on — this command is exclusively for introducing tmpfs.
+  # --tmpfs-jsonl-size is still honored if the user passed it.
+  TMPFS_JSONL=true
+
+  local snapshot_image="${CONTAINER_NAME}-snapshot:$(date +%Y%m%d-%H%M%S)"
+  local actual_port
+  actual_port=$(get_mapped_port "$CONTAINER_NAME")
+  [ -z "$actual_port" ] && actual_port="$HOST_PORT"
+  local actual_runtime
+  actual_runtime=$(docker inspect --format '{{.HostConfig.Runtime}}' "$CONTAINER_NAME" 2>/dev/null)
+  [ -z "$actual_runtime" ] && actual_runtime="runsc"
+
+  print_banner "Migrating $CONTAINER_NAME → tmpfs JSONL"
+  echo "  Snapshot image: $snapshot_image"
+  echo "  Mount:          $TMPFS_JSONL_PATH (size=$TMPFS_JSONL_SIZE)"
+  echo "  Port:           $actual_port -> 3456"
+  echo "  Runtime:        $actual_runtime"
+  echo ""
+
+  # Step 1: Stop proxy (graceful)
+  echo "── [1/5] Stopping proxy ─────────────────────────────"
+  stop_quiet
+  echo "  Done."
+
+  # Step 2: Commit container to snapshot image
+  echo "── [2/5] Committing snapshot ────────────────────────"
+  if ! docker commit "$CONTAINER_NAME" "$snapshot_image" > /dev/null; then
+    echo "  Error: docker commit failed. Restarting old proxy."
+    start_quiet
+    exit 1
+  fi
+  echo "  Done."
+
+  # Step 3: Remove old container (writable layer is in the snapshot image)
+  echo "── [3/5] Removing old container ─────────────────────"
+  if ! docker rm -f "$CONTAINER_NAME" > /dev/null; then
+    echo "  Error: failed to remove old container. Snapshot retained: $snapshot_image"
+    exit 1
+  fi
+  echo "  Done."
+
+  # Step 4: Recreate container from snapshot with tmpfs mount
+  echo "── [4/5] Recreating with tmpfs ──────────────────────"
+  if ! docker run -d \
+    --name "$CONTAINER_NAME" \
+    --runtime="$actual_runtime" \
+    -p "${actual_port}:3456" \
+    $(tmpfs_mount_args) \
+    "$snapshot_image" \
+    sleep infinity > /dev/null; then
+    echo "  Error: docker run failed."
+    echo "  Recovery: docker run -d --name $CONTAINER_NAME --runtime=$actual_runtime \\"
+    echo "             -p ${actual_port}:3456 $snapshot_image sleep infinity"
+    exit 1
+  fi
+  # tmpfs mount is created as root-owned; chown so the claude user can write.
+  docker exec "$CONTAINER_NAME" chown claude:claude "$TMPFS_JSONL_PATH" > /dev/null 2>&1
+  echo "  Done."
+
+  # Step 5: Start proxy and verify
+  echo "── [5/5] Starting proxy ─────────────────────────────"
+  start_quiet
+  local ready=false
+  for i in $(seq 1 30); do
+    if curl -sf "http://127.0.0.1:${actual_port}/health" > /dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ready" = true ]; then
+    echo "  Proxy healthy."
+  else
+    echo "  Warning: proxy did not become healthy within 30s."
+    echo "  Check logs: docker exec $CONTAINER_NAME cat /tmp/meridian.log"
+  fi
+
+  echo ""
+  echo "  Migration complete."
+  echo "  Snapshot kept as rollback point: $snapshot_image"
+  echo "  Remove when confident: docker rmi $snapshot_image"
+}
+
 cmd_start() {
   require_container
 
@@ -717,6 +849,7 @@ cmd_status() {
   echo "    $0 stop             Stop proxy"
   echo "    $0 restart          Restart proxy"
   echo "    $0 shell            Interactive shell"
+  echo "    $0 migrate-tmpfs    Snapshot + recreate with tmpfs JSONL (preserves data)"
   echo "    $0 delete --force   Remove container"
   echo "==========================================="
 }
@@ -800,6 +933,7 @@ case "$COMMAND" in
   root-shell) cmd_root_shell ;;
   delete)   cmd_delete ;;
   list)     cmd_list ;;
+  migrate-tmpfs) cmd_migrate_tmpfs ;;
   *)
     echo "Error: Unknown command '$COMMAND'"
     exit 1 ;;
