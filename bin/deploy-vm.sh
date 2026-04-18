@@ -534,54 +534,73 @@ cmd_update() {
   echo "  (Auth and sessions are preserved)"
   echo ""
 
-  # Stop proxy if running
   local proxy_was_running=false
-  if proxy_running; then
-    echo "  Stopping proxy for update..."
-    stop_quiet
-    proxy_was_running=true
-  fi
+  proxy_running && proxy_was_running=true
 
-  # Step 1: Sync project files
-  echo "  [1/3] Syncing project files..."
+  # Steps 1–3 run while the proxy keeps serving. Node holds loaded modules
+  # in memory, so tar-overwriting /app and mutating node_modules does not
+  # affect the running process. `--unlink-first` gives us rename semantics
+  # so any file an active shell (e.g. the supervisor) reads from keeps its
+  # old inode.
+
+  # Step 1: Sync project files (live)
+  echo "  [1/4] Syncing project files..."
   tar -C "$PROJECT_DIR" \
     --exclude='.git' \
     --exclude='node_modules' \
     --exclude='dist' \
+    --exclude='dist.new' \
+    --exclude='dist.old' \
     --exclude='.env*' \
     -czf - . \
     | docker exec -i "$CONTAINER_NAME" bash -c \
-        'mkdir -p /app && tar -xzf - -C /app && chown -R claude:claude /app'
+        'mkdir -p /app && tar --unlink-first -xzf - -C /app && chown -R claude:claude /app'
   echo "  Done."
 
-  # Step 2: Reinstall deps
-  echo "  [2/3] Installing dependencies..."
+  # Step 2: Reinstall deps (live)
+  echo "  [2/4] Installing dependencies..."
   exec_as_claude "cd /app && bun install 2>&1 | tail -5"
   echo "  Done."
 
-  # Step 3: Rebuild
-  echo "  [3/3] Rebuilding..."
+  # Step 3: Build to dist.new (live — running proxy still reads from dist/).
+  # If the proxy happens to crash during this window, the supervisor
+  # restarts it from the unchanged dist/ and stays healthy.
+  #
+  # Prep dist.new as root to wipe any stale copy (gVisor sometimes leaves
+  # root-owned leftovers that survive `chown -R /app`).
+  echo "  [3/4] Building to dist.new..."
+  exec_as_root "rm -rf /app/dist.new && mkdir -p /app/dist.new && chown claude:claude /app/dist.new"
   exec_as_claude "
     cd /app
-    rm -rf dist
     bun build bin/cli.ts src/proxy/server.ts \
-      --outdir dist --target node --splitting \
+      --outdir dist.new --target node --splitting \
       --external @anthropic-ai/claude-agent-sdk \
       --external @node-rs/xxhash \
       --entry-naming '[name].js' 2>&1 | tail -5
   "
   echo "  Done."
 
-  # Fix supervisor script line endings
+  # Fix supervisor script line endings (safe — sed -i uses rename)
   exec_as_root "
     sed -i 's/\r$//' /app/bin/claude-proxy-supervisor.sh 2>/dev/null || true
     chmod +x /app/bin/claude-proxy-supervisor.sh
   "
 
-  # Restart proxy if it was running
+  # Step 4: Short downtime window — stop, swap dist, start.
+  # Done as root so we are immune to any lingering ownership skew.
+  echo "  [4/4] Swapping dist and restarting..."
   if [ "$proxy_was_running" = true ]; then
-    echo ""
-    echo "  Restarting proxy..."
+    stop_quiet
+  fi
+  exec_as_root "
+    cd /app
+    rm -rf dist.old
+    [ -d dist ] && mv dist dist.old
+    mv dist.new dist
+    chown -R claude:claude dist
+    rm -rf dist.old
+  "
+  if [ "$proxy_was_running" = true ]; then
     start_quiet
     sleep 2
     if health_check; then
