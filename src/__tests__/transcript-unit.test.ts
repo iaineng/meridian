@@ -602,10 +602,10 @@ describe("prepareFreshSession", () => {
   it("writes a JSONL with user + synthetic-assistant for a lone user message", async () => {
     const r = await prepareFreshSession([{ role: "user", content: "hi" }], "/p")
     expect(r.wroteTranscript).toBe(true)
-    // Lone-user case: prompt becomes the "Continue." sentinel so the lone
+    // Lone-user case: prompt becomes the "continue" sentinel so the lone
     // user row lives in the JSONL (where it gets the cache breakpoint) and
     // the SDK resumes on top of a well-formed user→assistant chain.
-    expect(r.lastUserPrompt).toBe("Continue.")
+    expect(r.lastUserPrompt).toBe("continue")
     expect(r.sessionId).toMatch(UUID_RE)
     expect(r.messageUuids).toHaveLength(1)
     expect(r.messageUuids[0]).toMatch(UUID_RE)
@@ -624,7 +624,7 @@ describe("prepareFreshSession", () => {
     expect(r.lastUserPrompt).toEqual([{ type: "text", text: "latest" }])
   })
 
-  it("uses \"Continue.\" when history ends with assistant", async () => {
+  it("uses \"continue\" when history ends with assistant", async () => {
     const r = await prepareFreshSession(
       [
         { role: "user", content: "q" },
@@ -633,12 +633,12 @@ describe("prepareFreshSession", () => {
       "/p"
     )
     expect(r.wroteTranscript).toBe(true)
-    expect(r.lastUserPrompt).toBe("Continue.")
+    expect(r.lastUserPrompt).toBe("continue")
     // All N messages written: messageUuids has no trailing null
     expect(r.messageUuids.every(u => u !== null)).toBe(true)
   })
 
-  it("augments the Continue. prompt with a StructuredOutput instruction when outputFormat is set", async () => {
+  it("replaces the continue prompt with a StructuredOutput directive when outputFormat is set", async () => {
     // Lone-user path → synthetic continuation → prompt should direct the
     // model to terminate via the StructuredOutput tool call.
     const loneUser = await prepareFreshSession(
@@ -646,7 +646,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { outputFormat: true }
     )
-    expect(loneUser.lastUserPrompt).toBe("Continue. End by calling the StructuredOutput tool.")
+    expect(loneUser.lastUserPrompt).toBe("Call the StructuredOutput tool")
 
     // Trailing tool_use path → same synthetic continuation path.
     const trailingToolUse = await prepareFreshSession(
@@ -658,7 +658,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { outputFormat: true }
     )
-    expect(trailingToolUse.lastUserPrompt).toBe("Continue. End by calling the StructuredOutput tool.")
+    expect(trailingToolUse.lastUserPrompt).toBe("Call the StructuredOutput tool")
 
     // Normal last-user path → outputFormat flag has NO effect (prompt is the
     // real user content, not a synthetic sentinel).

@@ -210,7 +210,7 @@ describe("Phase 2: Message format preservation", () => {
 
     // Balanced slicing: the tool_result is written into the JSONL transcript
     // (along with a synthetic assistant closer so the transcript ends on an
-    // assistant turn) and the SDK prompt becomes "Continue.". This prevents
+    // assistant turn) and the SDK prompt becomes "continue". This prevents
     // the SDK's z77() deferred-tool detection from forking the conversation
     // and keeps the tool_result's bytes stable across subsequent requests.
     expect(capturedQueryParams).toBeDefined()
@@ -229,7 +229,7 @@ describe("Phase 2: Message format preservation", () => {
           }
           return out.join("")
         })()
-    expect(promptText).toBe("Continue.")
+    expect(promptText).toBe("continue")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

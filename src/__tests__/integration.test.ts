@@ -211,10 +211,10 @@ describe("Integration: Full Anthropic API tool loop", () => {
     expect(body.content.length).toBeGreaterThanOrEqual(1)
     // Balanced slicing puts the tool_result (error payload) into the JSONL
     // transcript to keep the tool_use/tool_result pair intact. The prompt is
-    // a "Continue." sentinel that triggers generation on the balanced history.
+    // a "continue" sentinel that triggers generation on the balanced history.
     expect(typeof capturedQueryParams.options.resume).toBe("string")
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Continue.")
+    expect(promptText).toBe("continue")
   })
 })
 

@@ -525,13 +525,12 @@ export async function prepareFreshSession(
   // new user turn — only system/tools prefix stays stable.
   //
   // When outputFormat is enabled AND we are on the synthetic path, the
-  // model would otherwise be free to reply with plain text after "Continue."
-  // — but the caller is waiting for a StructuredOutput tool call. Augment
-  // the prompt with an explicit instruction so the model terminates via
-  // StructuredOutput.
+  // caller is waiting for a StructuredOutput tool call — so replace the
+  // plain "continue" sentinel with an explicit directive that forces the
+  // model to terminate via StructuredOutput rather than plain text.
   const continuePrompt = opts?.outputFormat
-    ? "Continue. End by calling the StructuredOutput tool."
-    : "Continue."
+    ? "Call the StructuredOutput tool"
+    : "continue"
   const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
     ? crEncodeUserContent(stripCacheControl(lastMsg!.content))
     : continuePrompt

@@ -254,7 +254,7 @@ describe("JSONL-backed fresh session", () => {
     ])
     // Tool-result payload is crEncoded (matches user content encoding).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Continue.")
+    expect(promptText).toBe("continue")
   })
 
   it("wraps a trailing assistant history with Continue. as prompt", async () => {
@@ -271,11 +271,11 @@ describe("JSONL-backed fresh session", () => {
 
     const uuid = resumedUuid()
     expect(uuid).toBeDefined()
-    // Last message is assistant → prompt is "Continue." wrapped as a structured
+    // Last message is assistant → prompt is "continue" wrapped as a structured
     // SDK user message (AsyncIterable). Drain to text and assert.
     expect(typeof capturedQueryParams.prompt).not.toBe("string")
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toContain("Continue")
+    expect(promptText).toContain("continue")
 
     const lines = await readJsonlLines(uuid!)
     // permission-mode + user + assistant (all N written since trailing is assistant)
