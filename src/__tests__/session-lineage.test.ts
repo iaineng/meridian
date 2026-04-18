@@ -308,7 +308,12 @@ describe("Session lineage: undo detection", () => {
       { role: "user", content: "great" },
     ], "sdk-new")
 
-    expect(getCaptured()?.options?.resume).toBeUndefined()
+    // Diverged: must NOT resume the cached sdk-1. With JSONL-backed fresh
+    // sessions, resume is a new UUID pointing at a freshly written transcript.
+    const resumed = getCaptured()?.options?.resume
+    expect(resumed).not.toBe("sdk-1")
+    expect(getCaptured()?.options?.forkSession).toBeUndefined()
+    expect(getCaptured()?.options?.resumeSessionAt).toBeUndefined()
   })
 
   it("undo forks then subsequent turns resume the fork", async () => {
@@ -489,7 +494,12 @@ describe("Session lineage: compaction survival", () => {
       { role: "user", content: "now do something new" },
     ], "sdk-new")
 
-    expect(getCaptured()?.options?.resume).toBeUndefined()
+    // Aggressive compaction → diverged → must NOT resume the old sdk-agg.
+    // JSONL-backed fresh session produces a new UUID instead of undefined.
+    const resumed = getCaptured()?.options?.resume
+    expect(resumed).not.toBe("sdk-agg")
+    expect(getCaptured()?.options?.forkSession).toBeUndefined()
+    expect(getCaptured()?.options?.resumeSessionAt).toBeUndefined()
   })
 })
 

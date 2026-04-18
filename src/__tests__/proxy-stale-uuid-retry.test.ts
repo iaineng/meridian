@@ -137,8 +137,11 @@ describe("Stale UUID retry", () => {
     expect(queryCalls[0]!.resumeSessionAt).toBe("uuid-assistant-1")
     expect(queryCalls[0]!.forkSession).toBe(true)
 
-    // Second call should be a fresh session (retry after stale UUID)
-    expect(queryCalls[1]!.resume).toBeUndefined()
+    // Second call should be a fresh session (retry after stale UUID). With the
+    // JSONL-backed fresh session path it uses `resume` with a freshly generated
+    // session UUID (transcript written to disk). No forkSession / resumeSessionAt.
+    expect(typeof queryCalls[1]!.resume).toBe("string")
+    expect(queryCalls[1]!.resume.length).toBeGreaterThan(0)
     expect(queryCalls[1]!.forkSession).toBeUndefined()
     expect(queryCalls[1]!.resumeSessionAt).toBeUndefined()
   })
@@ -178,9 +181,11 @@ describe("Stale UUID retry", () => {
     expect(text).toContain("event: message_start")
     expect(text).not.toContain("No message found with message.uuid")
 
-    // Verify retry happened: first call with resumeSessionAt, second without
+    // Verify retry happened: first call with resumeSessionAt, second without.
+    // Streaming stale-retry also uses the JSONL-backed fresh resume path.
     expect(queryCalls[0]!.resumeSessionAt).toBe("uuid-assistant-1")
     expect(queryCalls[1]!.resumeSessionAt).toBeUndefined()
+    expect(typeof queryCalls[1]!.resume).toBe("string")
   })
 
   it("evicts stale session from cache after retry", async () => {

@@ -35,6 +35,9 @@ export interface RequestMetric {
   /** Whether passthrough mode was active */
   isPassthrough: boolean
 
+  /** Whether this request used the ephemeral one-shot JSONL path (bypasses session cache). */
+  isEphemeral: boolean
+
   /** Session lineage classification: how the incoming messages related to the stored session.
    *  - continuation: normal follow-up (prefix matched)
    *  - compaction:   older messages rewritten, recent preserved (suffix matched)
@@ -109,4 +112,6 @@ export interface TelemetrySummary {
   byModel: Record<string, { count: number; avgTotalMs: number }>
   /** Breakdown by mode */
   byMode: Record<string, { count: number; avgTotalMs: number }>
+  /** Number of requests that used the ephemeral one-shot JSONL path. */
+  ephemeralCount: number
 }

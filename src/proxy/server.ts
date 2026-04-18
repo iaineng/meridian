@@ -5,7 +5,7 @@ import type { Server } from "node:http"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
 import { DEFAULT_PROXY_CONFIG } from "./types"
-import { envBool } from "../env"
+import { envBool, env as readEnv } from "../env"
 import type { ProxyConfig, ProxyInstance, ProxyServer } from "./types"
 export type { ProxyConfig, ProxyInstance, ProxyServer }
 import { claudeLog } from "../logger"
@@ -43,6 +43,8 @@ import {
 // Re-export for backwards compatibility (existing tests import from here)
 
 import { lookupSession, storeSession, clearSessionCache, getMaxSessionsLimit, evictSession, getSessionByClaudeId } from "./session/cache"
+import { prepareFreshSession, deleteSessionTranscript, backupSessionTranscript } from "./session/transcript"
+import { ephemeralSessionIdPool } from "./session/ephemeralPool"
 import { lookupSessionRecovery, listStoredSessions } from "./sessionStore"
 // Re-export for backwards compatibility (existing tests import from here)
 export { computeLineageHash, hashMessage, computeMessageHashes }
@@ -330,6 +332,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     return withClaudeLogContext({ requestId: requestMeta.requestId, endpoint: requestMeta.endpoint }, async () => {
       // Hoist adapter detection before try so it's available in the catch block for telemetry
       const adapter = detectAdapter(c)
+      // Ephemeral mode cleanup handle — reassigned from inside try once we know
+      // the pool id + working directory + backup flag. Hoisted out here so the
+      // outer finally can call it (try-scoped lets aren't visible in finally).
+      let cleanupEphemeral: () => Promise<void> = async () => {}
+      let ephemeralDeferredToStream = false
       try {
         const body = await c.req.json()
 
@@ -431,7 +438,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           ? `${profile.id}:${agentSessionId}` : agentSessionId
         const profileScopedCwd = profile.id !== "default"
           ? `${workingDirectory}::profile=${profile.id}` : workingDirectory
-        const lineageResult = lookupSession(profileSessionId, body.messages || [], profileScopedCwd)
+
+        // Ephemeral one-shot JSONL mode: bypass the entire session cache/lineage
+        // system. Every request writes a fresh JSONL (with a pooled UUID),
+        // resumes from it, then deletes the file when done.
+        const isEphemeral = envBool("EPHEMERAL_JSONL")
+        const ephemeralBackup = envBool("EPHEMERAL_JSONL_BACKUP")
+        let ephemeralId: string | undefined
+        let ephemeralCleanupDone = false
+
+        const lineageResult: LineageResult = isEphemeral
+          ? { type: "diverged" } as LineageResult
+          : lookupSession(profileSessionId, body.messages || [], profileScopedCwd)
         const isResume = lineageResult.type === "continuation" || lineageResult.type === "compaction"
         const isUndo = lineageResult.type === "undo"
         const cachedSession = lineageResult.type !== "diverged" ? lineageResult.session : undefined
@@ -454,7 +472,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
         // Recovery logging: when a session diverges, check if the store has a
         // previous session ID that the user can recover via `claude --resume`.
-        if (lineageResult.type === "diverged" && profileSessionId) {
+        if (!isEphemeral && lineageResult.type === "diverged" && profileSessionId) {
           const recovery = lookupSessionRecovery(profileSessionId)
           if (recovery) {
             const prevId = recovery.previousClaudeSessionId || recovery.claudeSessionId
@@ -491,6 +509,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // When resuming, only send new messages the SDK doesn't have.
       const allMessages = body.messages || []
       let messagesToConvert: typeof allMessages
+      // For diverged (fresh) sessions, we optionally prewarm an SDK session
+      // file: write history as structured JSONL, then resume from a fresh UUID.
+      // This replaces the old XML-tag flattening so tool_use/tool_result and
+      // multimodal blocks survive structurally instead of being stringified.
+      let freshSessionId: string | undefined
+      let freshMessageUuids: Array<string | null> | undefined
 
       if ((isResume || isUndo) && cachedSession) {
         if (isUndo && undoRollbackUuid) {
@@ -511,6 +535,100 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         }
       } else {
         messagesToConvert = allMessages
+      }
+
+      // JSONL-backed fresh session: applies to all diverged multi-message
+      // requests, including passthrough. Writes history to
+      // ~/.claude/projects/<cwd>/<uuid>.jsonl and lets the SDK resume from that
+      // UUID with only the final user message as the prompt. The SDK's resume
+      // mechanism is independent of tool-execution mode, so passthrough
+      // benefits from structured history (tool_use/tool_result chains preserved)
+      // the same way internal mode does. Feature flag (default on) allows
+      // rollback to the old flat-text path.
+      //
+      // Passthrough is needed here to decide whether to prefix tool_use.name
+      // in the JSONL — declared early so this branch can read it.
+      const adapterPassthroughEarly = adapter.usesPassthrough?.()
+      const passthroughForJsonl = adapterPassthroughEarly !== undefined
+        ? adapterPassthroughEarly
+        : Boolean((process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH))
+
+      const jsonlFlag = readEnv("USE_JSONL_SESSIONS")
+      const jsonlEnabled = jsonlFlag !== "0" && jsonlFlag !== "false" && jsonlFlag !== "no"
+      // Ephemeral mode writes a JSONL for every request — even a single user
+      // message. buildJsonlLines emits [user, synthetic-assistant] for the
+      // lone-user case so resume has a valid chain and the user row receives
+      // the cache breakpoint, letting the first call establish prompt cache.
+      // The non-ephemeral diverged path still requires >=2 messages because
+      // single-message starts go through the legacy fresh-session route
+      // (which then gets stored in the session cache for continuation).
+      const useJsonlFresh = (isEphemeral && allMessages.length >= 1)
+        || (lineageResult.type === "diverged" && jsonlEnabled && allMessages.length > 1)
+
+      if (isEphemeral) {
+        // Pool-allocated session id: reuse a previously-released UUID if the
+        // pool has one, otherwise mint a fresh one. The JSONL file at this
+        // id is fully overwritten by prepareFreshSession before the SDK
+        // subprocess is invoked, so reuse across serial requests is safe.
+        ephemeralId = ephemeralSessionIdPool.acquire()
+        claudeLog("session.ephemeral.acquired", {
+          sessionId: ephemeralId,
+          poolStats: ephemeralSessionIdPool.stats(),
+        })
+      }
+
+      if (useJsonlFresh) {
+        try {
+          const prep = await prepareFreshSession(allMessages, workingDirectory, {
+            model,
+            toolPrefix: passthroughForJsonl ? PASSTHROUGH_MCP_PREFIX : undefined,
+            sessionId: ephemeralId,
+            outputFormat: !!outputFormat,
+          })
+          freshSessionId = prep.sessionId
+          freshMessageUuids = prep.messageUuids
+          messagesToConvert = [{
+            role: "user",
+            content: prep.lastUserPrompt,
+          }]
+          claudeLog("session.jsonl_fresh", {
+            sessionId: prep.sessionId,
+            messageCount: allMessages.length,
+            wroteTranscript: prep.wroteTranscript,
+            ephemeral: isEphemeral,
+          })
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e)
+          console.error(`[PROXY] ${requestMeta.requestId} jsonl_fresh_failed, fallback to flat text: ${errMsg}`)
+          claudeLog("session.jsonl_fresh_failed", { error: errMsg, ephemeral: isEphemeral })
+          freshSessionId = undefined
+          freshMessageUuids = undefined
+          // Keep messagesToConvert = allMessages (already set above)
+          // Pool ID stays acquired — cleanup finally will release it (no file to delete).
+        }
+      }
+
+      // Install the ephemeral cleanup closure on the outer-scoped variable so
+      // the outer finally can call it. Idempotent via ephemeralCleanupDone.
+      // Runs after the SDK subprocess has closed. The SDK reads the JSONL at
+      // resume time and does not re-read the file afterwards, so deleting
+      // post-response is safe.
+      cleanupEphemeral = async () => {
+        if (ephemeralCleanupDone || !ephemeralId) return
+        ephemeralCleanupDone = true
+        const cleanupId = ephemeralId
+        try {
+          if (ephemeralBackup) await backupSessionTranscript(workingDirectory, cleanupId)
+          else await deleteSessionTranscript(workingDirectory, cleanupId)
+        } catch (e) {
+          claudeLog("session.ephemeral.cleanup_failed", {
+            sessionId: cleanupId,
+            error: e instanceof Error ? e.message : String(e),
+          })
+        }
+        ephemeralSessionIdPool.release(cleanupId)
+        claudeLog("session.ephemeral.released", { sessionId: cleanupId, poolStats: ephemeralSessionIdPool.stats() })
+        ephemeralId = undefined
       }
 
 
@@ -575,7 +693,24 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // Counter for multimodal index labels — shared across all code paths
       const mmCounter: MultimodalCounter = { image: 0, document: 0, file: 0 }
 
-      if (hasMultimodal) {
+      if (useJsonlFresh && messagesToConvert.length === 1 && messagesToConvert[0]?.role === "user") {
+        // jsonl-fresh path: the conversation history is already in the JSONL
+        // (structured tool_use/tool_result blocks intact via buildJsonlLines).
+        // Pass the last user content as a structured SDK user message so the
+        // CLI appends it verbatim — flattening to <function_results> XML here
+        // would defeat the point of writing a structured transcript.
+        const lastContent = messagesToConvert[0]!.content
+        const content = typeof lastContent === "string"
+          ? [{ type: "text", text: lastContent }]
+          : (Array.isArray(lastContent)
+              ? lastContent
+              : [{ type: "text", text: String(lastContent ?? "") }])
+        structuredMessages = [{
+          type: "user" as const,
+          message: { role: "user" as const, content },
+          parent_tool_use_id: null,
+        }]
+      } else if (hasMultimodal) {
         // Same text structure as the text path. Multimodal blocks become
         // [Image N]/[Document N]/[File N] labels in the text; actual blocks
         // are appended after the text content in a single structured message.
@@ -753,12 +888,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           const structuredOutputIds = new Set<string>()
           const structuredOutputIndices = new Set<number>()
 
-          // Build SDK UUID map: start with previously stored UUIDs (if resuming),
-          // then capture new ones from the response. Declared outside try so
-          // storeSession (in the finally/after block) can access it.
+          // Build SDK UUID map: start with previously stored UUIDs (if resuming)
+          // or pre-populated JSONL UUIDs (if this is a fresh session we primed
+          // with a jsonl transcript), then capture new ones from the response.
+          // Declared outside try so storeSession (in the finally/after block)
+          // can access it.
           const sdkUuidMap: Array<string | null> = cachedSession?.sdkMessageUuids
             ? [...cachedSession.sdkMessageUuids]
-            : new Array(allMessages.length - 1).fill(null)
+            : (freshMessageUuids ? [...freshMessageUuids] : new Array(allMessages.length - 1).fill(null))
           // Pad to current message count (the last user message has no UUID yet)
           while (sdkUuidMap.length < allMessages.length) sdkUuidMap.push(null)
 
@@ -785,7 +922,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   for await (const event of query(buildQueryOptions({
                     prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
-                    resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
+                    resumeSessionId: resumeSessionId ?? freshSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
                     useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
                     effort, taskBudget, betas,
                   }))) {
@@ -808,8 +945,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   // Never retry after client-visible events — response is committed
                   if (didYieldContent) throw error
 
-                  // Retry: stale undo UUID — evict session and start fresh (one-shot)
-                  if (isStaleSessionError(error)) {
+                  // Retry: stale undo UUID — evict session and start fresh (one-shot).
+                  // In ephemeral mode this branch is unreachable (no session cache),
+                  // but we still guard evictSession defensively.
+                  if (isStaleSessionError(error) && !isEphemeral) {
                     claudeLog("session.stale_uuid_retry", {
                       mode: "non_stream",
                       rollbackUuid: undoRollbackUuid,
@@ -819,11 +958,40 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     evictSession(profileSessionId, profileScopedCwd, allMessages)
                     sdkUuidMap.length = 0
                     for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
+
+                    // Prefer jsonl-backed fresh resume to preserve structured history;
+                    // fall back to flat-text buildFreshPrompt if the jsonl write fails.
+                    let retryResumeId: string | undefined
+                    let retryPrompt: string | AsyncIterable<any>
+                    const retryViaJsonl = jsonlEnabled && allMessages.length > 1
+                    if (retryViaJsonl) {
+                      try {
+                        const prep = await prepareFreshSession(allMessages, workingDirectory, {
+                          model,
+                          toolPrefix: passthrough ? PASSTHROUGH_MCP_PREFIX : undefined,
+                          outputFormat: !!outputFormat,
+                        })
+                        retryResumeId = prep.sessionId
+                        for (let i = 0; i < prep.messageUuids.length; i++) sdkUuidMap[i] = prep.messageUuids[i] ?? null
+                        retryPrompt = typeof prep.lastUserPrompt === "string"
+                          ? prep.lastUserPrompt
+                          : (async function* () {
+                              yield { type: "user" as const, message: { role: "user" as const, content: prep.lastUserPrompt }, parent_tool_use_id: null }
+                            })()
+                      } catch (retryErr) {
+                        console.error(`[PROXY] ${requestMeta.requestId} stale-retry jsonl_fresh_failed, using flat text: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`)
+                        retryResumeId = undefined
+                        retryPrompt = buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : "")
+                      }
+                    } else {
+                      retryPrompt = buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : "")
+                    }
+
                     yield* query(buildQueryOptions({
-                      prompt: buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : ""),
+                      prompt: retryPrompt,
                       model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
-                      resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
+                      resumeSessionId: retryResumeId, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
                       useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
                       effort, taskBudget, betas,
                     }))
@@ -1185,6 +1353,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             mode: "non-stream",
             isResume,
             isPassthrough: passthrough,
+            isEphemeral,
             lineageType,
             messageCount: allMessages.length,
             sdkSessionId: currentSessionId || resumeSessionId,
@@ -1204,7 +1373,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           const mergedUsage = (baseUsage || lastUsage)
             ? { ...baseUsage, ...lastUsage } as import("./session/lineage").TokenUsage
             : undefined
-          if (currentSessionId) {
+          if (!isEphemeral && currentSessionId) {
             storeSession(profileSessionId, body.messages || [], currentSessionId, profileScopedCwd, sdkUuidMap, mergedUsage)
           }
 
@@ -1261,10 +1430,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               }
             }
 
-            // Build SDK UUID map for the streaming path (declared before try for storeSession access)
+            // Build SDK UUID map for the streaming path (declared before try for storeSession access).
+            // When a jsonl fresh transcript was primed, the per-history UUIDs are
+            // captured in freshMessageUuids so they flow into storeSession.
             const sdkUuidMap: Array<string | null> = cachedSession?.sdkMessageUuids
               ? [...cachedSession.sdkMessageUuids]
-              : new Array(allMessages.length - 1).fill(null)
+              : (freshMessageUuids ? [...freshMessageUuids] : new Array(allMessages.length - 1).fill(null))
             while (sdkUuidMap.length < allMessages.length) sdkUuidMap.push(null)
 
             let messageStartEmitted = false
@@ -1293,7 +1464,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     for await (const event of query(buildQueryOptions({
                       prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
-                      resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
+                      resumeSessionId: resumeSessionId ?? freshSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, outputFormat, thinking,
                       useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
                       effort, taskBudget, betas,
                     }))) {
@@ -1317,8 +1488,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     // Never retry after client-visible SSE events — response is committed
                     if (didYieldClientEvent) throw error
 
-                    // Retry: stale undo UUID — evict and start fresh (one-shot)
-                    if (isStaleSessionError(error)) {
+                    // Retry: stale undo UUID — evict and start fresh (one-shot).
+                    // Ephemeral mode never hits this (no session cache, no undo UUID),
+                    // but guarded defensively.
+                    if (isStaleSessionError(error) && !isEphemeral) {
                       claudeLog("session.stale_uuid_retry", {
                         mode: "stream",
                         rollbackUuid: undoRollbackUuid,
@@ -1328,11 +1501,38 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       evictSession(profileSessionId, profileScopedCwd, allMessages)
                       sdkUuidMap.length = 0
                       for (let i = 0; i < allMessages.length; i++) sdkUuidMap.push(null)
+
+                      let retryResumeId: string | undefined
+                      let retryPrompt: string | AsyncIterable<any>
+                      const retryViaJsonl = jsonlEnabled && allMessages.length > 1
+                      if (retryViaJsonl) {
+                        try {
+                          const prep = await prepareFreshSession(allMessages, workingDirectory, {
+                            model,
+                            toolPrefix: passthrough ? PASSTHROUGH_MCP_PREFIX : undefined,
+                            outputFormat: !!outputFormat,
+                          })
+                          retryResumeId = prep.sessionId
+                          for (let i = 0; i < prep.messageUuids.length; i++) sdkUuidMap[i] = prep.messageUuids[i] ?? null
+                          retryPrompt = typeof prep.lastUserPrompt === "string"
+                            ? prep.lastUserPrompt
+                            : (async function* () {
+                                yield { type: "user" as const, message: { role: "user" as const, content: prep.lastUserPrompt }, parent_tool_use_id: null }
+                              })()
+                        } catch (retryErr) {
+                          console.error(`[PROXY] ${requestMeta.requestId} stale-retry jsonl_fresh_failed, using flat text: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`)
+                          retryResumeId = undefined
+                          retryPrompt = buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : "")
+                        }
+                      } else {
+                        retryPrompt = buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : "")
+                      }
+
                       yield* query(buildQueryOptions({
-                        prompt: buildFreshPrompt(allMessages, stripCacheControl, passthrough ? PASSTHROUGH_MCP_PREFIX : ""),
+                        prompt: retryPrompt,
                         model, workingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv: profileEnv,
-                        resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
+                        resumeSessionId: retryResumeId, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter, outputFormat, thinking,
                         useBuiltinWebSearch, maxOutputTokens: body.max_tokens, onStderr,
                         effort, taskBudget, betas,
                       }))
@@ -1674,8 +1874,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               })
               if (lastUsage) logUsage(requestMeta.requestId, lastUsage)
 
-              // Store session for future resume
-              if (currentSessionId) {
+              // Store session for future resume (ephemeral mode bypasses the cache).
+              if (!isEphemeral && currentSessionId) {
                 storeSession(profileSessionId, body.messages || [], currentSessionId, profileScopedCwd, sdkUuidMap, lastUsage)
               }
 
@@ -1823,6 +2023,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   mode: "stream",
                   isResume,
                   isPassthrough: passthrough,
+                  isEphemeral,
                   lineageType,
                   messageCount: allMessages.length,
                   sdkSessionId: currentSessionId || resumeSessionId,
@@ -1899,11 +2100,20 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 try { controller.close() } catch {}
                 streamClosed = true
               }
+            } finally {
+              // Ephemeral cleanup runs after the stream controller has closed and
+              // the SDK subprocess has exited. The SDK only reads the JSONL once
+              // (at resume time), so deleting it now is safe.
+              await cleanupEphemeral()
             }
           }
         })
 
         const streamSessionId = resumeSessionId || `session_${Date.now()}`
+        // Defer ephemeral cleanup to the ReadableStream's finally — SDK work
+        // runs after we return this response and the outer finally fires too
+        // early (before any JSONL bytes are read by the subprocess).
+        ephemeralDeferredToStream = true
         return new Response(readable, {
           headers: {
             "Content-Type": "text/event-stream",
@@ -1934,6 +2144,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           mode: "non-stream",
           isResume: false,
           isPassthrough: envBool("PASSTHROUGH"),
+          isEphemeral: envBool("EPHEMERAL_JSONL"),
           lineageType: undefined,
           messageCount: undefined,
           sdkSessionId: undefined,
@@ -1952,6 +2163,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           JSON.stringify({ type: "error", error: { type: classified.type, message: classified.message } }),
           { status: classified.status, headers: { "Content-Type": "application/json" } }
         )
+      } finally {
+        // Skip cleanup when we deferred it to the streaming finally — the
+        // stream branch returns synchronously with a ReadableStream whose
+        // start() hasn't run yet; deleting the JSONL here would race the
+        // SDK subprocess reading it. Otherwise (non-stream path or error
+        // before the stream handoff) clean up now.
+        if (!ephemeralDeferredToStream) await cleanupEphemeral()
       }
     })
   }

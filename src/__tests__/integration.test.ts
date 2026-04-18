@@ -80,6 +80,31 @@ async function readStream(response: Response): Promise<string> {
   return result
 }
 
+async function promptToText(prompt: any): Promise<string> {
+  if (typeof prompt === "string") return prompt
+  const out: string[] = []
+  for await (const m of prompt) {
+    const content = m?.message?.content
+    if (Array.isArray(content)) {
+      for (const b of content) {
+        if (b?.type === "text" && typeof b.text === "string") out.push(b.text)
+        else if (b?.type === "tool_result") {
+          const c = b.content
+          if (typeof c === "string") out.push(c)
+          else if (Array.isArray(c)) {
+            for (const sub of c) {
+              if (sub?.type === "text" && typeof sub.text === "string") out.push(sub.text)
+            }
+          }
+        }
+      }
+    } else if (typeof content === "string") {
+      out.push(content)
+    }
+  }
+  return out.join("\n")
+}
+
 // ============================================================
 // FULL TOOL LOOP SIMULATION
 // ============================================================
@@ -151,9 +176,12 @@ describe("Integration: Full Anthropic API tool loop", () => {
     expect(body.content[0].type).toBe("text")
     expect(body.content[0].text).toContain("meridian")
 
-    // Verify the prompt includes the tool result
-    expect(capturedQueryParams.prompt).toContain("meridian")
-    expect(capturedQueryParams.prompt).toContain(crEncode("1.1.0"))
+    // Verify the prompt includes the tool result. This step goes through the
+    // continuation path (same first message as Step 1 → fingerprint match) so
+    // the prompt is a flattened, crEncoded string.
+    const promptText = await promptToText(capturedQueryParams.prompt)
+    expect(promptText).toContain("meridian")
+    expect(promptText).toContain(crEncode("1.1.0"))
   })
 
   it("Step 3: Error tool_result → Claude recovers", async () => {
@@ -181,8 +209,12 @@ describe("Integration: Full Anthropic API tool loop", () => {
     expect(response.status).toBe(200)
     // Claude should recover with a new tool call or text
     expect(body.content.length).toBeGreaterThanOrEqual(1)
-    // The prompt should contain the error so Claude can learn from it
-    expect(capturedQueryParams.prompt).toContain(crEncode("Unknown agent type"))
+    // Balanced slicing puts the tool_result (error payload) into the JSONL
+    // transcript to keep the tool_use/tool_result pair intact. The prompt is
+    // a "Continue." sentinel that triggers generation on the balanced history.
+    expect(typeof capturedQueryParams.options.resume).toBe("string")
+    const promptText = await promptToText(capturedQueryParams.prompt)
+    expect(promptText).toBe("Continue.")
   })
 })
 

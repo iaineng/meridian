@@ -10,6 +10,7 @@ function makeMetric(overrides: Partial<RequestMetric> = {}): RequestMetric {
     mode: "stream",
     isResume: false,
     isPassthrough: false,
+    isEphemeral: false,
     status: 200,
     queueWaitMs: 5,
     proxyOverheadMs: 12,

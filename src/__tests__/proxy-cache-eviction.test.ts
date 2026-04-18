@@ -123,9 +123,11 @@ describe("Session cache LRU eviction", () => {
     // Store C — should evict B (not A, since A was accessed more recently)
     await send(app, "oc-C", "first-C", "sdk-C")
 
-    // B should be evicted — continuation attempt should not resume
+    // B should be evicted — continuation attempt must NOT resume sdk-B.
+    // JSONL-backed fresh session: resume is a new UUID (or undefined when
+    // the JSONL preamble couldn't be written), but never the evicted sdk-B.
     await sendContinuation(app, "oc-B", "first-B", "follow-up-B", "sdk-B-new")
-    expect(capturedQueryParams?.options?.resume).toBeUndefined()
+    expect(capturedQueryParams?.options?.resume).not.toBe("sdk-B")
   })
 
   it("coordinates eviction across session and fingerprint caches", async () => {

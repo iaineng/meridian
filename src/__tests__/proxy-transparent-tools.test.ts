@@ -193,7 +193,7 @@ describe("Phase 2: Message format preservation", () => {
     expect(prompt).not.toContain("You are a helpful assistant.")
   })
 
-  it("should include tool_result content in the prompt sent to SDK", async () => {
+  it("balanced-slices tool_result into JSONL; SDK prompt is a Continue. sentinel", async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "The file contains..." }]),
     ]
@@ -208,8 +208,28 @@ describe("Phase 2: Message format preservation", () => {
     const response = await postMessages(app, request)
     await response.json()
 
-    // The prompt sent to SDK should include the tool result context
+    // Balanced slicing: the tool_result is written into the JSONL transcript
+    // (along with a synthetic assistant closer so the transcript ends on an
+    // assistant turn) and the SDK prompt becomes "Continue.". This prevents
+    // the SDK's z77() deferred-tool detection from forking the conversation
+    // and keeps the tool_result's bytes stable across subsequent requests.
     expect(capturedQueryParams).toBeDefined()
-    expect(capturedQueryParams.prompt).toContain(crEncode("file contents here"))
+    const prompt = capturedQueryParams.prompt
+    const promptText = typeof prompt === "string"
+      ? prompt
+      : await (async () => {
+          const out: string[] = []
+          for await (const m of prompt) {
+            const c = m?.message?.content
+            if (Array.isArray(c)) {
+              for (const b of c) if (b?.type === "text") out.push(b.text)
+            } else if (typeof c === "string") {
+              out.push(c)
+            }
+          }
+          return out.join("")
+        })()
+    expect(promptText).toBe("Continue.")
+    expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

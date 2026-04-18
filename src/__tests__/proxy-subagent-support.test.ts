@@ -85,6 +85,34 @@ async function readStreamFull(response: Response): Promise<string> {
   return result
 }
 
+/** Drain a structured-prompt AsyncIterable into searchable plain text.
+ *  Concatenates all text and tool_result string content from every yielded
+ *  user message. Returns the original string when prompt is a string. */
+async function promptToText(prompt: any): Promise<string> {
+  if (typeof prompt === "string") return prompt
+  const out: string[] = []
+  for await (const m of prompt) {
+    const content = m?.message?.content
+    if (Array.isArray(content)) {
+      for (const b of content) {
+        if (b?.type === "text" && typeof b.text === "string") out.push(b.text)
+        else if (b?.type === "tool_result") {
+          const c = b.content
+          if (typeof c === "string") out.push(c)
+          else if (Array.isArray(c)) {
+            for (const sub of c) {
+              if (sub?.type === "text" && typeof sub.text === "string") out.push(sub.text)
+            }
+          }
+        }
+      }
+    } else if (typeof content === "string") {
+      out.push(content)
+    }
+  }
+  return out.join("\n")
+}
+
 // ============================================================
 // CONCURRENT REQUESTS
 // ============================================================
@@ -158,7 +186,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     queryCallCount = 0
   })
 
-  it("should include tool_use blocks from assistant messages in prompt", async () => {
+  it("balanced-slices trailing tool_result into JSONL; prompt is a Continue. sentinel", async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Here are the contents." }]),
     ]
@@ -184,12 +212,13 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     }))
     await response.json()
 
-    const prompt = capturedQueryParams.prompt
-    // Should contain the tool use context
-    expect(prompt).toContain("Read")
-    expect(prompt).toContain(crEncode("test.ts"))
-    // Should contain the tool result
-    expect(prompt).toContain(crEncode("console.log('hello')"))
+    // Balanced slicing: trailing assistant has unresolved tool_use, so the
+    // tool_result user is written into the JSONL (along with a synthetic
+    // assistant closer) and the SDK prompt becomes "Continue.".
+    const promptText = await promptToText(capturedQueryParams.prompt)
+    expect(promptText).toBe("Continue.")
+    // A fresh session UUID is generated (resume points to the written jsonl).
+    expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 
   it("should handle multiple tool results in a single message", async () => {
@@ -220,9 +249,11 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     }))
     await response.json()
 
-    const prompt = capturedQueryParams.prompt
-    expect(prompt).toContain(crEncode("file a contents"))
-    expect(prompt).toContain(crEncode("file b contents"))
+    // Both tool_results live in the JSONL transcript; prompt is the
+    // Continue. sentinel (balanced slicing).
+    const promptText = await promptToText(capturedQueryParams.prompt)
+    expect(promptText).toBe("Continue.")
+    expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 
   it("should handle error tool results", async () => {
@@ -251,9 +282,10 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     }))
     await response.json()
 
-    const prompt = capturedQueryParams.prompt
-    expect(prompt).toContain(crEncode("Unknown agent type"))
-    expect(prompt).toContain(crEncode("general-purpose"))
+    // Error tool_result also goes through balanced slicing into the JSONL.
+    const promptText = await promptToText(capturedQueryParams.prompt)
+    expect(promptText).toBe("Continue.")
+    expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })
 

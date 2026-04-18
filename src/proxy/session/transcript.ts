@@ -1,0 +1,545 @@
+/**
+ * SDK-native JSONL session transcript construction.
+ *
+ * For "fresh" (diverged) sessions, instead of flattening conversation history
+ * into a single XML-tagged text prompt, we:
+ *   1. Generate a new session UUID
+ *   2. Write history messages as structured JSONL lines to
+ *      ~/.claude/projects/<sanitized-cwd>/<sessionId>.jsonl
+ *   3. Let the SDK resume from that UUID with just the last user message
+ *      as the prompt — the SDK reads the JSONL and rebuilds the conversation
+ *      chain via parentUuid links.
+ *
+ * Pure logic lives in buildJsonlLines / sanitizeCwdForProjectDir; the only
+ * I/O is in writeSessionTranscript and prepareFreshSession's write call.
+ */
+import { randomUUID, randomBytes } from "node:crypto"
+import { promises as fs } from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
+import { crEncode } from "../obfuscate"
+
+/**
+ * Version string emitted in every JSONL message row. Mirrors real Claude Code
+ * transcript output so the SDK treats the file as a legitimate resume source.
+ * Kept as a single exported constant to make future bumps a one-line change.
+ */
+export const TRANSCRIPT_VERSION = "2.1.112"
+
+/** Base62 alphabet matching Anthropic's message id payload. */
+const BASE62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+/** Generate a random base62 string of the given length. */
+function randomBase62(len: number): string {
+  const buf = randomBytes(len)
+  let out = ""
+  for (let i = 0; i < len; i++) out += BASE62[buf[i]! % 62]
+  return out
+}
+
+/**
+ * Build an Anthropic-style message id: `msg_01` + 22 base62 chars,
+ * e.g. `msg_01A1X1WuTwUtf8XFhLAPN5y3`. The SDK does not strictly validate
+ * the format but matching the real shape reduces compatibility risk.
+ *
+ * The id is JSONL metadata only: the SDK strips it when building the
+ * Anthropic API request (cli.js ≈ pos 9648156 maps assistant to
+ * `{role, content}` only), so randomness here does not affect prompt cache.
+ */
+function buildMessageId(): string {
+  return `msg_01${randomBase62(22)}`
+}
+
+export interface TranscriptOptions {
+  gitBranch?: string
+  model?: string
+  version?: string
+  /**
+   * Prefix to prepend to `tool_use.name` in assistant messages. Used in
+   * passthrough mode where client-visible names are unprefixed (e.g., "Read")
+   * but the SDK's registered MCP tools carry a prefix (e.g., "mcp__tools__Read").
+   * Without this, SDK resume sees tool_use names that don't match any
+   * registered tool. Empty or undefined → no rewrite.
+   */
+  toolPrefix?: string
+  /**
+   * Override the generated session id. Used by the ephemeral pool to reuse
+   * a previously-released UUID instead of minting a new one each request.
+   */
+  sessionId?: string
+  /**
+   * When true AND the synthetic "Continue." path is taken (lone-user or
+   * trailing tool_use), augment the prompt with an explicit instruction
+   * to call the "StructuredOutput" tool so the model terminates via the
+   * structured-output tool call expected by outputFormat consumers.
+   */
+  outputFormat?: boolean
+}
+
+export interface BuildJsonlResult {
+  lines: string[]
+  /** Parallel to the input messages: uuid[i] is the UUID assigned to messages[i],
+   *  or null if that message was not written (e.g. the trailing user prompt). */
+  messageUuids: Array<string | null>
+}
+
+export interface FreshSessionResult {
+  sessionId: string
+  /** The content to send as the current prompt (last user message or "Continue."). */
+  lastUserPrompt: string | any[]
+  messageUuids: Array<string | null>
+  wroteTranscript: boolean
+}
+
+/**
+ * Turn an absolute CWD into the sanitized directory name used under
+ * ~/.claude/projects/ by Claude Code.
+ *
+ * Rule (verified from real Claude Code session files): replace `:`, `/`, and `\`
+ * with `-`. Other characters (dots, spaces, Unicode) pass through.
+ *
+ * Examples:
+ *   C:\Users\iaine\Projects\meridian → C--Users-iaine-Projects-meridian
+ *   /home/alice/proj                 → -home-alice-proj
+ */
+export function sanitizeCwdForProjectDir(cwd: string): string {
+  return cwd.replace(/[\\/:]/g, "-")
+}
+
+/**
+ * Absolute path to the JSONL session file for a given (cwd, sessionId).
+ * Respects CLAUDE_CONFIG_DIR if set (profile overlays use it), read at call
+ * time so profile switches take effect mid-run.
+ */
+export function getProjectSessionPath(cwd: string, sessionId: string): string {
+  const baseDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude")
+  return path.join(baseDir, "projects", sanitizeCwdForProjectDir(cwd), `${sessionId}.jsonl`)
+}
+
+const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
+const MAX_JSONL_HISTORY_BREAKPOINTS = 1
+// Minimal placeholder — its only job is to make the JSONL end on an
+// assistant turn so the caller's "Continue." prompt opens a clean user
+// turn. "..." tokenizes to 1 token and semantically signals a truncated
+// response, pairing naturally with the "Continue." prompt so the model
+// doesn't misread the synthetic turn as a genuine minimal reply.
+const SYNTHETIC_CONTINUE_TEXT = "..."
+
+/** Recursively strip `cache_control` from content blocks. */
+function stripCacheControl(content: any): any {
+  if (content == null) return content
+  if (Array.isArray(content)) return content.map(stripCacheControl)
+  if (typeof content !== "object") return content
+  const { cache_control, ...rest } = content
+  if (rest.type === "tool_result" && Array.isArray(rest.content)) {
+    return { ...rest, content: rest.content.map(stripCacheControl) }
+  }
+  return rest
+}
+
+function addJsonlHistoryBreakpoint(content: any, role: "user" | "assistant"): any {
+  if (!Array.isArray(content)) return content
+  let targetIndex = -1
+  if (role === "user") {
+    targetIndex = content.length - 1
+  } else {
+    for (let i = content.length - 1; i >= 0; i--) {
+      if (content[i]?.type === "text") {
+        targetIndex = i
+        break
+      }
+    }
+  }
+  if (targetIndex < 0 || targetIndex >= content.length) return content
+  return content.map((block: any, index: number) => index === targetIndex
+    ? { ...block, cache_control: { ...JSONL_HISTORY_CACHE_CONTROL } }
+    : block
+  )
+}
+
+function isSyntheticContinueAssistantRow(row: Record<string, any> | undefined): boolean {
+  if (row?.type !== "assistant") return false
+  const content = row.message?.content
+  return Array.isArray(content)
+    && content.length === 1
+    && content[0]?.type === "text"
+    && content[0]?.text === SYNTHETIC_CONTINUE_TEXT
+}
+
+function applyJsonlHistoryBreakpoints(rows: Array<Record<string, any>>): void {
+  let applied = 0
+
+  if (rows.length > 0 && isSyntheticContinueAssistantRow(rows[rows.length - 1])) {
+    for (let i = rows.length - 2; i >= 0 && applied < MAX_JSONL_HISTORY_BREAKPOINTS; i--) {
+      const row = rows[i]
+      if (row?.type !== "user") continue
+      const content = row.message?.content
+      const nextContent = addJsonlHistoryBreakpoint(content, "user")
+      if (nextContent === content) continue
+      row.message = { ...row.message, content: nextContent }
+      applied++
+      break
+    }
+  }
+
+  for (let i = rows.length - 1; i >= 0 && applied < MAX_JSONL_HISTORY_BREAKPOINTS; i--) {
+    const row = rows[i]
+    if (row?.type !== "assistant" || isSyntheticContinueAssistantRow(row)) continue
+    const content = row.message?.content
+    const nextContent = addJsonlHistoryBreakpoint(content, "assistant")
+    if (nextContent === content) continue
+    row.message = { ...row.message, content: nextContent }
+    applied++
+  }
+}
+
+/**
+ * Apply crEncode to textual fields of a user-side content value while
+ * normalizing to an array shape at the top level.
+ *
+ * Why wrap strings as [{type:"text", text}]?
+ * The SDK's n6A transform (cli.js ≈ pos 11846297) wraps a user message's
+ * string content into `[{type:"text", text, cache_control}]` ONLY when the
+ * message is "last" in the request. When the same message later appears as
+ * "non-last" history (next request), the SDK leaves the string untouched —
+ * so Anthropic sees two different shapes for the same turn across requests
+ * and the prompt cache hash diverges at that turn. Pre-wrapping here keeps
+ * the byte representation stable regardless of position.
+ *
+ * - string → [{type:"text", text: crEncode(string)}]
+ * - array → map each block (text → crEncode; tool_result → recurse into .content)
+ * - other → unchanged
+ */
+function crEncodeUserContent(content: any): any {
+  if (content == null) return content
+  if (typeof content === "string") return [{ type: "text", text: crEncode(content) }]
+  if (Array.isArray(content)) return content.map(crEncodeUserBlock)
+  if (typeof content !== "object") return content
+  return crEncodeUserBlock(content)
+}
+
+/** Per-block variant: never wraps a string into an array (used for
+ *  `tool_result.content` which must stay a string-or-block-list per Anthropic). */
+function crEncodeUserBlock(block: any): any {
+  if (block == null || typeof block !== "object") return block
+  if (block.type === "text" && typeof block.text === "string") {
+    return { ...block, text: crEncode(block.text) }
+  }
+  if (block.type === "tool_result") {
+    return { ...block, content: crEncodeToolResultContent(block.content) }
+  }
+  return block
+}
+
+/** tool_result.content: string stays string (crEncoded); array → map blocks. */
+function crEncodeToolResultContent(content: any): any {
+  if (content == null) return content
+  if (typeof content === "string") return crEncode(content)
+  if (Array.isArray(content)) return content.map(crEncodeUserBlock)
+  return content
+}
+
+/** Validate that a string is a UUID — used to accept client-supplied ids unchanged. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+function isUuid(s: unknown): s is string {
+  return typeof s === "string" && UUID_RE.test(s)
+}
+
+/**
+ * Prepend `prefix` to every `tool_use.name` in an assistant content array.
+ * No-op when prefix is empty/undefined or content is not an array of blocks.
+ * Preserves referential equality for non-tool_use blocks.
+ */
+function applyToolPrefixToAssistant(content: any, prefix: string | undefined): any {
+  if (!prefix) return content
+  if (!Array.isArray(content)) return content
+  return content.map((block: any) => {
+    if (block && block.type === "tool_use" && typeof block.name === "string" && !block.name.startsWith(prefix)) {
+      return { ...block, name: prefix + block.name }
+    }
+    return block
+  })
+}
+
+/**
+ * Build a BetaMessage-shaped assistant payload from an Anthropic content array.
+ * The SDK does not validate `id` format or `model` — any opaque strings work.
+ */
+function wrapAssistantMessage(content: any, model: string | undefined): Record<string, unknown> {
+  const id = buildMessageId()
+  return {
+    id,
+    type: "message",
+    role: "assistant",
+    model: model ?? "claude-sonnet-4-5",
+    content: Array.isArray(content) ? content : [{ type: "text", text: String(content ?? "") }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  }
+}
+
+/**
+ * Shape decision shared by buildJsonlLines (where it drives slicing + the
+ * synthetic assistant tail) and prepareFreshSession (where it drives the
+ * "Continue." prompt). Kept as a pure helper so the two sites cannot drift.
+ *
+ * Semantics:
+ *  - lastIsUser:       trailing message is a user turn (normal request shape).
+ *  - hasTrailingToolUse: the assistant adjacent to the tail has any tool_use
+ *    block — if left unbalanced, SDK's z77() auto-injects a synthetic
+ *    "Continue from where you left off" turn and forks the chain. Detection
+ *    looks at messages[n-2] when last is user, else messages[n-1].
+ *  - isLoneUser:       only one message and it's a user turn — we can't drop
+ *    it (nothing to replay) and can't leave it as the last JSONL row (SDK's
+ *    n6A would shape-shift it between requests, breaking prompt cache).
+ *  - includesLastUser: either reason above — include the last user in the
+ *    JSONL and append a synthetic assistant tail so the transcript ends on
+ *    an assistant turn; caller sends "Continue." as prompt.
+ */
+function classifyContinuation(
+  messages: ReadonlyArray<{ role: string; content: any }>
+): { lastIsUser: boolean; hasTrailingToolUse: boolean; isLoneUser: boolean; includesLastUser: boolean } {
+  const n = messages.length
+  if (n === 0) return { lastIsUser: false, hasTrailingToolUse: false, isLoneUser: false, includesLastUser: false }
+  const lastIsUser = messages[n - 1]?.role === "user"
+  const idx = lastIsUser ? n - 2 : n - 1
+  let hasTrailingToolUse = false
+  if (idx >= 0) {
+    const m = messages[idx]
+    if (m?.role === "assistant" && Array.isArray(m.content)) {
+      hasTrailingToolUse = m.content.some((b: any) => b?.type === "tool_use")
+    }
+  }
+  const isLoneUser = n === 1 && lastIsUser
+  return { lastIsUser, hasTrailingToolUse, isLoneUser, includesLastUser: hasTrailingToolUse || isLoneUser }
+}
+
+/**
+ * Pure: turn an Anthropic-format message history into JSONL lines plus the
+ * parallel messageUuids array.
+ *
+ * Behavior:
+ *  - Empty or single-message input → no lines written; messageUuids matches input length with all nulls.
+ *  - Normal case (last message is a user prompt): messages[0..N-2] are written,
+ *    messageUuids[N-1] is null (the final user message is the prompt, not history).
+ *  - Trailing assistant message: ALL N messages are written (caller synthesizes
+ *    a "Continue." prompt).
+ *  - First written message has parentUuid: null; each subsequent line's parentUuid
+ *    points to the previous line's uuid.
+ *  - A permission-mode sentinel line is emitted as the first JSONL row to mirror
+ *    real Claude Code transcripts and reduce compatibility risk.
+ */
+export function buildJsonlLines(
+  messages: ReadonlyArray<{ role: string; content: any }>,
+  sessionId: string,
+  cwd: string,
+  opts?: TranscriptOptions
+): BuildJsonlResult {
+  const n = messages.length
+  const messageUuids: Array<string | null> = new Array(n).fill(null)
+
+  if (n === 0) {
+    return { lines: [], messageUuids }
+  }
+
+  const { lastIsUser, includesLastUser } = classifyContinuation(messages)
+  const sliceEnd = (lastIsUser && !includesLastUser) ? n - 1 : n
+
+  if (sliceEnd === 0) {
+    return { lines: [], messageUuids }
+  }
+
+  const timestamp = new Date().toISOString()
+  const version = opts?.version ?? TRANSCRIPT_VERSION
+  const gitBranch = opts?.gitBranch ?? ""
+  const model = opts?.model
+  const toolPrefix = opts?.toolPrefix
+
+  const transcriptRows: Array<Record<string, any>> = []
+
+  let parentUuid: string | null = null
+  for (let i = 0; i < sliceEnd; i++) {
+    const m = messages[i]!
+    const uuid = randomUUID()
+    const role = m.role === "assistant" ? "assistant" : "user"
+    const cleaned = stripCacheControl(m.content)
+
+    const message = role === "assistant"
+      ? wrapAssistantMessage(applyToolPrefixToAssistant(cleaned, toolPrefix), model)
+      : { role: "user", content: crEncodeUserContent(cleaned) }
+
+    transcriptRows.push({
+      parentUuid,
+      isSidechain: false,
+      type: role,
+      message,
+      uuid,
+      timestamp,
+      userType: "external",
+      cwd,
+      sessionId,
+      version,
+      gitBranch,
+    })
+
+    messageUuids[i] = uuid
+    parentUuid = uuid
+  }
+
+  // When the trailing JSONL row is a user message (balanced tool_result
+  // slicing, or a lone user at turn 1), append a synthetic assistant text
+  // message so the transcript always ends on assistant. This guarantees:
+  //   1. SDK's n6A never sees a "last" user row in the JSONL (stable byte
+  //      shape across requests — the same user is always "non-last" next
+  //      time).
+  //   2. The caller's "Continue." prompt is a clean new turn on top of a
+  //      well-formed user→assistant chain.
+  //   3. applyJsonlHistoryBreakpoints can place the cache breakpoint on the
+  //      preceding user row, enabling first-call cache establishment.
+  if (lastIsUser && includesLastUser) {
+    const uuid = randomUUID()
+    const syntheticAssistant = wrapAssistantMessage(
+      [{ type: "text", text: SYNTHETIC_CONTINUE_TEXT }],
+      model
+    )
+    transcriptRows.push({
+      parentUuid,
+      isSidechain: false,
+      type: "assistant",
+      message: syntheticAssistant,
+      uuid,
+      timestamp,
+      userType: "external",
+      cwd,
+      sessionId,
+      version,
+      gitBranch,
+    })
+    // Not tracked in messageUuids — it does not correspond to an input message.
+  }
+
+  applyJsonlHistoryBreakpoints(transcriptRows)
+
+  const lines = [JSON.stringify({
+    type: "permission-mode",
+    permissionMode: "bypassPermissions",
+    sessionId,
+  }), ...transcriptRows.map(row => JSON.stringify(row))]
+
+  // Sanity: UUID format must be valid (randomUUID() always produces valid UUIDs;
+  // this guards against accidental misuse from tests)
+  for (const u of messageUuids) {
+    if (u !== null && !isUuid(u)) {
+      throw new Error(`buildJsonlLines produced invalid UUID: ${u}`)
+    }
+  }
+
+  return { lines, messageUuids }
+}
+
+/**
+ * Write the JSONL lines to disk. One atomic writeFile call to avoid races
+ * with SDK subprocess startup. File mode 0o600 matches SDK's own perms.
+ */
+export async function writeSessionTranscript(
+  cwd: string,
+  sessionId: string,
+  lines: string[]
+): Promise<void> {
+  if (lines.length === 0) return
+  const filePath = getProjectSessionPath(cwd, sessionId)
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const body = lines.map(l => l + "\n").join("")
+  await fs.writeFile(filePath, body, { encoding: "utf8", mode: 0o600 })
+}
+
+/**
+ * Delete the JSONL transcript for a session. Silently ignores ENOENT so
+ * callers can invoke it in a cleanup finally without first checking.
+ */
+export async function deleteSessionTranscript(
+  cwd: string,
+  sessionId: string
+): Promise<void> {
+  const filePath = getProjectSessionPath(cwd, sessionId)
+  try {
+    await fs.unlink(filePath)
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e
+  }
+}
+
+/**
+ * Atomically rename the JSONL transcript to a uniquely-suffixed `.bak` so
+ * every request keeps its own backup (the ephemeral UUID pool reuses ids,
+ * so a fixed `<file>.bak` would be overwritten on the next request). Used
+ * by the ephemeral path when MERIDIAN_EPHEMERAL_JSONL_BACKUP is enabled.
+ */
+export async function backupSessionTranscript(
+  cwd: string,
+  sessionId: string
+): Promise<void> {
+  const filePath = getProjectSessionPath(cwd, sessionId)
+  const ts = new Date().toISOString().replace(/[:.]/g, "-")
+  const rand = randomBytes(3).toString("hex")
+  try {
+    await fs.rename(filePath, `${filePath}.${ts}-${rand}.bak`)
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e
+  }
+}
+
+/**
+ * High-level orchestrator. Generates a session UUID, builds JSONL lines,
+ * writes them to disk (if any), and returns everything the caller needs.
+ *
+ * When at least one input message is present the transcript is always
+ * written:
+ *  - Lone user (n === 1): permission-mode + user + synthetic assistant tail,
+ *    so the first call still establishes a JSONL-backed resume chain and
+ *    the user row can carry the cache breakpoint.
+ *  - Normal histories (n >= 2): standard slice (dropping the trailing user
+ *    when it's the prompt, or appending a synthetic tail when the trailing
+ *    assistant has an unresolved tool_use).
+ *
+ * Only `messages.length === 0` short-circuits with `wroteTranscript: false`.
+ */
+export async function prepareFreshSession(
+  messages: ReadonlyArray<{ role: string; content: any }>,
+  cwd: string,
+  opts?: TranscriptOptions
+): Promise<FreshSessionResult> {
+  const sessionId = opts?.sessionId ?? randomUUID()
+  const { lines, messageUuids } = buildJsonlLines(messages, sessionId, cwd, opts)
+
+  const n = messages.length
+  const lastMsg = messages[n - 1]
+  // Shared classifier — identical decision surface as buildJsonlLines so the
+  // prompt (here) and the JSONL tail (there) can never drift out of sync.
+  const { lastIsUser, includesLastUser } = classifyContinuation(messages)
+
+  // Apply the SAME crEncode we use when writing history to JSONL so that
+  // the u_N bytes on request N (prompt path) match u_N bytes on request N+1
+  // (JSONL history). Without this, Anthropic's prompt cache breaks at every
+  // new user turn — only system/tools prefix stays stable.
+  //
+  // When outputFormat is enabled AND we are on the synthetic path, the
+  // model would otherwise be free to reply with plain text after "Continue."
+  // — but the caller is waiting for a StructuredOutput tool call. Augment
+  // the prompt with an explicit instruction so the model terminates via
+  // StructuredOutput.
+  const continuePrompt = opts?.outputFormat
+    ? "Continue. End by calling the StructuredOutput tool."
+    : "Continue."
+  const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
+    ? crEncodeUserContent(stripCacheControl(lastMsg!.content))
+    : continuePrompt
+
+  if (lines.length === 0) {
+    return { sessionId, lastUserPrompt, messageUuids, wroteTranscript: false }
+  }
+
+  await writeSessionTranscript(cwd, sessionId, lines)
+  return { sessionId, lastUserPrompt, messageUuids, wroteTranscript: true }
+}

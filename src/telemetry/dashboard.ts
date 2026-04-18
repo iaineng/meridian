@@ -211,6 +211,13 @@ function render(s, reqs, logs) {
     html += '</div>';
   }
 
+  // Ephemeral (one-shot JSONL) count — only render when non-zero.
+  if (s.ephemeralCount && s.ephemeralCount > 0) {
+    html += '<div class="cards">'
+      + card('Ephemeral', s.ephemeralCount + ' reqs', 'one-shot JSONL (bypass session cache)')
+      + '</div>';
+  }
+
   // Lineage breakdown
   if (Object.keys(lineageCounts).length > 0) {
     html += '<div class="cards">';

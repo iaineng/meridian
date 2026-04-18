@@ -85,6 +85,7 @@ export class TelemetryStore {
         totalDuration: emptyPhase,
         byModel: {},
         byMode: {},
+        ephemeralCount: 0,
       }
     }
 
@@ -120,6 +121,9 @@ export class TelemetryStore {
       entry.totalMs += m.totalDurationMs
     }
 
+    // Ephemeral count — tolerate metrics recorded before the field existed.
+    const ephemeralCount = metrics.filter(m => m.isEphemeral).length
+
     return {
       windowMs,
       totalRequests: metrics.length,
@@ -136,6 +140,7 @@ export class TelemetryStore {
       byMode: Object.fromEntries(
         Object.entries(byMode).map(([k, v]) => [k, { count: v.count, avgTotalMs: Math.round(v.totalMs / v.count) }])
       ),
+      ephemeralCount,
     }
   }
 

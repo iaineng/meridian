@@ -215,8 +215,10 @@ describe("Fingerprint resume: cross-project safety via lineage", () => {
     ], "sdk-project-b")
 
     // Prefix overlap ("hello") but no rollback UUID (only user msg in overlap)
-    // → degraded to diverged → fresh session (no cross-project contamination)
-    expect(getCaptured()?.options?.resume).toBeUndefined()
+    // → degraded to diverged → fresh session (no cross-project contamination).
+    // JSONL-backed fresh session: resume is a new UUID, NOT the cached sdk-project-a.
+    const resumed = getCaptured()?.options?.resume
+    expect(resumed).not.toBe("sdk-project-a")
     expect(getCaptured()?.options?.forkSession).toBeUndefined()
   })
 
@@ -269,7 +271,10 @@ describe("Fingerprint resume: different first messages", () => {
       { role: "user", content: "wait" },
     ], "sdk-goodbye")
 
-    expect(getCaptured()?.options?.resume).toBeUndefined()
+    // Different first message → diverged. Must NOT resume the cached sdk-hello.
+    // JSONL-backed fresh session produces a freshly generated UUID instead.
+    const resumed = getCaptured()?.options?.resume
+    expect(resumed).not.toBe("sdk-hello")
   })
 })
 

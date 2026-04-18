@@ -356,7 +356,7 @@ describe("Session resume: only send last user message on resume", () => {
     expect(capturedQueryParams.prompt).not.toContain("Start conversation")
   })
 
-  it("should send full history on first request (no resume)", async () => {
+  it("should send last user message and prewarm JSONL session on first request", async () => {
     const app = createTestApp()
 
     await (await post(app, {
@@ -370,9 +370,21 @@ describe("Session resume: only send last user message on resume", () => {
       ],
     }, { "x-opencode-session": "oc-new-session" })).json()
 
-    // No resume — should include full history
-    expect(capturedQueryParams.prompt).toContain(crEncode("First message"))
-    expect(capturedQueryParams.prompt).toContain(crEncode("Second message"))
-    expect(capturedQueryParams.options.resume).toBeUndefined()
+    // JSONL fresh-session path: prompt is the last user message wrapped as a
+    // structured SDK user message (AsyncIterable) — not flattened XML — so the
+    // CLI appends content blocks verbatim. A fresh resume UUID is generated.
+    expect(typeof capturedQueryParams.prompt).not.toBe("string")
+    const drained: any[] = []
+    for await (const m of capturedQueryParams.prompt) drained.push(m)
+    const text = drained
+      .flatMap(m => Array.isArray(m?.message?.content) ? m.message.content : [])
+      .filter((b: any) => b?.type === "text")
+      .map((b: any) => b.text)
+      .join("")
+    // User content is crEncoded (matches JSONL history encoding for cache stability).
+    expect(text).toContain(crEncode("Second message"))
+    expect(text).not.toContain("First message")
+    expect(typeof capturedQueryParams.options.resume).toBe("string")
+    expect(capturedQueryParams.options.resume.length).toBeGreaterThan(0)
   })
 })

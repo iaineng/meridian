@@ -132,7 +132,7 @@ describe("Multimodal content", () => {
     expect(typeof capturedQueryParams.prompt).not.toBe("string")
   })
 
-  it("should include all message roles in structured messages", async () => {
+  it("sends only the last user message as prompt; history is persisted via JSONL resume", async () => {
     const app = createTestApp()
     await (await post(app, {
       model: "claude-sonnet-4-5",
@@ -145,23 +145,28 @@ describe("Multimodal content", () => {
       ],
     })).json()
 
-    // Collect all messages from the async iterable
-    const messages: any[] = []
-    for await (const msg of capturedQueryParams.prompt) {
-      messages.push(msg)
-    }
+    // jsonl-fresh now emits a structured SDK user message (AsyncIterable) so
+    // the CLI appends content blocks verbatim instead of the proxy flattening
+    // them to <function_results>/<turn> XML.
+    expect(typeof capturedQueryParams.prompt).not.toBe("string")
+    const drained: any[] = []
+    for await (const m of capturedQueryParams.prompt) drained.push(m)
+    expect(drained).toHaveLength(1)
+    const lastContent = drained[0].message.content
+    // Prompt text is crEncoded to match the JSONL history encoding so that
+    // the same user turn has stable bytes across requests (required for
+    // Anthropic prompt cache stability).
+    const promptText = lastContent
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("")
+    expect(promptText).toContain(crEncode("what color is it?"))
+    expect(promptText).not.toContain("look at this")
+    expect(promptText).not.toContain("I see it")
 
-    // Single structured message with text prompt + attached multimodal blocks
-    expect(messages).toHaveLength(1)
-    expect(messages[0].type).toBe("user")
-    const content = messages[0].message.content
-    // Text block contains all roles via <turn> tags + <conversation_history>
-    expect(content[0].type).toBe("text")
-    expect(content[0].text).toContain(crEncode("look at this"))
-    expect(content[0].text).toContain("I see it")
-    expect(content[0].text).toContain(crEncode("what color is it?"))
-    expect(content[0].text).toContain("<conversation_history>")
-    expect(content[0].text).toContain('<turn role="assistant">')
+    // Fresh session UUID is generated for SDK resume (transcript written to disk).
+    expect(typeof capturedQueryParams.options.resume).toBe("string")
+    expect(capturedQueryParams.options.resume.length).toBeGreaterThan(0)
   })
 
   it("should strip cache_control from content blocks", async () => {
