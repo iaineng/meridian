@@ -215,12 +215,30 @@ export async function resolveClaudeExecutableAsync(): Promise<string> {
     // the root cause of issue #203.
     //
     // Resolution order:
-    //   1. If running under bun: cli.js works correctly — use it
-    //   2. System claude binary: standalone, no runtime dependency, always safe
+    //   1. System claude binary: standalone, no runtime dependency, always safe
+    //   2. If running under bun: cli.js works correctly — use it
     //   3. Last resort: cli.js via node (may fail for some permission modes)
     const runningUnderBun = typeof process.versions.bun !== "undefined"
 
-    // 1. SDK bundled cli.js — only when bun is the runtime
+    // 1. System-installed claude binary (standalone — no runtime dependency)
+    // Use `where` on Windows (cmd.exe has no `which`); `which` elsewhere.
+    // On Windows `where` can return multiple matches (claude.cmd + claude.exe);
+    // prefer .exe because the .cmd wrapper can mis-forward signals / stdio
+    // when the SDK spawns it as a subprocess.
+    try {
+      const lookupCmd = process.platform === "win32" ? "where claude" : "which claude"
+      const { stdout } = await exec(lookupCmd)
+      const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+      const claudePath = process.platform === "win32"
+        ? (lines.find(l => l.toLowerCase().endsWith(".exe")) ?? lines[0])
+        : lines[0]
+      if (claudePath && existsSync(claudePath)) {
+        cachedClaudePath = claudePath
+        return claudePath
+      }
+    } catch {}
+
+    // 2. SDK bundled cli.js — only when bun is the runtime
     if (runningUnderBun) {
       try {
         const sdkPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
@@ -231,16 +249,6 @@ export async function resolveClaudeExecutableAsync(): Promise<string> {
         }
       } catch {}
     }
-
-    // 2. System-installed claude binary (standalone — no runtime dependency)
-    try {
-      const { stdout } = await exec("which claude")
-      const claudePath = stdout.trim()
-      if (claudePath && existsSync(claudePath)) {
-        cachedClaudePath = claudePath
-        return claudePath
-      }
-    } catch {}
 
     // 3. Last resort: SDK cli.js via node (limited — bypassPermissions may fail)
     if (!runningUnderBun) {
