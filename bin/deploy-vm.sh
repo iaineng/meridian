@@ -19,7 +19,7 @@
 #   ./bin/deploy-vm.sh restart                  # restart proxy
 #   ./bin/deploy-vm.sh status                   # show status table
 #   ./bin/deploy-vm.sh shell                    # interactive shell
-#   ./bin/deploy-vm.sh migrate-tmpfs            # snapshot → recreate with --tmpfs JSONL (preserves data)
+#   ./bin/deploy-vm.sh migrate-tmpfs            # recreate with --tmpfs JSONL (preserves /app + auth via docker cp)
 #   ./bin/deploy-vm.sh delete                   # remove container (with confirmation)
 #   ./bin/deploy-vm.sh list                     # list all meridian-vm containers
 #
@@ -40,7 +40,7 @@
 #                   Pair with MERIDIAN_EPHEMERAL_JSONL=1 for zero-disk
 #                   transcript churn.
 #   --tmpfs-jsonl-size SIZE
-#                   tmpfs size for --tmpfs-jsonl (default: 128m). Accepts
+#                   tmpfs size for --tmpfs-jsonl (default: 1g). Accepts
 #                   any `--tmpfs` size suffix (k, m, g).
 #   --force         Skip confirmations (for delete)
 #
@@ -63,7 +63,7 @@ FORCE=false
 NETWORK_PROXY=""
 NETWORK_NO_PROXY=""
 TMPFS_JSONL=false
-TMPFS_JSONL_SIZE="128m"
+TMPFS_JSONL_SIZE="1g"
 # JSONL session transcripts live under $HOME/.claude/projects for the in-
 # container claude user. When --tmpfs-jsonl is set, this path is mounted on
 # a tmpfs so transcripts never touch the container's writable layer.
@@ -595,13 +595,16 @@ cmd_update() {
   echo "  Update complete."
 }
 
-# Snapshot the running container into a temporary image, then recreate it
-# with --tmpfs mounted at the JSONL session directory. Preserves all data
-# from the writable layer (auth, /app build, ~/.claude config) because
-# `docker commit` captures everything except explicit volume/tmpfs mounts.
+# Recreate the container with --tmpfs mounted at the JSONL session directory,
+# preserving /app and /home/claude by tar-streaming them out and back in.
 #
-# The snapshot image is retained on success so the user has a manual rollback
-# point; remove with `docker rmi` once they're confident.
+# NOTE: `docker commit` is unreliable under the gVisor (runsc) runtime —
+# writes inside the sandbox aren't always visible to the daemon's overlay,
+# so the committed image can end up missing /app, auth, etc. Streaming via
+# `docker exec tar` goes through the live container's filesystem (through
+# the gofer), which sees the real state. /home/claude/.claude/projects is
+# excluded on the way out because it's the tmpfs target and would otherwise
+# overflow the (default 128m) mount on the way back.
 cmd_migrate_tmpfs() {
   require_container
 
@@ -609,63 +612,110 @@ cmd_migrate_tmpfs() {
   # --tmpfs-jsonl-size is still honored if the user passed it.
   TMPFS_JSONL=true
 
-  local snapshot_image="${CONTAINER_NAME}-snapshot:$(date +%Y%m%d-%H%M%S)"
+  local stage_dir="/tmp/${CONTAINER_NAME}-migrate-$(date +%Y%m%d-%H%M%S)"
   local actual_port
   actual_port=$(get_mapped_port "$CONTAINER_NAME")
   [ -z "$actual_port" ] && actual_port="$HOST_PORT"
   local actual_runtime
   actual_runtime=$(docker inspect --format '{{.HostConfig.Runtime}}' "$CONTAINER_NAME" 2>/dev/null)
   [ -z "$actual_runtime" ] && actual_runtime="runsc"
+  local actual_image
+  actual_image=$(docker inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null)
+  [ -z "$actual_image" ] && actual_image="$BASE_IMAGE"
 
   print_banner "Migrating $CONTAINER_NAME → tmpfs JSONL"
-  echo "  Snapshot image: $snapshot_image"
+  echo "  Stage dir:      $stage_dir"
+  echo "  Source image:   $actual_image"
   echo "  Mount:          $TMPFS_JSONL_PATH (size=$TMPFS_JSONL_SIZE)"
   echo "  Port:           $actual_port -> 3456"
   echo "  Runtime:        $actual_runtime"
   echo ""
 
-  # Step 1: Stop proxy (graceful)
-  echo "── [1/5] Stopping proxy ─────────────────────────────"
+  # Step 1: Stop proxy (graceful). Container stays running so we can tar/cp
+  # against its live sandbox filesystem.
+  echo "── [1/6] Stopping proxy ─────────────────────────────"
   stop_quiet
   echo "  Done."
 
-  # Step 2: Commit container to snapshot image
-  echo "── [2/5] Committing snapshot ────────────────────────"
-  if ! docker commit "$CONTAINER_NAME" "$snapshot_image" > /dev/null; then
-    echo "  Error: docker commit failed. Restarting old proxy."
+  # Step 2: Stream /app and /home/claude out to host staging dir.
+  # /home/claude is pulled via `tar --exclude` so we skip the old projects
+  # dir — it would otherwise be copied back in and overflow the 128m tmpfs.
+  echo "── [2/6] Copying state to host ──────────────────────"
+  mkdir -p "$stage_dir/app" "$stage_dir/claude"
+  if ! docker exec "$CONTAINER_NAME" tar -C /app -cf - . 2>/dev/null \
+       | tar -C "$stage_dir/app" -xf - 2>/dev/null; then
+    echo "  Error: /app copy failed. Aborting without touching container."
+    rm -rf "$stage_dir"
+    start_quiet
+    exit 1
+  fi
+  echo "    ✓ /app"
+  if ! docker exec "$CONTAINER_NAME" tar -C /home/claude \
+         --exclude='./.claude/projects' \
+         -cf - . 2>/dev/null \
+       | tar -C "$stage_dir/claude" -xf - 2>/dev/null; then
+    echo "  Error: /home/claude copy failed. Aborting."
+    rm -rf "$stage_dir"
+    start_quiet
+    exit 1
+  fi
+  echo "    ✓ /home/claude (minus .claude/projects)"
+  # Sanity check: /app must contain the supervisor script
+  if [ ! -f "$stage_dir/app/bin/claude-proxy-supervisor.sh" ]; then
+    echo "  Error: /app/bin/claude-proxy-supervisor.sh missing in staged copy."
+    echo "  Aborting — stage kept at $stage_dir for inspection."
     start_quiet
     exit 1
   fi
   echo "  Done."
 
-  # Step 3: Remove old container (writable layer is in the snapshot image)
-  echo "── [3/5] Removing old container ─────────────────────"
+  # Step 3: Remove old container
+  echo "── [3/6] Removing old container ─────────────────────"
   if ! docker rm -f "$CONTAINER_NAME" > /dev/null; then
-    echo "  Error: failed to remove old container. Snapshot retained: $snapshot_image"
+    echo "  Error: failed to remove old container. State staged at $stage_dir"
     exit 1
   fi
   echo "  Done."
 
-  # Step 4: Recreate container from snapshot with tmpfs mount
-  echo "── [4/5] Recreating with tmpfs ──────────────────────"
+  # Step 4: Recreate container from the original base image with tmpfs
+  echo "── [4/6] Recreating with tmpfs ──────────────────────"
   if ! docker run -d \
     --name "$CONTAINER_NAME" \
     --runtime="$actual_runtime" \
     -p "${actual_port}:3456" \
     $(tmpfs_mount_args) \
-    "$snapshot_image" \
+    "$actual_image" \
     sleep infinity > /dev/null; then
-    echo "  Error: docker run failed."
-    echo "  Recovery: docker run -d --name $CONTAINER_NAME --runtime=$actual_runtime \\"
-    echo "             -p ${actual_port}:3456 $snapshot_image sleep infinity"
+    echo "  Error: docker run failed. State staged at $stage_dir"
     exit 1
   fi
-  # tmpfs mount is created as root-owned; chown so the claude user can write.
   docker exec "$CONTAINER_NAME" chown claude:claude "$TMPFS_JSONL_PATH" > /dev/null 2>&1
   echo "  Done."
 
-  # Step 5: Start proxy and verify
-  echo "── [5/5] Starting proxy ─────────────────────────────"
+  # Step 5: Stream staged state back. /app gets replaced outright; for
+  # /home/claude we tar-extract on top (merge), which skates past the
+  # tmpfs submount at .claude/projects — nothing in the stage touches it.
+  echo "── [5/6] Restoring state into new container ─────────"
+  docker exec "$CONTAINER_NAME" rm -rf /app > /dev/null 2>&1
+  docker exec "$CONTAINER_NAME" mkdir -p /app > /dev/null 2>&1
+  if tar -C "$stage_dir/app" -cf - . 2>/dev/null \
+     | docker exec -i "$CONTAINER_NAME" tar -C /app -xf - 2>/dev/null; then
+    echo "    ✓ /app"
+  else
+    echo "    ✗ /app (restore failed)"
+  fi
+  if tar -C "$stage_dir/claude" -cf - . 2>/dev/null \
+     | docker exec -i "$CONTAINER_NAME" tar -C /home/claude -xf - 2>/dev/null; then
+    echo "    ✓ /home/claude"
+  else
+    echo "    ✗ /home/claude (restore failed)"
+  fi
+  docker exec "$CONTAINER_NAME" chown -R claude:claude /home/claude /app > /dev/null 2>&1
+  docker exec "$CONTAINER_NAME" chmod +x /app/bin/claude-proxy-supervisor.sh > /dev/null 2>&1
+  echo "  Done."
+
+  # Step 6: Start proxy and verify
+  echo "── [6/6] Starting proxy ─────────────────────────────"
   start_quiet
   local ready=false
   for i in $(seq 1 30); do
@@ -677,15 +727,16 @@ cmd_migrate_tmpfs() {
   done
   if [ "$ready" = true ]; then
     echo "  Proxy healthy."
+    rm -rf "$stage_dir"
+    echo "  Staged copy removed."
   else
     echo "  Warning: proxy did not become healthy within 30s."
+    echo "  Staged copy retained: $stage_dir"
     echo "  Check logs: docker exec $CONTAINER_NAME cat /tmp/meridian.log"
   fi
 
   echo ""
   echo "  Migration complete."
-  echo "  Snapshot kept as rollback point: $snapshot_image"
-  echo "  Remove when confident: docker rmi $snapshot_image"
 }
 
 cmd_start() {
@@ -849,7 +900,7 @@ cmd_status() {
   echo "    $0 stop             Stop proxy"
   echo "    $0 restart          Restart proxy"
   echo "    $0 shell            Interactive shell"
-  echo "    $0 migrate-tmpfs    Snapshot + recreate with tmpfs JSONL (preserves data)"
+  echo "    $0 migrate-tmpfs    Recreate with tmpfs JSONL (preserves /app + auth via docker cp)"
   echo "    $0 delete --force   Remove container"
   echo "==========================================="
 }
