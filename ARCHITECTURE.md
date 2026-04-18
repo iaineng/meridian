@@ -40,6 +40,16 @@ src/
 │   ├── adapter.ts             ← AgentAdapter interface (extensibility point for multi-agent support)
 │   ├── adapters/
 │   │   └── opencode.ts        ← OpenCode adapter (session headers, CWD extraction, tool config)
+│   ├── handlers/              ← Session-lifecycle dispatch (classic cache vs ephemeral one-shot)
+│   │   ├── types.ts           ← HandlerContext: per-request session-lifecycle bundle
+│   │   ├── classic.ts         ← Classic path: LRU cache lookup, lineage, stale-retry, persist
+│   │   └── ephemeral.ts       ← Ephemeral path: pooled UUID, per-request JSONL, idempotent cleanup
+│   ├── pipeline/              ← Request processing pipeline (shared between classic and ephemeral)
+│   │   ├── context.ts         ← SharedRequestContext: profile/model/thinking/env resolution
+│   │   ├── prompt.ts          ← PromptBundle builder (structured / multimodal / flat-text)
+│   │   ├── hooks.ts           ← SDK hook bundle: passthrough MCP, file-change, web-search capture
+│   │   ├── executor.ts        ← SDK query with retry loop; runNonStream + runStream
+│   │   └── telemetry.ts       ← Per-request success/error metric emission
 │   ├── query.ts               ← SDK query options builder (shared between stream/non-stream paths)
 │   ├── errors.ts              ← Error classification (SDK errors → HTTP responses)
 │   ├── models.ts              ← Model mapping, Claude executable resolution
@@ -50,7 +60,9 @@ src/
 │   │   ├── index.ts           ← Barrel export
 │   │   ├── lineage.ts         ← Pure functions: hashing, lineage verification
 │   │   ├── fingerprint.ts     ← Conversation fingerprinting, client CWD extraction
-│   │   └── cache.ts           ← LRU session caches, lookup/store operations
+│   │   ├── cache.ts           ← LRU session caches, lookup/store operations
+│   │   ├── transcript.ts      ← JSONL transcript prewarm, delete/backup
+│   │   └── ephemeralPool.ts   ← Pooled ephemeral session UUIDs
 │   ├── sessionStore.ts        ← Shared file store (cross-proxy session resume)
 │   ├── profiles.ts            ← Multi-profile support: resolve, list, switch auth contexts (leaf)
 │   ├── profileCli.ts          ← CLI commands for profile management (leaf, I/O)
@@ -84,6 +96,17 @@ server.ts (HTTP layer)
     │
     ├── adapter.ts (interface)
     ├── adapters/opencode.ts ──► messages.ts, session/fingerprint.ts, tools.ts
+    ├── handlers/
+    │   ├── types.ts         ──► session/lineage.ts
+    │   ├── classic.ts       ──► pipeline/context.ts, pipeline/prompt.ts, session/
+    │   └── ephemeral.ts     ──► pipeline/context.ts, session/transcript.ts, session/ephemeralPool.ts
+    ├── pipeline/
+    │   ├── context.ts       ──► adapter.ts, profiles.ts, models.ts, betas.ts, obfuscate.ts
+    │   ├── prompt.ts        ──► messages.ts, obfuscate.ts, passthroughTools.ts
+    │   ├── hooks.ts         ──► adapter.ts, passthroughTools.ts, fileChanges.ts
+    │   ├── executor.ts      ──► query.ts, errors.ts, models.ts, tokenRefresh.ts,
+    │   │                        pipeline/{context,prompt,hooks,telemetry}, handlers/types
+    │   └── telemetry.ts     ──► telemetry/ (types only)
     ├── query.ts ──► adapter.ts, mcpTools.ts, passthroughTools.ts
     ├── errors.ts
     ├── models.ts
@@ -92,6 +115,8 @@ server.ts (HTTP layer)
     ├── session/cache.ts ──► session/lineage.ts ──► messages.ts
     │                    ──► session/fingerprint.ts
     │                    ──► sessionStore.ts
+    ├── session/transcript.ts     ──► session/lineage.ts, messages.ts
+    ├── session/ephemeralPool.ts
     ├── profiles.ts
     ├── profileCli.ts
     ├── agentDefs.ts
@@ -110,13 +135,17 @@ server.ts (HTTP layer)
 
 3. **`errors.ts`, `models.ts`, `tools.ts`, `messages.ts`, `profiles.ts`, `profileCli.ts` are leaf modules.** They must not import from `server.ts`, `session/`, or `adapter.ts`.
 
-4. **`server.ts` is the only module that imports from Hono** or touches HTTP concerns.
+4. **`server.ts` is the only module that imports from Hono** or touches HTTP concerns. It orchestrates — it does not compute. Per-request work lives in `handlers/` and `pipeline/`.
 
 5. **No circular dependencies.** If you need to share types, put them in `types.ts` or the relevant leaf module.
 
 6. **`adapter.ts` is an interface only.** No implementation logic. Adapter implementations go in `adapters/`.
 
 7. **`query.ts` builds SDK options through the adapter interface**, never importing tool constants directly.
+
+8. **`pipeline/` modules are path-agnostic.** They take a `SharedRequestContext` + `HandlerContext` and must not branch on `isEphemeral`. Ephemeral vs classic differences are expressed by `ExecutorCallbacks` (supplied by the handler) and the handler-produced `HandlerContext`.
+
+9. **`handlers/` are the only modules that call `lookupSession` / `storeSession` / `evictSession` or touch the ephemeral session pool.** Pipeline code never calls them directly.
 
 ## Agent Adapter Pattern
 
@@ -209,6 +238,12 @@ E2E tests (`E2E.md`) should be run before releases or after major refactors.
 
 ### New HTTP endpoints
 → Add to `server.ts`. Keep route handlers thin — delegate to extracted modules.
+
+### New per-request processing step
+→ Add a module under `pipeline/` that consumes `SharedRequestContext` + `HandlerContext` and returns a typed bundle. Do not branch on `isEphemeral` — route path-specific behavior through `ExecutorCallbacks` or the handler.
+
+### New session-lifecycle mode
+→ Add a module under `handlers/` that returns a `HandlerContext`. Wire it into `server.ts` alongside `buildClassicHandler` / `buildEphemeralHandler`. Only handler modules may call `lookupSession` / `storeSession` / `evictSession` or touch the ephemeral pool.
 
 ### New agent support
 → Implement `AgentAdapter` in `src/proxy/adapters/`. See `adapters/opencode.ts` for reference. Do not hardcode agent-specific logic in leaf modules.

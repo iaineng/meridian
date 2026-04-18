@@ -27,7 +27,7 @@
 import type { Context } from "hono"
 import type { AgentAdapter } from "../adapter"
 import { type FileChange, extractFileChangesFromBash } from "../fileChanges"
-import { normalizeContent } from "../messages"
+import { normalizeContent, extractSystemText } from "../messages"
 import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS } from "../tools"
 
 const PI_MCP_SERVER_NAME = "pi"
@@ -50,15 +50,7 @@ const PI_ALLOWED_MCP_TOOLS: readonly string[] = [
  * This differs from OpenCode's <env> block format.
  */
 function extractPiCwd(body: any): string | undefined {
-  let systemText = ""
-  if (typeof body.system === "string") {
-    systemText = body.system
-  } else if (Array.isArray(body.system)) {
-    systemText = body.system
-      .filter((b: any) => b.type === "text" && b.text)
-      .map((b: any) => b.text)
-      .join("\n")
-  }
+  const systemText = extractSystemText(body.system)
   if (!systemText) return undefined
 
   const match = systemText.match(/Current working directory:\s*([^\n]+)/i)

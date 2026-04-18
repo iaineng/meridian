@@ -51,12 +51,16 @@ export interface SessionState {
 /**
  * Result of lineage verification — classifies the mutation and provides
  * the information needed to take the correct SDK action.
+ *
+ * `ephemeral` is synthesised by the ephemeral one-shot handler; it is never
+ * produced by `verifyLineage` / `lookupSession` and carries no session state.
  */
 export type LineageResult =
   | { type: "continuation"; session: SessionState }
   | { type: "compaction";   session: SessionState }
   | { type: "undo";         session: SessionState; prefixOverlap: number; rollbackUuid: string | undefined }
   | { type: "diverged" }
+  | { type: "ephemeral" }
 
 // --- Hashing ---
 

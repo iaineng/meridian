@@ -37,3 +37,13 @@ export function envInt(suffix: string, defaultValue: number): number {
   const parsed = parseInt(val, 10)
   return Number.isFinite(parsed) ? parsed : defaultValue
 }
+
+/**
+ * Resolve an env var that defaults to ON — disabled only when explicitly set
+ * to "0", "false", or "no". Used for opt-out toggles like USE_JSONL_SESSIONS
+ * whose default-on behaviour predates the envBool truthy-list convention.
+ */
+export function envBoolOptOut(suffix: string): boolean {
+  const val = env(suffix)
+  return val !== "0" && val !== "false" && val !== "no"
+}

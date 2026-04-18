@@ -7,6 +7,7 @@
  */
 
 import { xxh64 as xxh64BigInt } from "@node-rs/xxhash"
+import { extractSystemText } from "../messages"
 
 /** 64-bit xxHash → 16-char hex string. */
 function xxh64(data: string): string {
@@ -24,15 +25,7 @@ function xxh64(data: string): string {
  * Returns the path if found, or undefined to fall back to server defaults.
  */
 export function extractClientCwd(body: any): string | undefined {
-  let systemText = ""
-  if (typeof body.system === "string") {
-    systemText = body.system
-  } else if (Array.isArray(body.system)) {
-    systemText = body.system
-      .filter((b: any) => b.type === "text" && b.text)
-      .map((b: any) => b.text)
-      .join("\n")
-  }
+  const systemText = extractSystemText(body.system)
   if (!systemText) return undefined
 
   const match = systemText.match(/<env>\s*[\s\S]*?Working directory:\s*([^\n<]+)/i)

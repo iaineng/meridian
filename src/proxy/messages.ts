@@ -101,6 +101,31 @@ export function serializeToolResultContentToText(content: any, counter: Multimod
 }
 
 /**
+ * Flatten an Anthropic-format `system` field (string | text-block[] | undefined)
+ * to a single string. Non-text blocks are ignored.
+ *
+ * When `skipBillingHeader` is true, text blocks whose content starts with
+ * "x-anthropic-billing-header" are dropped — callers that feed the result
+ * to the SDK use this to avoid leaking the billing sentinel into the prompt.
+ */
+export function extractSystemText(
+  system: unknown,
+  opts: { skipBillingHeader?: boolean } = {},
+): string {
+  if (typeof system === "string") return system
+  if (!Array.isArray(system)) return ""
+  return system
+    .filter((b: any) => {
+      if (b?.type !== "text" || !b.text) return false
+      if (opts.skipBillingHeader && typeof b.text === "string"
+          && b.text.startsWith("x-anthropic-billing-header")) return false
+      return true
+    })
+    .map((b: any) => b.text)
+    .join("\n")
+}
+
+/**
  * Extract only the last user message (for session resume — SDK already has history).
  */
 export function getLastUserMessage(messages: Array<{ role: string; content: any }>): Array<{ role: string; content: any }> {
