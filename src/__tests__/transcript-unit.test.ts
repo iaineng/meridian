@@ -13,6 +13,7 @@ import {
   prepareFreshSession,
   deleteSessionTranscript,
   backupSessionTranscript,
+  findClientUserBreakpoint,
 } from "../proxy/session/transcript"
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -182,10 +183,12 @@ describe("buildJsonlLines", () => {
     )
     const row = JSON.parse(lines[3]!)
     expect(row.type).toBe("user")
+    // Fallback breakpoint lands on this last user row (last block).
     expect(row.message.content[0]).toEqual({
       type: "tool_result",
       tool_use_id: "toolu_abc",
       content: "file\r contents\r here",
+      cache_control: { type: "ephemeral", ttl: "1h" },
     })
   })
 
@@ -227,9 +230,14 @@ describe("buildJsonlLines", () => {
       cwd
     )
     const row = JSON.parse(lines[1]!)
-    // image block unchanged; text block gets crEncode
+    // image block unchanged; text block gets crEncode + fallback breakpoint
+    // (last block of the last user row in JSONL).
     expect(row.message.content[0]).toEqual(imageBlock)
-    expect(row.message.content[1]).toEqual({ type: "text", text: "what\r's\r this\r?" })
+    expect(row.message.content[1]).toEqual({
+      type: "text",
+      text: "what\r's\r this\r?",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    })
   })
 
   it("applies crEncode to user string content AND wraps as array", () => {
@@ -244,12 +252,10 @@ describe("buildJsonlLines", () => {
     )
     const userRow = JSON.parse(lines[1]!)
     // String content is pre-wrapped as [{type:"text", text}] so the byte
-    // representation stays stable across requests (SDK's n6A wraps strings
-    // only when the message is "last" — without this normalization, the same
-    // message has two different shapes in consecutive requests and breaks
-    // Anthropic's prompt cache hash at that turn).
+    // representation stays stable across requests. Fallback breakpoint is
+    // placed on the last (only) block.
     expect(userRow.message.content).toEqual([
-      { type: "text", text: "hello\r world" },
+      { type: "text", text: "hello\r world", cache_control: { type: "ephemeral", ttl: "1h" } },
     ])
   })
 
@@ -264,7 +270,11 @@ describe("buildJsonlLines", () => {
       cwd
     )
     const userRow = JSON.parse(lines[1]!)
-    expect(userRow.message.content[0]).toEqual({ type: "text", text: "look\r at\r this" })
+    expect(userRow.message.content[0]).toEqual({
+      type: "text",
+      text: "look\r at\r this",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    })
   })
 
   it("applies crEncode inside tool_result content (string)", () => {
@@ -283,6 +293,7 @@ describe("buildJsonlLines", () => {
       type: "tool_result",
       tool_use_id: "t1",
       content: "file\r body\r here",
+      cache_control: { type: "ephemeral", ttl: "1h" },
     })
   })
 
@@ -322,10 +333,10 @@ describe("buildJsonlLines", () => {
       cwd
     )
     const assistantRow = JSON.parse(lines[2]!)
+    // Fallback places the breakpoint on the last user row, not the assistant.
     expect(assistantRow.message.content[0]).toEqual({
       type: "text",
       text: "my answer here",
-      cache_control: { type: "ephemeral", ttl: "1h" },
     })
   })
 
@@ -345,7 +356,11 @@ describe("buildJsonlLines", () => {
     )
     const userRow = JSON.parse(lines[1]!)
     expect(userRow.message.content[0]).toEqual(imageBlock)
-    expect(userRow.message.content[1]).toEqual({ type: "text", text: "see\r this" })
+    expect(userRow.message.content[1]).toEqual({
+      type: "text",
+      text: "see\r this",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    })
   })
 
   it("preserves thinking blocks with signature verbatim", () => {
@@ -367,18 +382,18 @@ describe("buildJsonlLines", () => {
     expect(row.type).toBe("assistant")
     expect(row.message.content).toEqual([
       thinkingBlock,
-      { type: "text", text: "answer", cache_control: { type: "ephemeral", ttl: "1h" } },
+      { type: "text", text: "answer" },
     ])
     expect(row.message.content[0].signature).toBe(thinkingBlock.signature)
   })
 
-  it("strips caller cache_control at all depths", () => {
+  it("strips caller cache_control at nested depths and normalizes the mirrored top-level value", () => {
     const { lines } = buildJsonlLines(
       [
         {
           role: "user",
           content: [
-            { type: "text", text: "hello", cache_control: { type: "ephemeral" } },
+            { type: "text", text: "hello", cache_control: { type: "ephemeral", ttl: "5m" } },
             {
               type: "tool_result",
               tool_use_id: "toolu_1",
@@ -393,7 +408,14 @@ describe("buildJsonlLines", () => {
       cwd
     )
     const row = JSON.parse(lines[1]!)
-    expect(row.message.content[0]).toEqual({ type: "text", text: "hello" })
+    // Client's top-level cache_control position is mirrored but its value is
+    // normalized to our 1h ephemeral (ttl="5m" is replaced, not preserved).
+    expect(row.message.content[0]).toEqual({
+      type: "text",
+      text: "hello",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    })
+    // Nested cache_control inside tool_result.content is fully stripped.
     expect(row.message.content[1]).toEqual({
       type: "tool_result",
       tool_use_id: "toolu_1",
@@ -401,7 +423,7 @@ describe("buildJsonlLines", () => {
     })
   })
 
-  it("adds cache_control only to the most recent assistant text row", () => {
+  it("falls back to the last user row in JSONL when client has no cache_control and JSONL ends on a real assistant", () => {
     const { lines } = buildJsonlLines(
       [
         { role: "user", content: "first" },
@@ -414,10 +436,175 @@ describe("buildJsonlLines", () => {
       cwd
     )
 
+    // sentinel + first user + first assistant + second user + second assistant
+    const firstUser = JSON.parse(lines[1]!)
     const firstAssistant = JSON.parse(lines[2]!)
+    const secondUser = JSON.parse(lines[3]!)
     const secondAssistant = JSON.parse(lines[4]!)
+    expect(firstUser.message.content[0].cache_control).toBeUndefined()
     expect(firstAssistant.message.content[0].cache_control).toBeUndefined()
-    expect(secondAssistant.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    // Last user row in JSONL receives the fallback 1h ephemeral breakpoint.
+    expect(secondUser.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    expect(secondAssistant.message.content[0].cache_control).toBeUndefined()
+  })
+
+  it("mirrors the client's last user cache_control onto the same user row and block index", () => {
+    const { lines } = buildJsonlLines(
+      [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "one" }] },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "pick this block", cache_control: { type: "ephemeral", ttl: "5m" } },
+            { type: "text", text: "later block" },
+          ],
+        },
+        { role: "assistant", content: [{ type: "text", text: "two" }] },
+        { role: "user", content: "third" },
+      ],
+      sessionId,
+      cwd
+    )
+
+    // sentinel + user + assistant + user(targeted) + assistant
+    const firstUser = JSON.parse(lines[1]!)
+    const firstAssistant = JSON.parse(lines[2]!)
+    const targetedUser = JSON.parse(lines[3]!)
+    const lastAssistant = JSON.parse(lines[4]!)
+    expect(firstUser.message.content[0].cache_control).toBeUndefined()
+    expect(firstAssistant.message.content[0].cache_control).toBeUndefined()
+    // Position preserved (block 0), value substituted with our 1h ephemeral.
+    expect(targetedUser.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    expect(targetedUser.message.content[1].cache_control).toBeUndefined()
+    expect(lastAssistant.message.content[0].cache_control).toBeUndefined()
+  })
+
+  it("picks the latest cache_control across multiple user breakpoints", () => {
+    const { lines } = buildJsonlLines(
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "earlier", cache_control: { type: "ephemeral" } }],
+        },
+        { role: "assistant", content: [{ type: "text", text: "mid" }] },
+        {
+          role: "user",
+          content: [{ type: "text", text: "later", cache_control: { type: "ephemeral" } }],
+        },
+        { role: "assistant", content: [{ type: "text", text: "tail" }] },
+      ],
+      sessionId,
+      cwd
+    )
+    const earlierUser = JSON.parse(lines[1]!)
+    const laterUser = JSON.parse(lines[3]!)
+    expect(earlierUser.message.content[0].cache_control).toBeUndefined()
+    expect(laterUser.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+  })
+
+  it("treats consecutive-user tail [u1, u2] as lone-user-like: both written + synthetic tail + u2 cache_control preserved", () => {
+    const { lines, messageUuids } = buildJsonlLines(
+      [
+        { role: "user", content: [{ type: "text", text: "prep" }] },
+        {
+          role: "user",
+          content: [{ type: "text", text: "actual", cache_control: { type: "ephemeral", ttl: "5m" } }],
+        },
+      ],
+      sessionId,
+      cwd
+    )
+    // permission-mode + u1 + u2 + synthetic assistant
+    expect(lines).toHaveLength(4)
+    const u1 = JSON.parse(lines[1]!)
+    const u2 = JSON.parse(lines[2]!)
+    const syntheticAssistant = JSON.parse(lines[3]!)
+    expect(u1.type).toBe("user")
+    expect(u2.type).toBe("user")
+    expect(syntheticAssistant.type).toBe("assistant")
+    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "..." }])
+    // u2's client cache_control position is mirrored, value normalized to 1h.
+    expect(u2.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    // u1 stays untouched.
+    expect(u1.message.content[0].cache_control).toBeUndefined()
+    // Both uuids are populated (trailing user is no longer the prompt).
+    expect(messageUuids).toHaveLength(2)
+    expect(messageUuids[0]).toMatch(UUID_RE)
+    expect(messageUuids[1]).toMatch(UUID_RE)
+  })
+
+  it("treats [u1, u2] without cache_control as lone-user-like and falls back to u2's last block", () => {
+    const { lines } = buildJsonlLines(
+      [
+        { role: "user", content: "prep" },
+        { role: "user", content: "actual" },
+      ],
+      sessionId,
+      cwd
+    )
+    // permission-mode + u1 + u2 + synthetic assistant
+    expect(lines).toHaveLength(4)
+    const u1 = JSON.parse(lines[1]!)
+    const u2 = JSON.parse(lines[2]!)
+    expect(u1.message.content[0].cache_control).toBeUndefined()
+    expect(u2.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+  })
+
+  it("treats all-user histories [u1, u2, u3] the same way: all written + synthetic tail + breakpoint on latest user with cache_control", () => {
+    const { lines, messageUuids } = buildJsonlLines(
+      [
+        { role: "user", content: [{ type: "text", text: "one" }] },
+        {
+          role: "user",
+          content: [{ type: "text", text: "two", cache_control: { type: "ephemeral" } }],
+        },
+        { role: "user", content: [{ type: "text", text: "three" }] },
+      ],
+      sessionId,
+      cwd
+    )
+    // permission-mode + u1 + u2 + u3 + synthetic assistant
+    expect(lines).toHaveLength(5)
+    const u1 = JSON.parse(lines[1]!)
+    const u2 = JSON.parse(lines[2]!)
+    const u3 = JSON.parse(lines[3]!)
+    const synthetic = JSON.parse(lines[4]!)
+    expect(u1.type).toBe("user")
+    expect(u2.type).toBe("user")
+    expect(u3.type).toBe("user")
+    expect(synthetic.type).toBe("assistant")
+    // u2 carries the only client cache_control → it wins even though u3 is later.
+    expect(u1.message.content[0].cache_control).toBeUndefined()
+    expect(u2.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    expect(u3.message.content[0].cache_control).toBeUndefined()
+    // Every input message received a UUID; none was treated as prompt.
+    expect(messageUuids).toHaveLength(3)
+    expect(messageUuids.every(u => u !== null && UUID_RE.test(u!))).toBe(true)
+  })
+
+  it("falls back to the last user row when client only marks the prompt user", () => {
+    const { lines } = buildJsonlLines(
+      [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "reply" }] },
+        {
+          role: "user",
+          content: [{ type: "text", text: "final", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+      sessionId,
+      cwd
+    )
+    // sentinel + user + assistant (prompt user stripped out of JSONL)
+    expect(lines).toHaveLength(3)
+    const firstUser = JSON.parse(lines[1]!)
+    const assistant = JSON.parse(lines[2]!)
+    // Prompt-only client breakpoint is not visible to the JSONL scan
+    // (sliceEnd excludes the prompt), so the fallback kicks in and places
+    // the breakpoint on the single user row in JSONL.
+    expect(firstUser.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    expect(assistant.message.content[0].cache_control).toBeUndefined()
   })
 
   it("skips the synthetic continue assistant and gives the single breakpoint to the preceding user row", () => {
@@ -541,6 +728,89 @@ describe("buildJsonlLines", () => {
     expect(row.gitBranch).toBe("feature-x")
     expect(row.version).toBe("meridian/1.29.2")
     expect(row.userType).toBe("external")
+  })
+})
+
+describe("findClientUserBreakpoint", () => {
+  it("returns null when no user message carries cache_control", () => {
+    const result = findClientUserBreakpoint(
+      [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: [{ type: "text", text: "again" }] },
+      ],
+      3,
+    )
+    expect(result).toBeNull()
+  })
+
+  it("ignores cache_control on assistant messages", () => {
+    const result = findClientUserBreakpoint(
+      [
+        { role: "user", content: [{ type: "text", text: "q" }] },
+        { role: "assistant", content: [{ type: "text", text: "a", cache_control: { type: "ephemeral" } }] },
+      ],
+      2,
+    )
+    expect(result).toBeNull()
+  })
+
+  it("returns the latest user message's last cache_control block index", () => {
+    const result = findClientUserBreakpoint(
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "first", cache_control: { type: "ephemeral" } }],
+        },
+        { role: "assistant", content: "a" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "keep" },
+            { type: "text", text: "pick-me", cache_control: { type: "ephemeral" } },
+            { type: "text", text: "tail" },
+          ],
+        },
+        { role: "assistant", content: "b" },
+      ],
+      4,
+    )
+    expect(result).toEqual({ messageIndex: 2, blockIndex: 1 })
+  })
+
+  it("only considers messages inside the JSONL slice", () => {
+    // sliceEnd = 2 means the prompt user at index 2 is NOT in JSONL.
+    const result = findClientUserBreakpoint(
+      [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "assistant", content: "ok" },
+        {
+          role: "user",
+          content: [{ type: "text", text: "last", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+      2,
+    )
+    expect(result).toBeNull()
+  })
+
+  it("ignores nested cache_control inside tool_result content", () => {
+    const result = findClientUserBreakpoint(
+      [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [{ type: "text", text: "inner", cache_control: { type: "ephemeral" } }],
+            },
+          ],
+        },
+      ],
+      1,
+    )
+    expect(result).toBeNull()
   })
 })
 

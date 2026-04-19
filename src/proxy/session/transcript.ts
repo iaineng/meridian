@@ -126,13 +126,42 @@ export function getProjectSessionPath(cwd: string, sessionId: string): string {
 }
 
 const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
-const MAX_JSONL_HISTORY_BREAKPOINTS = 1
 // Minimal placeholder — its only job is to make the JSONL end on an
 // assistant turn so the caller's "Continue." prompt opens a clean user
 // turn. "..." tokenizes to 1 token and semantically signals a truncated
 // response, pairing naturally with the "Continue." prompt so the model
 // doesn't misread the synthetic turn as a genuine minimal reply.
 const SYNTHETIC_CONTINUE_TEXT = "..."
+
+export interface ClientUserBreakpoint {
+  messageIndex: number
+  blockIndex: number
+}
+
+/**
+ * Scan messages written to the JSONL (i < sliceEnd) for the last user-message
+ * top-level block carrying a `cache_control`. The client's breakpoint value is
+ * not preserved — callers only borrow the position and substitute our own 1h
+ * ephemeral cache_control. Nested cache_control inside `tool_result.content`
+ * is ignored so the scan surface matches the top-level block index used by
+ * the placement helper.
+ */
+export function findClientUserBreakpoint(
+  messages: ReadonlyArray<{ role: string; content: any }>,
+  sliceEnd: number,
+): ClientUserBreakpoint | null {
+  const end = Math.min(sliceEnd, messages.length)
+  for (let i = end - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m?.role !== "user" || !Array.isArray(m.content)) continue
+    for (let j = m.content.length - 1; j >= 0; j--) {
+      if (m.content[j]?.cache_control) {
+        return { messageIndex: i, blockIndex: j }
+      }
+    }
+  }
+  return null
+}
 
 /** Recursively strip `cache_control` from content blocks. */
 function stripCacheControl(content: any): any {
@@ -146,59 +175,48 @@ function stripCacheControl(content: any): any {
   return rest
 }
 
-function addJsonlHistoryBreakpoint(content: any, role: "user" | "assistant"): any {
+function setCacheControlAt(content: any, blockIndex: number): any {
   if (!Array.isArray(content)) return content
-  let targetIndex = -1
-  if (role === "user") {
-    targetIndex = content.length - 1
-  } else {
-    for (let i = content.length - 1; i >= 0; i--) {
-      if (content[i]?.type === "text") {
-        targetIndex = i
-        break
-      }
-    }
-  }
-  if (targetIndex < 0 || targetIndex >= content.length) return content
-  return content.map((block: any, index: number) => index === targetIndex
+  if (blockIndex < 0 || blockIndex >= content.length) return content
+  return content.map((block: any, index: number) => index === blockIndex
     ? { ...block, cache_control: { ...JSONL_HISTORY_CACHE_CONTROL } }
     : block
   )
 }
 
-function isSyntheticContinueAssistantRow(row: Record<string, any> | undefined): boolean {
-  if (row?.type !== "assistant") return false
-  const content = row.message?.content
-  return Array.isArray(content)
-    && content.length === 1
-    && content[0]?.type === "text"
-    && content[0]?.text === SYNTHETIC_CONTINUE_TEXT
-}
-
-function applyJsonlHistoryBreakpoints(rows: Array<Record<string, any>>): void {
-  let applied = 0
-
-  if (rows.length > 0 && isSyntheticContinueAssistantRow(rows[rows.length - 1])) {
-    for (let i = rows.length - 2; i >= 0 && applied < MAX_JSONL_HISTORY_BREAKPOINTS; i--) {
-      const row = rows[i]
-      if (row?.type !== "user") continue
-      const content = row.message?.content
-      const nextContent = addJsonlHistoryBreakpoint(content, "user")
-      if (nextContent === content) continue
-      row.message = { ...row.message, content: nextContent }
-      applied++
-      break
-    }
+/**
+ * Place at most one JSONL history breakpoint.
+ *
+ *  1. clientBreakpoint (mirrored from caller's request body) — place on the
+ *     corresponding user row at the same block index, overwriting any prior
+ *     cache_control with our own 1h ephemeral value.
+ *  2. Fallback — put the breakpoint on the last user row's last block so
+ *     every JSONL-backed call establishes a prompt-cache entry, whether the
+ *     trailing JSONL row is a synthetic-continue assistant or a real one.
+ */
+function applyJsonlHistoryBreakpoints(
+  rows: Array<Record<string, any>>,
+  clientBreakpoint: ClientUserBreakpoint | null,
+): void {
+  if (clientBreakpoint) {
+    const row = rows[clientBreakpoint.messageIndex]
+    if (row?.type !== "user") return
+    const content = row.message?.content
+    const next = setCacheControlAt(content, clientBreakpoint.blockIndex)
+    if (next === content) return
+    row.message = { ...row.message, content: next }
+    return
   }
 
-  for (let i = rows.length - 1; i >= 0 && applied < MAX_JSONL_HISTORY_BREAKPOINTS; i--) {
+  for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i]
-    if (row?.type !== "assistant" || isSyntheticContinueAssistantRow(row)) continue
+    if (row?.type !== "user") continue
     const content = row.message?.content
-    const nextContent = addJsonlHistoryBreakpoint(content, "assistant")
-    if (nextContent === content) continue
-    row.message = { ...row.message, content: nextContent }
-    applied++
+    if (!Array.isArray(content)) return
+    const next = setCacheControlAt(content, content.length - 1)
+    if (next === content) return
+    row.message = { ...row.message, content: next }
+    return
   }
 }
 
@@ -321,7 +339,18 @@ function classifyContinuation(
     }
   }
   const isLoneUser = n === 1 && lastIsUser
-  return { lastIsUser, hasTrailingToolUse, isLoneUser, includesLastUser: hasTrailingToolUse || isLoneUser }
+  // Treat "trailing user with no anchoring assistant before it" (lone user OR
+  // consecutive users like [u1, u2]) the same way as lone-user: include the
+  // trailing user in the JSONL and append a synthetic assistant tail. Without
+  // this, [u1, u2] would slice off u2 as prompt, leave the JSONL ending on a
+  // user row (byte-shape instability), and drop any cache_control u2 carried.
+  const trailingUserLacksAssistant = lastIsUser && (idx < 0 || messages[idx]?.role !== "assistant")
+  return {
+    lastIsUser,
+    hasTrailingToolUse,
+    isLoneUser,
+    includesLastUser: hasTrailingToolUse || trailingUserLacksAssistant,
+  }
 }
 
 /**
@@ -358,6 +387,11 @@ export function buildJsonlLines(
   if (sliceEnd === 0) {
     return { lines: [], messageUuids }
   }
+
+  // Must capture client breakpoints from the original messages BEFORE any
+  // stripCacheControl runs — the per-row build below wipes cache_control as
+  // part of normal cleanup.
+  const clientBreakpoint = findClientUserBreakpoint(messages, sliceEnd)
 
   const timestamp = new Date().toISOString()
   const version = opts?.version ?? TRANSCRIPT_VERSION
@@ -428,7 +462,7 @@ export function buildJsonlLines(
     // Not tracked in messageUuids — it does not correspond to an input message.
   }
 
-  applyJsonlHistoryBreakpoints(transcriptRows)
+  applyJsonlHistoryBreakpoints(transcriptRows, clientBreakpoint)
 
   const lines = [JSON.stringify({
     type: "permission-mode",

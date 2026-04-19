@@ -174,18 +174,17 @@ describe("JSONL-backed fresh session", () => {
     expect(userLine.type).toBe("user")
     expect(userLine.parentUuid).toBeNull()
     expect(userLine.isSidechain).toBe(false)
-    // crEncode + array-wrap: string content becomes [{type:"text", text}]
-    // for cross-request byte stability (SDK n6A wraps strings only when
-    // "last" — pre-wrapping keeps the same shape in all positions).
+    // crEncode + array-wrap: string content becomes [{type:"text", text}].
+    // Fallback breakpoint lands on the last user row in JSONL (here: the only user row).
     expect(userLine.message.content).toEqual([
-      { type: "text", text: "first\r turn" },
+      { type: "text", text: "first\r turn", cache_control: { type: "ephemeral", ttl: "1h" } },
     ])
 
     expect(assistantLine.type).toBe("assistant")
     expect(assistantLine.parentUuid).toBe(userLine.uuid)
     expect(assistantLine.isSidechain).toBe(false)
     expect(assistantLine.message.role).toBe("assistant")
-    expect(assistantLine.message.content).toEqual([{ type: "text", text: "response A", cache_control: { type: "ephemeral", ttl: "1h" } }])
+    expect(assistantLine.message.content).toEqual([{ type: "text", text: "response A" }])
   })
 
   it("does not write a transcript for a single-message request", async () => {
@@ -283,7 +282,7 @@ describe("JSONL-backed fresh session", () => {
     expect(lines[2]!.type).toBe("assistant")
   })
 
-  it("strips caller cache_control but adds history breakpoints to assistant text rows", async () => {
+  it("mirrors a client user cache_control onto the corresponding JSONL user row", async () => {
     const app = createTestApp()
     await (await post(app, {
       model: "claude-sonnet-4-5",
@@ -293,7 +292,7 @@ describe("JSONL-backed fresh session", () => {
         {
           role: "user",
           content: [
-            { type: "text", text: "hello", cache_control: { type: "ephemeral", ttl: "1h" } },
+            { type: "text", text: "hello", cache_control: { type: "ephemeral", ttl: "5m" } },
           ],
         },
         { role: "assistant", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] },
@@ -305,8 +304,10 @@ describe("JSONL-backed fresh session", () => {
     expect(uuid).toBeDefined()
 
     const lines = await readJsonlLines(uuid!)
-    expect(lines[1]!.message.content[0].cache_control).toBeUndefined()
-    expect(lines[2]!.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    // User breakpoint borrows the client position; value normalized to our 1h ephemeral.
+    expect(lines[1]!.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    // Assistant row no longer receives a fallback breakpoint.
+    expect(lines[2]!.message.content[0].cache_control).toBeUndefined()
   })
 
   it("honors MERIDIAN_USE_JSONL_SESSIONS=0 (disables jsonl path)", async () => {
@@ -481,7 +482,7 @@ describe("JSONL-backed fresh session", () => {
     expect(assistantLine.type).toBe("assistant")
     expect(assistantLine.message.content).toEqual([
       thinkingBlock,
-      { type: "text", text: "answer", cache_control: { type: "ephemeral", ttl: "1h" } },
+      { type: "text", text: "answer" },
     ])
     const firstBlock = assistantLine.message.content[0] as Record<string, unknown>
     expect(firstBlock.type).toBe("thinking")
