@@ -6,6 +6,12 @@
 # inside the running container via `docker exec`.
 #
 # Usage:
+#   ./bin/deploy-vm.sh ACTION [ACTION...] [--id N[,N...]]
+#     Multiple actions run in order. With multiple IDs, the full action
+#     queue runs sequentially per ID:
+#       ./bin/deploy-vm.sh update migrate-tmpfs --id 0,1
+#         → id 0: update, migrate-tmpfs; then id 1: update, migrate-tmpfs
+#
 #   ./bin/deploy-vm.sh                          # show status (default)
 #   ./bin/deploy-vm.sh build                    # build base image (Node/Bun pre-installed)
 #   ./bin/deploy-vm.sh deploy                   # full deploy: build+create+setup+auth+install+start
@@ -25,13 +31,19 @@
 #   ./bin/deploy-vm.sh list                     # list all meridian-vm containers
 #
 # Options:
-#   --id N          Instance number (0 or omitted = default instance)
+#   --id N[,N...]   Instance number(s). Comma-separated list runs each action
+#                   in order per ID. (0 or omitted = default instance.)
+#                   Pass `all` to expand to every existing meridian-vm*
+#                   container (sorted by id; includes stopped ones).
+#                   `all` is not valid with `create` — there is no new
+#                   instance to discover for a constructive action.
 #                   Each ID gets its own port and container:
 #                     --id 0 (default) → port 3456, container meridian-vm
 #                     --id 1           → port 3457, container meridian-vm-1
 #                     --id 2           → port 3458, container meridian-vm-2
-#   --name NAME     Container name (overrides --id naming)
-#   --port PORT     Host port mapping (overrides --id port)
+#                     --id all         → every discovered instance
+#   --name NAME     Container name (overrides --id naming; single ID only)
+#   --port PORT     Host port mapping (overrides --id port; single ID only)
 #   --image IMAGE   Base image (default: meridian-vm-base, built from ubuntu:22.04)
 #   --proxy URL     HTTP/SOCKS5 proxy (e.g. http://host:port, socks5://host:port)
 #   --no-proxy LIST Comma-separated proxy bypass list
@@ -54,10 +66,16 @@ PROJECT_DIR="$SCRIPT_DIR/.."
 cd "$PROJECT_DIR"
 
 # Defaults
-COMMAND=""
-INSTANCE_ID=""
+COMMANDS=()
+INSTANCE_IDS=()
 CONTAINER_NAME=""
 HOST_PORT=""
+# Track whether --name / --port were explicitly given (so the per-ID loop
+# does not clobber a user override, and so we can reject the combination
+# with multiple IDs).
+NAME_OVERRIDE=""
+PORT_OVERRIDE=""
+ID_ALL=false
 BASE_IMAGE="meridian-vm-base"
 VM_IMAGE_NAME="meridian-vm-base"
 FORCE=false
@@ -75,18 +93,36 @@ TMPFS_JSONL_PATH="/home/claude/.claude/projects"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     build|deploy|create|setup|auth|install|update|update-claude|start|stop|restart|status|shell|root-shell|delete|list|migrate-tmpfs)
-      COMMAND="$1"; shift ;;
+      COMMANDS+=("$1"); shift ;;
     --id)
-      INSTANCE_ID="$2"
-      if ! [[ "$INSTANCE_ID" =~ ^[0-9]+$ ]]; then
-        echo "Error: --id requires a non-negative integer, got '$INSTANCE_ID'"
+      if [ -z "${2:-}" ]; then
+        echo "Error: --id requires a value"
         exit 1
       fi
+      IFS=',' read -ra _ids <<< "$2"
+      for _id in "${_ids[@]}"; do
+        if [ "$_id" = "all" ]; then
+          ID_ALL=true
+        elif [[ "$_id" =~ ^[0-9]+$ ]]; then
+          INSTANCE_IDS+=("$_id")
+        else
+          echo "Error: --id requires non-negative integers or 'all' (comma-separated), got '$_id'"
+          exit 1
+        fi
+      done
       shift 2 ;;
     --name)
-      CONTAINER_NAME="$2"; shift 2 ;;
+      if [ -z "${2:-}" ]; then
+        echo "Error: --name requires a value"
+        exit 1
+      fi
+      NAME_OVERRIDE="$2"; shift 2 ;;
     --port)
-      HOST_PORT="$2"; shift 2 ;;
+      if [ -z "${2:-}" ]; then
+        echo "Error: --port requires a value"
+        exit 1
+      fi
+      PORT_OVERRIDE="$2"; shift 2 ;;
     --image)
       BASE_IMAGE="$2"; shift 2 ;;
     --proxy)
@@ -100,7 +136,9 @@ while [[ $# -gt 0 ]]; do
     --force)
       FORCE=true; shift ;;
     --help|-h)
-      head -50 "$0" | tail -49
+      # Print the leading comment block (everything from line 2 up to the
+      # first non-comment, non-blank line). Self-updates as the header grows.
+      awk 'NR==1 { next } /^#/ || /^$/ { print; next } { exit }' "$0"
       exit 0 ;;
     *)
       echo "Error: Unknown option '$1'"
@@ -109,18 +147,94 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Defaults after parsing
+[ ${#COMMANDS[@]} -eq 0 ] && COMMANDS=("status")
+
+# Expand `--id all`: discover every existing meridian-vm* container and
+# extract its instance id. `meridian-vm` maps to id 0; `meridian-vm-N`
+# maps to id N. Anchored regex filter avoids accidental substring matches
+# (e.g. a container named `other-meridian-vm-helper`).
+if [ "$ID_ALL" = true ]; then
+  # Constructive actions need explicit IDs — `all` discovers existing
+  # containers, which by definition excludes the one being created.
+  # `deploy` is rejected because it internally runs `create`.
+  for _cmd in "${COMMANDS[@]}"; do
+    case "$_cmd" in
+      create|deploy)
+        echo "Error: --id all cannot be combined with '$_cmd' (no new instance to discover)"
+        exit 1 ;;
+    esac
+  done
+
+  # Surface real docker errors (e.g. daemon not running) instead of
+  # misreporting them as "no containers found".
+  _discovered=$(docker ps -a --filter 'name=^meridian-vm(-[0-9]+)?$' --format '{{.Names}}' | sort -V)
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "Error: --id all: 'docker ps' failed (is the docker daemon running?)"
+    exit 1
+  fi
+  if [ -z "$_discovered" ]; then
+    echo "Error: --id all: no meridian-vm* containers found."
+    exit 1
+  fi
+  while IFS= read -r _name; do
+    if [ "$_name" = "meridian-vm" ]; then
+      INSTANCE_IDS+=("0")
+    elif [[ "$_name" =~ ^meridian-vm-([0-9]+)$ ]]; then
+      INSTANCE_IDS+=("${BASH_REMATCH[1]}")
+    fi
+  done <<< "$_discovered"
+fi
+
+# De-duplicate IDs (covers `--id 1,1,2` and `--id 1,all` alike).
+# `unset` brackets `declare -A` to stay correct if this script is ever
+# sourced into an existing shell where `_seen` might already hold state.
+if [ ${#INSTANCE_IDS[@]} -gt 1 ]; then
+  _unique_ids=()
+  unset _seen
+  declare -A _seen
+  for _id in "${INSTANCE_IDS[@]}"; do
+    if [ -z "${_seen[$_id]:-}" ]; then
+      _unique_ids+=("$_id")
+      _seen[$_id]=1
+    fi
+  done
+  INSTANCE_IDS=("${_unique_ids[@]}")
+  unset _seen
+fi
+
+# Default to the primary instance when no --id was provided.
+[ ${#INSTANCE_IDS[@]} -eq 0 ] && INSTANCE_IDS=("0")
+
+# Mutex: --name / --port cannot fan out across multiple IDs.
+if [ ${#INSTANCE_IDS[@]} -gt 1 ] && { [ -n "$NAME_OVERRIDE" ] || [ -n "$PORT_OVERRIDE" ]; }; then
+  echo "Error: --name/--port cannot be combined with multiple --id values"
+  exit 1
+fi
+
 # ─── Resolve --id into container name and port ───────────────────────
 
 BASE_PORT=3456
-if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "0" ]; then
-  # Instance N → meridian-vm-N, port 3456+N
-  [ -z "$CONTAINER_NAME" ] && CONTAINER_NAME="meridian-vm-${INSTANCE_ID}"
-  [ -z "$HOST_PORT" ] && HOST_PORT=$((BASE_PORT + INSTANCE_ID))
-else
-  # Default instance
-  [ -z "$CONTAINER_NAME" ] && CONTAINER_NAME="meridian-vm"
-  [ -z "$HOST_PORT" ] && HOST_PORT="$BASE_PORT"
-fi
+
+# Set CONTAINER_NAME and HOST_PORT for the given instance id, unless the
+# user supplied an explicit --name / --port override.
+resolve_instance_vars() {
+  local id="$1"
+  if [ -n "$NAME_OVERRIDE" ]; then
+    CONTAINER_NAME="$NAME_OVERRIDE"
+  elif [ "$id" = "0" ]; then
+    CONTAINER_NAME="meridian-vm"
+  else
+    CONTAINER_NAME="meridian-vm-${id}"
+  fi
+  if [ -n "$PORT_OVERRIDE" ]; then
+    HOST_PORT="$PORT_OVERRIDE"
+  elif [ "$id" = "0" ]; then
+    HOST_PORT="$BASE_PORT"
+  else
+    HOST_PORT=$((BASE_PORT + id))
+  fi
+}
 
 # ─── Preflight ────────────────────────────────────────────────────────
 
@@ -629,17 +743,8 @@ cmd_update_claude() {
   require_container
 
   print_banner "Updating claude CLI in: $CONTAINER_NAME"
+  echo "  (Proxy keeps running — new binary is picked up on next claude spawn.)"
   echo ""
-
-  local proxy_was_running=false
-  proxy_running && proxy_was_running=true
-
-  if [ "$proxy_was_running" = true ]; then
-    echo "  Stopping proxy before update..."
-    stop_quiet
-    echo "  Done."
-    echo ""
-  fi
 
   echo "  Running: ~/.local/bin/claude update"
   echo "  ----------------------------------------"
@@ -665,18 +770,6 @@ cmd_update_claude() {
     claude --version 2>/dev/null || echo '  (unable to read version)'
   " | sed 's/^/    /'
   echo ""
-
-  if [ "$proxy_was_running" = true ]; then
-    echo "  Restarting proxy..."
-    start_quiet
-    sleep 2
-    if health_check; then
-      echo "  Proxy restarted and healthy."
-    else
-      echo "  Warning: Proxy may not be ready yet. Check with '$0 status'."
-    fi
-    echo ""
-  fi
 
   if [ $update_rc -ne 0 ]; then
     echo "  Warning: claude update exited with status $update_rc."
@@ -1047,28 +1140,57 @@ cmd_list() {
 
 # ─── Command dispatch ─────────────────────────────────────────────────
 
-# Default to status when no command given
-[ -z "$COMMAND" ] && COMMAND="status"
+dispatch_command() {
+  case "$1" in
+    build)    cmd_build ;;
+    deploy)   cmd_deploy ;;
+    create)   cmd_create ;;
+    setup)    cmd_setup ;;
+    auth)     cmd_auth ;;
+    install)  cmd_install ;;
+    update)   cmd_update ;;
+    update-claude) cmd_update_claude ;;
+    start)    cmd_start ;;
+    stop)     cmd_stop ;;
+    restart)  cmd_restart ;;
+    status)   cmd_status ;;
+    shell)    cmd_shell ;;
+    root-shell) cmd_root_shell ;;
+    delete)   cmd_delete ;;
+    list)     cmd_list ;;
+    migrate-tmpfs) cmd_migrate_tmpfs ;;
+    *)
+      echo "Error: Unknown command '$1'"
+      exit 1 ;;
+  esac
+}
 
-case "$COMMAND" in
-  build)    cmd_build ;;
-  deploy)   cmd_deploy ;;
-  create)   cmd_create ;;
-  setup)    cmd_setup ;;
-  auth)     cmd_auth ;;
-  install)  cmd_install ;;
-  update)   cmd_update ;;
-  update-claude) cmd_update_claude ;;
-  start)    cmd_start ;;
-  stop)     cmd_stop ;;
-  restart)  cmd_restart ;;
-  status)   cmd_status ;;
-  shell)    cmd_shell ;;
-  root-shell) cmd_root_shell ;;
-  delete)   cmd_delete ;;
-  list)     cmd_list ;;
-  migrate-tmpfs) cmd_migrate_tmpfs ;;
-  *)
-    echo "Error: Unknown command '$COMMAND'"
-    exit 1 ;;
-esac
+# Run each action against each instance. Outer loop is IDs so the user
+# sees one instance fully processed before the next begins.
+if [ ${#INSTANCE_IDS[@]} -gt 1 ]; then
+  multi_id=true
+else
+  multi_id=false
+fi
+if [ ${#COMMANDS[@]} -gt 1 ]; then
+  multi_cmd=true
+else
+  multi_cmd=false
+fi
+
+for _id in "${INSTANCE_IDS[@]}"; do
+  resolve_instance_vars "$_id"
+  if [ "$multi_id" = true ] || [ "$multi_cmd" = true ]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  Instance: ${CONTAINER_NAME} (port ${HOST_PORT})"
+    echo "═══════════════════════════════════════════════════════════"
+  fi
+  for _cmd in "${COMMANDS[@]}"; do
+    if [ "$multi_cmd" = true ]; then
+      echo ""
+      echo "▶ ${_cmd}"
+    fi
+    dispatch_command "$_cmd"
+  done
+done
