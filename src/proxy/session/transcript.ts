@@ -74,6 +74,15 @@ export interface TranscriptOptions {
    * structured-output tool call expected by outputFormat consumers.
    */
   outputFormat?: boolean
+  /**
+   * When true together with `outputFormat`, the client has also registered
+   * other callable tools (custom tools or web_search). In that case we must
+   * NOT force the model to call StructuredOutput immediately — it may still
+   * need another tool round — so the synthetic prompt becomes conditional:
+   * call StructuredOutput only when no further tool calls are required and
+   * the final result is ready. Ignored when `outputFormat` is false.
+   */
+  hasOtherTools?: boolean
 }
 
 export interface BuildJsonlResult {
@@ -528,9 +537,19 @@ export async function prepareFreshSession(
   // caller is waiting for a StructuredOutput tool call — so replace the
   // plain "continue" sentinel with an explicit directive that forces the
   // model to terminate via StructuredOutput rather than plain text.
-  const continuePrompt = opts?.outputFormat
-    ? "Call the StructuredOutput tool"
-    : "continue"
+  //
+  // If other tools (custom tools or web_search) are also registered, the
+  // model may still need another tool round, so soften the directive:
+  // only call StructuredOutput when no further tool calls are needed and
+  // the final result is ready.
+  let continuePrompt: string
+  if (opts?.outputFormat) {
+    continuePrompt = opts.hasOtherTools
+      ? "If you do not need to call any other tool this turn and the final result is ready, call the StructuredOutput tool to return it. Otherwise, continue using the other tools and do not call StructuredOutput yet."
+      : "Call the StructuredOutput tool"
+  } else {
+    continuePrompt = "continue"
+  }
   const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
     ? crEncodeUserContent(stripCacheControl(lastMsg!.content))
     : continuePrompt

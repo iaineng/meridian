@@ -674,6 +674,40 @@ describe("prepareFreshSession", () => {
     expect(normal.lastUserPrompt).toEqual([{ type: "text", text: "latest" }])
   })
 
+  it("uses a conditional StructuredOutput directive when other tools are also registered", async () => {
+    // outputFormat + hasOtherTools → softer prompt: only call StructuredOutput
+    // when no further tool calls are needed and the final result is ready.
+    const loneUserWithTools = await prepareFreshSession(
+      [{ role: "user", content: "hi" }],
+      "/p",
+      { outputFormat: true, hasOtherTools: true }
+    )
+    expect(loneUserWithTools.lastUserPrompt).toBe(
+      "If you do not need to call any other tool this turn and the final result is ready, call the StructuredOutput tool to return it. Otherwise, continue using the other tools and do not call StructuredOutput yet."
+    )
+
+    const trailingToolUseWithTools = await prepareFreshSession(
+      [
+        { role: "user", content: "q" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      ],
+      "/p",
+      { outputFormat: true, hasOtherTools: true }
+    )
+    expect(trailingToolUseWithTools.lastUserPrompt).toBe(
+      "If you do not need to call any other tool this turn and the final result is ready, call the StructuredOutput tool to return it. Otherwise, continue using the other tools and do not call StructuredOutput yet."
+    )
+
+    // hasOtherTools without outputFormat → still the plain "continue" sentinel.
+    const noOutputFormat = await prepareFreshSession(
+      [{ role: "user", content: "hi" }],
+      "/p",
+      { hasOtherTools: true }
+    )
+    expect(noOutputFormat.lastUserPrompt).toBe("continue")
+  })
+
   it("generates a valid UUIDv4 session id", async () => {
     const r = await prepareFreshSession(
       [{ role: "user", content: "x" }, { role: "user", content: "y" }],

@@ -59,6 +59,7 @@ export async function buildEphemeralHandler(shared: SharedRequestContext): Promi
         toolPrefix: passthroughForJsonl ? PASSTHROUGH_MCP_PREFIX : undefined,
         sessionId: ephemeralId,
         outputFormat: !!outputFormat,
+        hasOtherTools: Array.isArray(shared.body?.tools) && shared.body.tools.length > 0,
       })
       freshSessionId = prep.sessionId
       freshMessageUuids = prep.messageUuids

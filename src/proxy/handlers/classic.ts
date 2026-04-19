@@ -16,6 +16,7 @@ function buildFreshSessionOpts(shared: SharedRequestContext) {
     model: shared.model,
     toolPrefix: shared.initialPassthrough ? PASSTHROUGH_MCP_PREFIX : undefined,
     outputFormat: !!shared.outputFormat,
+    hasOtherTools: Array.isArray(shared.body?.tools) && shared.body.tools.length > 0,
   }
 }
 
