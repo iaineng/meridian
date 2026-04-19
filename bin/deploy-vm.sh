@@ -14,6 +14,7 @@
 #   ./bin/deploy-vm.sh auth                     # authenticate with Claude
 #   ./bin/deploy-vm.sh install                  # copy project + build
 #   ./bin/deploy-vm.sh update                   # re-sync project + rebuild (preserves auth)
+#   ./bin/deploy-vm.sh update-claude            # update claude CLI inside the container
 #   ./bin/deploy-vm.sh start                    # start proxy
 #   ./bin/deploy-vm.sh stop                     # stop proxy
 #   ./bin/deploy-vm.sh restart                  # restart proxy
@@ -73,7 +74,7 @@ TMPFS_JSONL_PATH="/home/claude/.claude/projects"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|deploy|create|setup|auth|install|update|start|stop|restart|status|shell|root-shell|delete|list|migrate-tmpfs)
+    build|deploy|create|setup|auth|install|update|update-claude|start|stop|restart|status|shell|root-shell|delete|list|migrate-tmpfs)
       COMMAND="$1"; shift ;;
     --id)
       INSTANCE_ID="$2"
@@ -99,7 +100,7 @@ while [[ $# -gt 0 ]]; do
     --force)
       FORCE=true; shift ;;
     --help|-h)
-      head -49 "$0" | tail -48
+      head -50 "$0" | tail -49
       exit 0 ;;
     *)
       echo "Error: Unknown option '$1'"
@@ -624,6 +625,67 @@ cmd_update() {
 # the gofer), which sees the real state. /home/claude/.claude/projects is
 # excluded on the way out because it's the tmpfs target and would otherwise
 # overflow the (default 128m) mount on the way back.
+cmd_update_claude() {
+  require_container
+
+  print_banner "Updating claude CLI in: $CONTAINER_NAME"
+  echo ""
+
+  local proxy_was_running=false
+  proxy_running && proxy_was_running=true
+
+  if [ "$proxy_was_running" = true ]; then
+    echo "  Stopping proxy before update..."
+    stop_quiet
+    echo "  Done."
+    echo ""
+  fi
+
+  echo "  Running: ~/.local/bin/claude update"
+  echo "  ----------------------------------------"
+  local update_rc=0
+  docker exec --user claude "$CONTAINER_NAME" bash -c "
+    $(proxy_env)
+    export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
+    if [ -x /home/claude/.local/bin/claude ]; then
+      /home/claude/.local/bin/claude update
+    elif [ -x /home/claude/.claude/bin/claude ]; then
+      /home/claude/.claude/bin/claude update
+    else
+      echo 'Error: claude binary not found in /home/claude/.local/bin or /home/claude/.claude/bin'
+      exit 1
+    fi
+  " || update_rc=$?
+  echo "  ----------------------------------------"
+  echo ""
+
+  echo "  New version:"
+  docker exec --user claude "$CONTAINER_NAME" bash -c "
+    export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
+    claude --version 2>/dev/null || echo '  (unable to read version)'
+  " | sed 's/^/    /'
+  echo ""
+
+  if [ "$proxy_was_running" = true ]; then
+    echo "  Restarting proxy..."
+    start_quiet
+    sleep 2
+    if health_check; then
+      echo "  Proxy restarted and healthy."
+    else
+      echo "  Warning: Proxy may not be ready yet. Check with '$0 status'."
+    fi
+    echo ""
+  fi
+
+  if [ $update_rc -ne 0 ]; then
+    echo "  Warning: claude update exited with status $update_rc."
+    exit $update_rc
+  fi
+
+  echo "  claude CLI update complete."
+}
+
 cmd_migrate_tmpfs() {
   require_container
 
@@ -915,6 +977,7 @@ cmd_status() {
   echo "    $0 auth             Authenticate with Claude"
   echo "    $0 install          Copy project + build"
   echo "    $0 update           Re-sync + rebuild"
+  echo "    $0 update-claude    Update claude CLI inside container"
   echo "    $0 start            Start proxy"
   echo "    $0 stop             Stop proxy"
   echo "    $0 restart          Restart proxy"
@@ -995,6 +1058,7 @@ case "$COMMAND" in
   auth)     cmd_auth ;;
   install)  cmd_install ;;
   update)   cmd_update ;;
+  update-claude) cmd_update_claude ;;
   start)    cmd_start ;;
   stop)     cmd_stop ;;
   restart)  cmd_restart ;;
