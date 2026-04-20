@@ -229,7 +229,7 @@ describe("Phase 2: Message format preservation", () => {
           }
           return out.join("")
         })()
-    expect(promptText).toBe("continue")
+    expect(promptText).toBe("<runtime-directive>Respond based on the tool result above.</runtime-directive>")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

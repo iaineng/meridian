@@ -133,6 +133,43 @@ const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
 // doesn't misread the synthetic turn as a genuine minimal reply.
 const SYNTHETIC_CONTINUE_TEXT = "..."
 
+// Runtime directive wrapper: the SDK forces us to send proxy-generated
+// prompts (prefill, continue sentinels, StructuredOutput terminators) as
+// ordinary user turns. When the transcript is later fed to a summarizer or
+// title-generator, those turns look indistinguishable from real user input
+// and leak into the output. Wrapping each injected prompt with a dedicated
+// XML tag lets downstream readers mechanically skip them while leaving the
+// current model's instruction-following unchanged (the directive text inside
+// still drives this turn's response).
+function wrapRuntimeDirective(text: string): string {
+  return `<runtime-directive>${text}</runtime-directive>`
+}
+
+// Prefill path: when the client's last message is an assistant turn, treat
+// the request as a continuation of that turn. The SDK architecture forces us
+// to send a new user turn as the prompt, so we instruct the model to resume
+// from the exact character where its previous turn ended, suppressing any
+// preamble that would corrupt the stitched output.
+const PREFILL_CONTINUE_PROMPT = wrapRuntimeDirective("Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.")
+
+// Synthetic-tail prompts: when a SYNTHETIC_CONTINUE_TEXT ("...") row is
+// appended to the JSONL tail (tool_result path or lone-user path), the model
+// can misread "..." as its own truncated output. Rather than negatively
+// instructing the model to ignore the placeholder (which pulls its attention
+// to the very concept we want it to skip), we positively redirect it to the
+// real content by pointing at the tool result or user message directly.
+const TOOL_RESULT_CONTINUE_PROMPT = wrapRuntimeDirective("Respond based on the tool result above.")
+const USER_MESSAGE_CONTINUE_PROMPT = wrapRuntimeDirective("Respond to the user's message above.")
+
+// StructuredOutput terminators: when the caller has registered a
+// StructuredOutput tool and needs the response shaped through it, force the
+// model to terminate via that tool. The strict variant applies when no other
+// tool is available this turn (the only valid action is StructuredOutput);
+// the conditional variant defers to the model's judgment when other tools
+// are registered and a further tool round may still be needed.
+const STRUCTURED_OUTPUT_STRICT_PROMPT = wrapRuntimeDirective("Call the StructuredOutput tool immediately. Your entire response this turn MUST be exactly one StructuredOutput tool call — no preceding text, no trailing text, no reasoning output, no other tool calls. Invoke StructuredOutput now with the final structured result.")
+const STRUCTURED_OUTPUT_CONDITIONAL_PROMPT = wrapRuntimeDirective("If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet.")
+
 export interface ClientUserBreakpoint {
   messageIndex: number
   blockIndex: number
@@ -560,7 +597,7 @@ export async function prepareFreshSession(
   const lastMsg = messages[n - 1]
   // Shared classifier — identical decision surface as buildJsonlLines so the
   // prompt (here) and the JSONL tail (there) can never drift out of sync.
-  const { lastIsUser, includesLastUser } = classifyContinuation(messages)
+  const { lastIsUser, hasTrailingToolUse, includesLastUser } = classifyContinuation(messages)
 
   // Apply the SAME crEncode we use when writing history to JSONL so that
   // the u_N bytes on request N (prompt path) match u_N bytes on request N+1
@@ -577,12 +614,18 @@ export async function prepareFreshSession(
   // only call StructuredOutput when no further tool calls are needed and
   // the final result is ready.
   let continuePrompt: string
-  if (opts?.outputFormat) {
+  if (n > 0 && !lastIsUser) {
+    continuePrompt = PREFILL_CONTINUE_PROMPT
+  } else if (opts?.outputFormat) {
     continuePrompt = opts.hasOtherTools
-      ? "If you do not need to call any other tool this turn and the final result is ready, call the StructuredOutput tool to return it. Otherwise, continue using the other tools and do not call StructuredOutput yet."
-      : "Call the StructuredOutput tool"
+      ? STRUCTURED_OUTPUT_CONDITIONAL_PROMPT
+      : STRUCTURED_OUTPUT_STRICT_PROMPT
+  } else if (hasTrailingToolUse) {
+    continuePrompt = TOOL_RESULT_CONTINUE_PROMPT
+  } else if (lastIsUser && includesLastUser) {
+    continuePrompt = USER_MESSAGE_CONTINUE_PROMPT
   } else {
-    continuePrompt = "continue"
+    continuePrompt = wrapRuntimeDirective("continue")
   }
   const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
     ? crEncodeUserContent(stripCacheControl(lastMsg!.content))

@@ -872,10 +872,11 @@ describe("prepareFreshSession", () => {
   it("writes a JSONL with user + synthetic-assistant for a lone user message", async () => {
     const r = await prepareFreshSession([{ role: "user", content: "hi" }], "/p")
     expect(r.wroteTranscript).toBe(true)
-    // Lone-user case: prompt becomes the "continue" sentinel so the lone
-    // user row lives in the JSONL (where it gets the cache breakpoint) and
-    // the SDK resumes on top of a well-formed user→assistant chain.
-    expect(r.lastUserPrompt).toBe("continue")
+    // Lone-user case: prompt positively redirects the model to the real user
+    // message so the lone user row lives in the JSONL (where it gets the
+    // cache breakpoint) and the synthetic "..." placeholder does not pull
+    // the model's attention.
+    expect(r.lastUserPrompt).toBe("<runtime-directive>Respond to the user's message above.</runtime-directive>")
     expect(r.sessionId).toMatch(UUID_RE)
     expect(r.messageUuids).toHaveLength(1)
     expect(r.messageUuids[0]).toMatch(UUID_RE)
@@ -894,7 +895,7 @@ describe("prepareFreshSession", () => {
     expect(r.lastUserPrompt).toEqual([{ type: "text", text: "latest" }])
   })
 
-  it("uses \"continue\" when history ends with assistant", async () => {
+  it("uses the prefill directive when history ends with assistant", async () => {
     const r = await prepareFreshSession(
       [
         { role: "user", content: "q" },
@@ -903,7 +904,7 @@ describe("prepareFreshSession", () => {
       "/p"
     )
     expect(r.wroteTranscript).toBe(true)
-    expect(r.lastUserPrompt).toBe("continue")
+    expect(r.lastUserPrompt).toBe("<runtime-directive>Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.</runtime-directive>")
     // All N messages written: messageUuids has no trailing null
     expect(r.messageUuids.every(u => u !== null)).toBe(true)
   })
@@ -916,7 +917,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { outputFormat: true }
     )
-    expect(loneUser.lastUserPrompt).toBe("Call the StructuredOutput tool")
+    expect(loneUser.lastUserPrompt).toContain("Call the StructuredOutput tool")
 
     // Trailing tool_use path → same synthetic continuation path.
     const trailingToolUse = await prepareFreshSession(
@@ -928,7 +929,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { outputFormat: true }
     )
-    expect(trailingToolUse.lastUserPrompt).toBe("Call the StructuredOutput tool")
+    expect(trailingToolUse.lastUserPrompt).toContain("Call the StructuredOutput tool")
 
     // Normal last-user path → outputFormat flag has NO effect (prompt is the
     // real user content, not a synthetic sentinel).
@@ -952,8 +953,8 @@ describe("prepareFreshSession", () => {
       "/p",
       { outputFormat: true, hasOtherTools: true }
     )
-    expect(loneUserWithTools.lastUserPrompt).toBe(
-      "If you do not need to call any other tool this turn and the final result is ready, call the StructuredOutput tool to return it. Otherwise, continue using the other tools and do not call StructuredOutput yet."
+    expect(loneUserWithTools.lastUserPrompt).toContain(
+      "If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet."
     )
 
     const trailingToolUseWithTools = await prepareFreshSession(
@@ -965,8 +966,8 @@ describe("prepareFreshSession", () => {
       "/p",
       { outputFormat: true, hasOtherTools: true }
     )
-    expect(trailingToolUseWithTools.lastUserPrompt).toBe(
-      "If you do not need to call any other tool this turn and the final result is ready, call the StructuredOutput tool to return it. Otherwise, continue using the other tools and do not call StructuredOutput yet."
+    expect(trailingToolUseWithTools.lastUserPrompt).toContain(
+      "If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet."
     )
 
     // hasOtherTools without outputFormat → still the plain "continue" sentinel.
@@ -975,7 +976,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { hasOtherTools: true }
     )
-    expect(noOutputFormat.lastUserPrompt).toBe("continue")
+    expect(noOutputFormat.lastUserPrompt).toBe("<runtime-directive>Respond to the user's message above.</runtime-directive>")
   })
 
   it("generates a valid UUIDv4 session id", async () => {

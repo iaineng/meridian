@@ -253,10 +253,10 @@ describe("JSONL-backed fresh session", () => {
     ])
     // Tool-result payload is crEncoded (matches user content encoding).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("continue")
+    expect(promptText).toBe("<runtime-directive>Respond based on the tool result above.</runtime-directive>")
   })
 
-  it("wraps a trailing assistant history with Continue. as prompt", async () => {
+  it("wraps a trailing assistant history with the prefill directive as prompt", async () => {
     const app = createTestApp()
     await (await post(app, {
       model: "claude-sonnet-4-5",
@@ -270,11 +270,11 @@ describe("JSONL-backed fresh session", () => {
 
     const uuid = resumedUuid()
     expect(uuid).toBeDefined()
-    // Last message is assistant → prompt is "continue" wrapped as a structured
-    // SDK user message (AsyncIterable). Drain to text and assert.
+    // Last message is assistant → prefill path: prompt instructs the model to
+    // resume from the exact character after the previous assistant turn.
     expect(typeof capturedQueryParams.prompt).not.toBe("string")
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toContain("continue")
+    expect(promptText).toContain("Resume output starting at the exact character")
 
     const lines = await readJsonlLines(uuid!)
     // permission-mode + user + assistant (all N written since trailing is assistant)
