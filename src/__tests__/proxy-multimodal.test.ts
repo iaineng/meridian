@@ -9,6 +9,7 @@ import { describe, it, expect, mock, beforeEach } from "bun:test"
 import { assistantMessage } from "./helpers"
 
 import { obfuscateSystemMessage, crEncode } from "../proxy/obfuscate"
+import { HEARTBEAT_SIGNAL_INSTRUCTION } from "../proxy/session/transcript"
 
 let capturedQueryParams: any = null
 
@@ -220,7 +221,7 @@ describe("Multimodal content", () => {
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: obfuscateSystemMessage("You are a helpful assistant."),
+      append: `${obfuscateSystemMessage("You are a helpful assistant.")}\n\n${HEARTBEAT_SIGNAL_INSTRUCTION}`,
     })
 
     const messages: any[] = []

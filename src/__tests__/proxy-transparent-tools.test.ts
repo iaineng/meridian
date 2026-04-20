@@ -13,6 +13,7 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test"
 
 import { obfuscateSystemMessage, crEncode } from "../proxy/obfuscate"
+import { HEARTBEAT_SIGNAL_INSTRUCTION } from "../proxy/session/transcript"
 
 import {
   messageStart,
@@ -185,7 +186,7 @@ describe("Phase 2: Message format preservation", () => {
     expect(capturedQueryParams.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: obfuscateSystemMessage("You are a helpful assistant."),
+      append: `${obfuscateSystemMessage("You are a helpful assistant.")}\n\n${HEARTBEAT_SIGNAL_INSTRUCTION}`,
     })
     // Prompt text should NOT contain the raw system context (it's in the SDK option now, obfuscated)
     const prompt = capturedQueryParams.prompt
@@ -209,10 +210,11 @@ describe("Phase 2: Message format preservation", () => {
     await response.json()
 
     // Balanced slicing: the tool_result is written into the JSONL transcript
-    // (along with a synthetic assistant closer so the transcript ends on an
-    // assistant turn) and the SDK prompt becomes "continue". This prevents
-    // the SDK's z77() deferred-tool detection from forking the conversation
-    // and keeps the tool_result's bytes stable across subsequent requests.
+    // (along with a synthetic `[HEARTBEAT]` assistant closer so the transcript
+    // ends on an assistant turn) and the SDK prompt becomes `[ACK]`. This
+    // prevents the SDK's z77() deferred-tool detection from forking the
+    // conversation and keeps the tool_result's bytes stable across subsequent
+    // requests.
     expect(capturedQueryParams).toBeDefined()
     const prompt = capturedQueryParams.prompt
     const promptText = typeof prompt === "string"
@@ -229,7 +231,7 @@ describe("Phase 2: Message format preservation", () => {
           }
           return out.join("")
         })()
-    expect(promptText).toBe("continue")
+    expect(promptText).toBe("[ACK]")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

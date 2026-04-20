@@ -4,6 +4,7 @@
 import { describe, it, expect } from "bun:test"
 import { buildQueryOptions, type QueryContext } from "../proxy/query"
 import { openCodeAdapter } from "../proxy/adapters/opencode"
+import { HEARTBEAT_SIGNAL_INSTRUCTION } from "../proxy/session/transcript"
 
 function makeContext(overrides: Partial<QueryContext> = {}): QueryContext {
   return {
@@ -51,23 +52,32 @@ describe("buildQueryOptions", () => {
     expect(result.options.maxTurns).toBe(1)
   })
 
-  it("includes system prompt as preset in normal mode", () => {
+  it("includes system prompt as preset in normal mode, with HEARTBEAT instruction appended", () => {
     const result = buildQueryOptions(makeContext({ systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
     expect(sp).toBeDefined()
     expect(sp.type).toBe("preset")
-    expect(sp.append).toBe("Be helpful")
+    expect(sp.append).toBe(`Be helpful\n\n${HEARTBEAT_SIGNAL_INSTRUCTION}`)
   })
 
-  it("uses raw system prompt in passthrough mode", () => {
+  it("uses raw system prompt in passthrough mode, with HEARTBEAT instruction appended", () => {
     const result = buildQueryOptions(makeContext({ passthrough: true, systemContext: "Be helpful" }))
     const sp = (result.options as any).systemPrompt
-    expect(sp).toBe("Be helpful")
+    expect(sp).toBe(`Be helpful\n\n${HEARTBEAT_SIGNAL_INSTRUCTION}`)
   })
 
-  it("omits system prompt when empty", () => {
+  it("emits HEARTBEAT instruction alone when systemContext is empty (normal mode)", () => {
     const result = buildQueryOptions(makeContext({ systemContext: "" }))
-    expect((result.options as any).systemPrompt).toBeUndefined()
+    const sp = (result.options as any).systemPrompt
+    expect(sp).toBeDefined()
+    expect(sp.type).toBe("preset")
+    expect(sp.append).toBe(HEARTBEAT_SIGNAL_INSTRUCTION)
+  })
+
+  it("emits HEARTBEAT instruction alone when systemContext is empty (passthrough mode)", () => {
+    const result = buildQueryOptions(makeContext({ passthrough: true, systemContext: "" }))
+    const sp = (result.options as any).systemPrompt
+    expect(sp).toBe(HEARTBEAT_SIGNAL_INSTRUCTION)
   })
 
   it("includes resume session ID when provided", () => {

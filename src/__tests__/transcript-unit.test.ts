@@ -93,7 +93,7 @@ describe("buildJsonlLines", () => {
     expect(synthRow.type).toBe("assistant")
     expect(synthRow.parentUuid).toBe(userRow.uuid)
     expect(synthRow.message.content).toEqual([
-      { type: "text", text: "." },
+      { type: "text", text: "[HEARTBEAT]" },
     ])
     // The lone user receives the JSONL history cache breakpoint so the
     // first call can establish prompt cache.
@@ -523,7 +523,7 @@ describe("buildJsonlLines", () => {
     expect(u1.type).toBe("user")
     expect(u2.type).toBe("user")
     expect(syntheticAssistant.type).toBe("assistant")
-    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "." }])
+    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "[HEARTBEAT]" }])
     // u2's client cache_control position is mirrored, value normalized to 1h.
     expect(u2.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
     // u1 stays untouched.
@@ -872,10 +872,12 @@ describe("prepareFreshSession", () => {
   it("writes a JSONL with user + synthetic-assistant for a lone user message", async () => {
     const r = await prepareFreshSession([{ role: "user", content: "hi" }], "/p")
     expect(r.wroteTranscript).toBe(true)
-    // Lone-user case: prompt is a bare "continue" token — short enough that
-    // the model doesn't fixate on the directive itself and falls through to
-    // responding based on the JSONL history.
-    expect(r.lastUserPrompt).toBe("continue")
+    // Lone-user case: prompt is a bare `[ACK]` infrastructure signal paired
+    // with the `[HEARTBEAT]` synthetic tail in the JSONL above. The system
+    // prompt (via HEARTBEAT_SIGNAL_INSTRUCTION) tells the model to ignore
+    // both tokens, so it responds based on the JSONL history instead of
+    // fixating on the sentinel.
+    expect(r.lastUserPrompt).toBe("[ACK]")
     expect(r.sessionId).toMatch(UUID_RE)
     expect(r.messageUuids).toHaveLength(1)
     expect(r.messageUuids[0]).toMatch(UUID_RE)
@@ -917,6 +919,9 @@ describe("prepareFreshSession", () => {
       { outputFormat: true }
     )
     expect(loneUser.lastUserPrompt).toContain("Call the StructuredOutput tool")
+    // Non-empty synthetic turn: [ACK] prefix pairs with [HEARTBEAT] tail,
+    // the directive rides in a trailing <system-reminder> block.
+    expect(loneUser.lastUserPrompt as string).toMatch(/^\[ACK\]\n<system-reminder>/)
 
     // Trailing tool_use path → same synthetic continuation path.
     const trailingToolUse = await prepareFreshSession(
@@ -929,6 +934,7 @@ describe("prepareFreshSession", () => {
       { outputFormat: true }
     )
     expect(trailingToolUse.lastUserPrompt).toContain("Call the StructuredOutput tool")
+    expect(trailingToolUse.lastUserPrompt as string).toMatch(/^\[ACK\]\n<system-reminder>/)
 
     // Normal last-user path → outputFormat flag has NO effect (prompt is the
     // real user content, not a synthetic sentinel).
@@ -955,6 +961,7 @@ describe("prepareFreshSession", () => {
     expect(loneUserWithTools.lastUserPrompt).toContain(
       "If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet."
     )
+    expect(loneUserWithTools.lastUserPrompt as string).toMatch(/^\[ACK\]\n<system-reminder>/)
 
     const trailingToolUseWithTools = await prepareFreshSession(
       [
@@ -968,14 +975,15 @@ describe("prepareFreshSession", () => {
     expect(trailingToolUseWithTools.lastUserPrompt).toContain(
       "If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet."
     )
+    expect(trailingToolUseWithTools.lastUserPrompt as string).toMatch(/^\[ACK\]\n<system-reminder>/)
 
-    // hasOtherTools without outputFormat → still the plain "continue" sentinel.
+    // hasOtherTools without outputFormat → still the plain `[ACK]` sentinel.
     const noOutputFormat = await prepareFreshSession(
       [{ role: "user", content: "hi" }],
       "/p",
       { hasOtherTools: true }
     )
-    expect(noOutputFormat.lastUserPrompt).toBe("continue")
+    expect(noOutputFormat.lastUserPrompt).toBe("[ACK]")
   })
 
   it("generates a valid UUIDv4 session id", async () => {

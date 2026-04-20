@@ -214,9 +214,9 @@ describe("Phase 3: Tool result in follow-up requests", () => {
 
     // Balanced slicing: trailing assistant has unresolved tool_use, so the
     // tool_result user is written into the JSONL (along with a synthetic
-    // assistant closer) and the SDK prompt becomes "continue".
+    // `[HEARTBEAT]` assistant closer) and the SDK prompt becomes `[ACK]`.
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("continue")
+    expect(promptText).toBe("[ACK]")
     // A fresh session UUID is generated (resume points to the written jsonl).
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
@@ -249,10 +249,10 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     }))
     await response.json()
 
-    // Both tool_results live in the JSONL transcript; prompt is the
-    // continue sentinel (balanced slicing).
+    // Both tool_results live in the JSONL transcript; prompt is the `[ACK]`
+    // infrastructure signal (balanced slicing).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("continue")
+    expect(promptText).toBe("[ACK]")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 
@@ -284,7 +284,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
 
     // Error tool_result also goes through balanced slicing into the JSONL.
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("continue")
+    expect(promptText).toBe("[ACK]")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

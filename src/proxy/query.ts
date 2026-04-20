@@ -9,6 +9,7 @@ import type { AgentAdapter } from "./adapter"
 import type { Options, SdkBeta } from "@anthropic-ai/claude-agent-sdk"
 import { createOpencodeMcpServer } from "../mcpTools"
 import { createPassthroughMcpServer, PASSTHROUGH_MCP_NAME } from "./passthroughTools"
+import { HEARTBEAT_SIGNAL_INSTRUCTION } from "./session/transcript"
 
 export interface QueryContext {
   /** The prompt to send (text or async iterable for multimodal) */
@@ -117,11 +118,16 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...(stream ? { includePartialMessages: true } : {}),
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...(systemContext ? {
-        systemPrompt: (passthrough || ctx.useBuiltinWebSearch)
-          ? systemContext
-          : { type: "preset" as const, preset: "claude_code" as const, append: systemContext }
-      } : {}),
+      // Always surface HEARTBEAT_SIGNAL_INSTRUCTION so the model knows to
+      // ignore the synthetic `[HEARTBEAT]`/`[ACK]` pair whenever it appears
+      // in JSONL history (classic mode accumulates them across resumes;
+      // ephemeral mode emits them on the turn that takes a synthetic-tail
+      // path). The instruction is a no-op in turns that don't see the
+      // tokens, so unconditional attachment decouples transcript decisions
+      // from system-prompt construction.
+      systemPrompt: (passthrough || ctx.useBuiltinWebSearch)
+        ? (systemContext ? `${systemContext}\n\n${HEARTBEAT_SIGNAL_INSTRUCTION}` : HEARTBEAT_SIGNAL_INSTRUCTION)
+        : { type: "preset" as const, preset: "claude_code" as const, append: systemContext ? `${systemContext}\n\n${HEARTBEAT_SIGNAL_INSTRUCTION}` : HEARTBEAT_SIGNAL_INSTRUCTION },
       ...(effort ? { effort } : {}),
       ...(passthrough
         ? {
