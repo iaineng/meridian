@@ -253,7 +253,7 @@ describe("JSONL-backed fresh session", () => {
     ])
     // Tool-result payload is crEncoded (matches user content encoding).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("proceed")
+    expect(promptText).toBe("continue")
   })
 
   it("wraps a trailing assistant history with the prefill directive as prompt", async () => {

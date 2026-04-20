@@ -872,10 +872,10 @@ describe("prepareFreshSession", () => {
   it("writes a JSONL with user + synthetic-assistant for a lone user message", async () => {
     const r = await prepareFreshSession([{ role: "user", content: "hi" }], "/p")
     expect(r.wroteTranscript).toBe(true)
-    // Lone-user case: prompt is a bare "proceed" token — short enough that
+    // Lone-user case: prompt is a bare "continue" token — short enough that
     // the model doesn't fixate on the directive itself and falls through to
     // responding based on the JSONL history.
-    expect(r.lastUserPrompt).toBe("proceed")
+    expect(r.lastUserPrompt).toBe("continue")
     expect(r.sessionId).toMatch(UUID_RE)
     expect(r.messageUuids).toHaveLength(1)
     expect(r.messageUuids[0]).toMatch(UUID_RE)
@@ -975,7 +975,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { hasOtherTools: true }
     )
-    expect(noOutputFormat.lastUserPrompt).toBe("proceed")
+    expect(noOutputFormat.lastUserPrompt).toBe("continue")
   })
 
   it("generates a valid UUIDv4 session id", async () => {

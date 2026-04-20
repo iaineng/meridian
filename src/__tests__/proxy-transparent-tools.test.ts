@@ -229,7 +229,7 @@ describe("Phase 2: Message format preservation", () => {
           }
           return out.join("")
         })()
-    expect(promptText).toBe("proceed")
+    expect(promptText).toBe("continue")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

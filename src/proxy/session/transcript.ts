@@ -153,15 +153,15 @@ const PREFILL_CONTINUE_PROMPT = wrapSystemReminder("Resume output starting at th
 // Synthetic-tail prompts: when a SYNTHETIC_CONTINUE_TEXT row is appended to
 // the JSONL tail (tool_result path or lone-user path), keep the prompt as
 // short as possible. Testing showed longer directives caused the model to
-// fixate on the prompt itself; a bare "proceed" token reliably nudges it
+// fixate on the prompt itself; a bare "continue" token reliably nudges it
 // to continue from the real content above without meta-analysis, and since
 // it stays unwrapped it reads as a lightweight hint rather than a visible
 // system injection. The DEFAULT_CONTINUE_PROMPT fallback is effectively a
 // dead branch (reachable only when n === 0, which short-circuits earlier),
 // but we keep it as a single source for the same minimal nudge.
-const TOOL_RESULT_CONTINUE_PROMPT = "proceed"
-const USER_MESSAGE_CONTINUE_PROMPT = "proceed"
-const DEFAULT_CONTINUE_PROMPT = "proceed"
+const TOOL_RESULT_CONTINUE_PROMPT = "continue"
+const USER_MESSAGE_CONTINUE_PROMPT = "continue"
+const DEFAULT_CONTINUE_PROMPT = "continue"
 
 // StructuredOutput terminators: when the caller has registered a
 // StructuredOutput tool and needs the response shaped through it, force the
