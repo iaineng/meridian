@@ -9,7 +9,7 @@
  * open (background writebacks, lingering fd close) for a short interval after
  * the proxy's async iterable completes and `cleanupEphemeral` runs. Reusing
  * the id immediately could race an in-flight SDK write against the next
- * request's `fs.writeFile`. Ten seconds is well beyond the SDK's normal
+ * request's `fs.writeFile`. Three seconds is well beyond the SDK's normal
  * teardown window while still bounding the pool's effective size.
  *
  * Used only when MERIDIAN_EPHEMERAL_JSONL is enabled; in all other modes
@@ -17,7 +17,7 @@
  */
 import { randomUUID } from "node:crypto"
 
-const DEFAULT_REUSE_DELAY_MS = 10_000
+const DEFAULT_REUSE_DELAY_MS = 3_000
 
 class EphemeralSessionIdPool {
   private available: string[] = []
