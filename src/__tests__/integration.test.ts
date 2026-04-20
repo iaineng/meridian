@@ -214,7 +214,7 @@ describe("Integration: Full Anthropic API tool loop", () => {
     // a "continue" sentinel that triggers generation on the balanced history.
     expect(typeof capturedQueryParams.options.resume).toBe("string")
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("<runtime-directive>Respond based on the tool result above.</runtime-directive>")
+    expect(promptText).toBe("proceed")
   })
 })
 

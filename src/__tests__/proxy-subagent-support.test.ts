@@ -216,7 +216,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     // tool_result user is written into the JSONL (along with a synthetic
     // assistant closer) and the SDK prompt becomes "continue".
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("<runtime-directive>Respond based on the tool result above.</runtime-directive>")
+    expect(promptText).toBe("proceed")
     // A fresh session UUID is generated (resume points to the written jsonl).
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
@@ -252,7 +252,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     // Both tool_results live in the JSONL transcript; prompt is the
     // continue sentinel (balanced slicing).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("<runtime-directive>Respond based on the tool result above.</runtime-directive>")
+    expect(promptText).toBe("proceed")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 
@@ -284,7 +284,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
 
     // Error tool_result also goes through balanced slicing into the JSONL.
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("<runtime-directive>Respond based on the tool result above.</runtime-directive>")
+    expect(promptText).toBe("proceed")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

@@ -127,22 +127,20 @@ export function getProjectSessionPath(cwd: string, sessionId: string): string {
 
 const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
 // Minimal placeholder — its only job is to make the JSONL end on an
-// assistant turn so the caller's "Continue." prompt opens a clean user
-// turn. "..." tokenizes to 1 token and semantically signals a truncated
-// response, pairing naturally with the "Continue." prompt so the model
-// doesn't misread the synthetic turn as a genuine minimal reply.
-const SYNTHETIC_CONTINUE_TEXT = "..."
+// assistant turn so the caller's continue prompt opens a clean user turn.
+// A single "." tokenizes to 1 token and is semantically inert, minimizing
+// the chance the model reads it as a meaningful truncated reply.
+const SYNTHETIC_CONTINUE_TEXT = "."
 
 // Runtime directive wrapper: the SDK forces us to send proxy-generated
-// prompts (prefill, continue sentinels, StructuredOutput terminators) as
-// ordinary user turns. When the transcript is later fed to a summarizer or
-// title-generator, those turns look indistinguishable from real user input
-// and leak into the output. Wrapping each injected prompt with a dedicated
-// XML tag lets downstream readers mechanically skip them while leaving the
-// current model's instruction-following unchanged (the directive text inside
-// still drives this turn's response).
-function wrapRuntimeDirective(text: string): string {
-  return `<runtime-directive>${text}</runtime-directive>`
+// prompts (prefill, StructuredOutput terminators) as ordinary user turns.
+// When the transcript is later fed to a summarizer or title-generator,
+// those turns look indistinguishable from real user input and leak into
+// the output. Wrapping each injected prompt with a <system-reminder> tag
+// lets downstream readers mechanically skip them while leaving the current
+// model's instruction-following unchanged.
+function wrapSystemReminder(text: string): string {
+  return `<system-reminder>${text}</system-reminder>`
 }
 
 // Prefill path: when the client's last message is an assistant turn, treat
@@ -150,16 +148,20 @@ function wrapRuntimeDirective(text: string): string {
 // to send a new user turn as the prompt, so we instruct the model to resume
 // from the exact character where its previous turn ended, suppressing any
 // preamble that would corrupt the stitched output.
-const PREFILL_CONTINUE_PROMPT = wrapRuntimeDirective("Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.")
+const PREFILL_CONTINUE_PROMPT = wrapSystemReminder("Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.")
 
-// Synthetic-tail prompts: when a SYNTHETIC_CONTINUE_TEXT ("...") row is
-// appended to the JSONL tail (tool_result path or lone-user path), the model
-// can misread "..." as its own truncated output. Rather than negatively
-// instructing the model to ignore the placeholder (which pulls its attention
-// to the very concept we want it to skip), we positively redirect it to the
-// real content by pointing at the tool result or user message directly.
-const TOOL_RESULT_CONTINUE_PROMPT = wrapRuntimeDirective("Respond based on the tool result above.")
-const USER_MESSAGE_CONTINUE_PROMPT = wrapRuntimeDirective("Respond to the user's message above.")
+// Synthetic-tail prompts: when a SYNTHETIC_CONTINUE_TEXT row is appended to
+// the JSONL tail (tool_result path or lone-user path), keep the prompt as
+// short as possible. Testing showed longer directives caused the model to
+// fixate on the prompt itself; a bare "proceed" token reliably nudges it
+// to continue from the real content above without meta-analysis, and since
+// it stays unwrapped it reads as a lightweight hint rather than a visible
+// system injection. The DEFAULT_CONTINUE_PROMPT fallback is effectively a
+// dead branch (reachable only when n === 0, which short-circuits earlier),
+// but we keep it as a single source for the same minimal nudge.
+const TOOL_RESULT_CONTINUE_PROMPT = "proceed"
+const USER_MESSAGE_CONTINUE_PROMPT = "proceed"
+const DEFAULT_CONTINUE_PROMPT = "proceed"
 
 // StructuredOutput terminators: when the caller has registered a
 // StructuredOutput tool and needs the response shaped through it, force the
@@ -167,8 +169,8 @@ const USER_MESSAGE_CONTINUE_PROMPT = wrapRuntimeDirective("Respond to the user's
 // tool is available this turn (the only valid action is StructuredOutput);
 // the conditional variant defers to the model's judgment when other tools
 // are registered and a further tool round may still be needed.
-const STRUCTURED_OUTPUT_STRICT_PROMPT = wrapRuntimeDirective("Call the StructuredOutput tool immediately. Your entire response this turn MUST be exactly one StructuredOutput tool call — no preceding text, no trailing text, no reasoning output, no other tool calls. Invoke StructuredOutput now with the final structured result.")
-const STRUCTURED_OUTPUT_CONDITIONAL_PROMPT = wrapRuntimeDirective("If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet.")
+const STRUCTURED_OUTPUT_STRICT_PROMPT = wrapSystemReminder("Call the StructuredOutput tool immediately. Your entire response this turn MUST be exactly one StructuredOutput tool call — no preceding text, no trailing text, no reasoning output, no other tool calls. Invoke StructuredOutput now with the final structured result.")
+const STRUCTURED_OUTPUT_CONDITIONAL_PROMPT = wrapSystemReminder("If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet.")
 
 export interface ClientUserBreakpoint {
   messageIndex: number
@@ -625,7 +627,7 @@ export async function prepareFreshSession(
   } else if (lastIsUser && includesLastUser) {
     continuePrompt = USER_MESSAGE_CONTINUE_PROMPT
   } else {
-    continuePrompt = wrapRuntimeDirective("continue")
+    continuePrompt = DEFAULT_CONTINUE_PROMPT
   }
   const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
     ? crEncodeUserContent(stripCacheControl(lastMsg!.content))

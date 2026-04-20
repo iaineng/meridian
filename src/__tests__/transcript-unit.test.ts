@@ -93,7 +93,7 @@ describe("buildJsonlLines", () => {
     expect(synthRow.type).toBe("assistant")
     expect(synthRow.parentUuid).toBe(userRow.uuid)
     expect(synthRow.message.content).toEqual([
-      { type: "text", text: "..." },
+      { type: "text", text: "." },
     ])
     // The lone user receives the JSONL history cache breakpoint so the
     // first call can establish prompt cache.
@@ -523,7 +523,7 @@ describe("buildJsonlLines", () => {
     expect(u1.type).toBe("user")
     expect(u2.type).toBe("user")
     expect(syntheticAssistant.type).toBe("assistant")
-    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "..." }])
+    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "." }])
     // u2's client cache_control position is mirrored, value normalized to 1h.
     expect(u2.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
     // u1 stays untouched.
@@ -872,11 +872,10 @@ describe("prepareFreshSession", () => {
   it("writes a JSONL with user + synthetic-assistant for a lone user message", async () => {
     const r = await prepareFreshSession([{ role: "user", content: "hi" }], "/p")
     expect(r.wroteTranscript).toBe(true)
-    // Lone-user case: prompt positively redirects the model to the real user
-    // message so the lone user row lives in the JSONL (where it gets the
-    // cache breakpoint) and the synthetic "..." placeholder does not pull
-    // the model's attention.
-    expect(r.lastUserPrompt).toBe("<runtime-directive>Respond to the user's message above.</runtime-directive>")
+    // Lone-user case: prompt is a bare "proceed" token — short enough that
+    // the model doesn't fixate on the directive itself and falls through to
+    // responding based on the JSONL history.
+    expect(r.lastUserPrompt).toBe("proceed")
     expect(r.sessionId).toMatch(UUID_RE)
     expect(r.messageUuids).toHaveLength(1)
     expect(r.messageUuids[0]).toMatch(UUID_RE)
@@ -904,7 +903,7 @@ describe("prepareFreshSession", () => {
       "/p"
     )
     expect(r.wroteTranscript).toBe(true)
-    expect(r.lastUserPrompt).toBe("<runtime-directive>Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.</runtime-directive>")
+    expect(r.lastUserPrompt).toBe("<system-reminder>Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.</system-reminder>")
     // All N messages written: messageUuids has no trailing null
     expect(r.messageUuids.every(u => u !== null)).toBe(true)
   })
@@ -976,7 +975,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { hasOtherTools: true }
     )
-    expect(noOutputFormat.lastUserPrompt).toBe("<runtime-directive>Respond to the user's message above.</runtime-directive>")
+    expect(noOutputFormat.lastUserPrompt).toBe("proceed")
   })
 
   it("generates a valid UUIDv4 session id", async () => {
