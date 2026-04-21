@@ -230,7 +230,7 @@ describe("Phase 2: Message format preservation", () => {
           }
           return out.join("")
         })()
-    expect(promptText).toBe("Yes, keep going. Make sure you have everything you need before giving your final answer. Be thorough and accurate, this is important to me.")
+    expect(promptText).toBe("Proceed as appropriate.")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

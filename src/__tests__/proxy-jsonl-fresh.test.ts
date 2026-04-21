@@ -249,11 +249,11 @@ describe("JSONL-backed fresh session", () => {
     const syntheticAssistantLine = lines[4]!
     expect(syntheticAssistantLine.type).toBe("assistant")
     expect(syntheticAssistantLine.message.content).toEqual([
-      { type: "text", text: "Noted. Let me assess what I have so far and determine the best next step." },
+      { type: "text", text: "One moment." },
     ])
     // Tool-result payload is crEncoded (matches user content encoding).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Yes, keep going. Make sure you have everything you need before giving your final answer. Be thorough and accurate, this is important to me.")
+    expect(promptText).toBe("Proceed as appropriate.")
   })
 
   it("wraps a trailing assistant history with the prefill directive as prompt", async () => {
@@ -411,7 +411,7 @@ describe("JSONL-backed fresh session", () => {
       const syntheticAssistantLine = lines[4]!
       expect(syntheticAssistantLine.type).toBe("assistant")
       expect(syntheticAssistantLine.message.content).toEqual([
-        { type: "text", text: "Noted. Let me assess what I have so far and determine the best next step." },
+        { type: "text", text: "One moment." },
       ])
     } finally {
       if (originalPassthrough === undefined) delete process.env.MERIDIAN_PASSTHROUGH

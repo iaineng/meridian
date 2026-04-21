@@ -127,20 +127,20 @@ export function getProjectSessionPath(cwd: string, sessionId: string): string {
 
 const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
 
-// EmotionPrompt fillers: each synthetic-tail path emits a paired
-// (assistant, user) turn whose text reads like natural agent self-dialogue
-// + a user nudge, rather than empty placeholder tokens. The texts are
-// constant string literals so the JSONL byte shape stays stable across
-// requests (Anthropic prompt-cache invariant). Two pairs are defined,
-// keyed by which synthetic path the request takes:
+// Synthetic-tail fillers: each synthetic-tail path emits a paired
+// (assistant, user) turn with minimal neutral continuation text rather
+// than empty placeholder tokens. The texts are constant string literals
+// so the JSONL byte shape stays stable across requests (Anthropic
+// prompt-cache invariant). Two pairs are defined, keyed by which
+// synthetic path the request takes:
 //   - tool_result: trailing assistant has unresolved tool_use; the
 //     synthetic pair sits between the tool_result we just wrote and the
 //     model's next reasoning turn.
 //   - user_message: trailing user lacks an anchoring assistant (lone user
 //     turn 1, or consecutive [u1, u2]); the pair sits between that user
 //     and the model's next reply.
-const TOOL_RESULT_FILLER_ASSISTANT_TEXT = "Noted. Let me assess what I have so far and determine the best next step."
-const USER_MESSAGE_FILLER_ASSISTANT_TEXT = "Let me think through this carefully and give you the best possible answer."
+const TOOL_RESULT_FILLER_ASSISTANT_TEXT = "One moment."
+const USER_MESSAGE_FILLER_ASSISTANT_TEXT = "One moment."
 
 // Runtime directive wrapper: the SDK forces us to send proxy-generated
 // prompts (prefill, StructuredOutput terminators) as ordinary user turns.
@@ -160,16 +160,15 @@ function wrapSystemReminder(text: string): string {
 // preamble that would corrupt the stitched output.
 const PREFILL_CONTINUE_PROMPT = wrapSystemReminder("Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.")
 
-// Synthetic-tail user prompts (the "user" half of each EmotionPrompt pair).
-// Sent as the SDK prompt on the turn that emits a synthetic assistant tail.
-// Intentionally unwrapped — they read like a real user nudge encouraging
-// thoroughness/care, leveraging the emotional-prompting effect rather than
-// a directive system injection. The DEFAULT_CONTINUE_PROMPT fallback is
-// effectively a dead branch (reachable only when n === 0, which short-
-// circuits earlier), but we keep it as a single source aliased to the
-// user_message variant.
-const TOOL_RESULT_CONTINUE_PROMPT = "Yes, keep going. Make sure you have everything you need before giving your final answer. Be thorough and accurate, this is important to me."
-const USER_MESSAGE_CONTINUE_PROMPT = "Take your time and think step by step. This is important to me, please be accurate and thorough."
+// Synthetic-tail user prompts (the "user" half of each filler pair).
+// Sent as the SDK prompt on the turn that emits a synthetic assistant
+// tail. Intentionally unwrapped — short neutral continuation phrases
+// that read like an ordinary user turn rather than a directive system
+// injection. The DEFAULT_CONTINUE_PROMPT fallback is effectively a dead
+// branch (reachable only when n === 0, which short-circuits earlier),
+// but we keep it as a single source aliased to the user_message variant.
+const TOOL_RESULT_CONTINUE_PROMPT = "Proceed as appropriate."
+const USER_MESSAGE_CONTINUE_PROMPT = "Continue."
 const DEFAULT_CONTINUE_PROMPT = USER_MESSAGE_CONTINUE_PROMPT
 
 // StructuredOutput terminators: when the caller has registered a
@@ -620,7 +619,7 @@ export async function prepareFreshSession(
   //
   // When outputFormat is enabled AND we are on the synthetic path, the
   // caller is waiting for a StructuredOutput tool call — so replace the
-  // EmotionPrompt continuation with an explicit directive that forces the
+  // neutral continuation prompt with an explicit directive that forces the
   // model to terminate via StructuredOutput rather than plain text.
   //
   // If other tools (custom tools or web_search) are also registered, the

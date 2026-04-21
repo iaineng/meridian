@@ -93,7 +93,7 @@ describe("buildJsonlLines", () => {
     expect(synthRow.type).toBe("assistant")
     expect(synthRow.parentUuid).toBe(userRow.uuid)
     expect(synthRow.message.content).toEqual([
-      { type: "text", text: "Let me think through this carefully and give you the best possible answer." },
+      { type: "text", text: "One moment." },
     ])
     // The lone user receives the JSONL history cache breakpoint so the
     // first call can establish prompt cache.
@@ -523,7 +523,7 @@ describe("buildJsonlLines", () => {
     expect(u1.type).toBe("user")
     expect(u2.type).toBe("user")
     expect(syntheticAssistant.type).toBe("assistant")
-    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "Let me think through this carefully and give you the best possible answer." }])
+    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "One moment." }])
     // u2's client cache_control position is mirrored, value normalized to 1h.
     expect(u2.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
     // u1 stays untouched.
@@ -872,11 +872,9 @@ describe("prepareFreshSession", () => {
   it("writes a JSONL with user + synthetic-assistant for a lone user message", async () => {
     const r = await prepareFreshSession([{ role: "user", content: "hi" }], "/p")
     expect(r.wroteTranscript).toBe(true)
-    // Lone-user case: prompt is the user_message EmotionPrompt user-nudge,
+    // Lone-user case: prompt is the user_message synthetic-tail user prompt,
     // paired with the matching synthetic assistant filler in the JSONL above.
-    // The text reads as a natural "take your time" nudge rather than a
-    // visible system injection.
-    expect(r.lastUserPrompt).toBe("Take your time and think step by step. This is important to me, please be accurate and thorough.")
+    expect(r.lastUserPrompt).toBe("Continue.")
     expect(r.sessionId).toMatch(UUID_RE)
     expect(r.messageUuids).toHaveLength(1)
     expect(r.messageUuids[0]).toMatch(UUID_RE)
@@ -975,13 +973,13 @@ describe("prepareFreshSession", () => {
     expect(trailingToolUseWithTools.lastUserPrompt as string).toMatch(/^<system-reminder>/)
 
     // hasOtherTools without outputFormat → still the plain user_message
-    // EmotionPrompt user-nudge.
+    // synthetic-tail user prompt.
     const noOutputFormat = await prepareFreshSession(
       [{ role: "user", content: "hi" }],
       "/p",
       { hasOtherTools: true }
     )
-    expect(noOutputFormat.lastUserPrompt).toBe("Take your time and think step by step. This is important to me, please be accurate and thorough.")
+    expect(noOutputFormat.lastUserPrompt).toBe("Continue.")
   })
 
   it("generates a valid UUIDv4 session id", async () => {
