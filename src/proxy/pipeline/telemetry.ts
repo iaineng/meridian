@@ -25,6 +25,12 @@ export interface RequestTelemetryContext {
   adapterName: string
 }
 
+// Proxy overhead = time inside the handler *before* the upstream SDK call
+// begins. `requestStartAt` is captured inside `handleMessages`, which runs
+// only after `acquireSession()` resolves, so queue wait is already excluded
+// from `upstreamStartAt - requestStartAt` — subtracting it again was the
+// previous bug that produced large negative values under queue saturation.
+
 export interface RecordSuccessInput {
   mode: "stream" | "non-stream"
   upstreamStartAt: number
@@ -67,7 +73,7 @@ export function recordRequestSuccess(
     sdkSessionId: input.sdkSessionId,
     status: 200,
     queueWaitMs,
-    proxyOverheadMs: input.upstreamStartAt - ctx.requestStartAt - queueWaitMs,
+    proxyOverheadMs: Math.max(0, input.upstreamStartAt - ctx.requestStartAt),
     ttfbMs: input.firstChunkAt ? input.firstChunkAt - input.upstreamStartAt : null,
     upstreamDurationMs: now - input.upstreamStartAt,
     totalDurationMs: now - ctx.requestStartAt,
@@ -103,7 +109,9 @@ export function recordRequestError(
     sdkSessionId: undefined,
     status: classified.status,
     queueWaitMs,
-    proxyOverheadMs: now - ctx.requestStartAt - queueWaitMs,
+    // Error path never reaches `upstreamStartAt`; treat the full in-handler
+    // duration as proxy overhead. `queueWaitMs` is tracked separately.
+    proxyOverheadMs: Math.max(0, now - ctx.requestStartAt),
     ttfbMs: null,
     upstreamDurationMs: now - ctx.requestStartAt,
     totalDurationMs: now - ctx.requestStartAt,
