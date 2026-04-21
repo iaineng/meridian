@@ -38,6 +38,9 @@ else
   systemctl start docker
 
   echo "  Docker installed: $(docker --version)"
+
+  # Brief cooldown to let the Docker service settle before the next step
+  sleep 1
 fi
 
 echo ""
