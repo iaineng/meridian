@@ -51,6 +51,7 @@ src/
 │   │   ├── executor.ts        ← SDK query with retry loop; runNonStream + runStream
 │   │   └── telemetry.ts       ← Per-request success/error metric emission
 │   ├── query.ts               ← SDK query options builder (shared between stream/non-stream paths)
+│   ├── concurrency.ts         ← FIFO session gate (`createConcurrencyGate`); `max<=0` disables the queue
 │   ├── errors.ts              ← Error classification (SDK errors → HTTP responses)
 │   ├── models.ts              ← Model mapping, Claude executable resolution
 │   ├── tools.ts               ← Tool blocking lists, MCP server name, allowed tools

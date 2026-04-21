@@ -377,7 +377,7 @@ start_quiet() {
     export MERIDIAN_PASSTHROUGH=1
     export MERIDIAN_HOST=0.0.0.0
     export MERIDIAN_PORT=3456
-    export MERIDIAN_MAX_CONCURRENT=10
+    export MERIDIAN_MAX_CONCURRENT=-1
     export MERIDIAN_NO_FILE_CHANGES=1
     export MERIDIAN_OBFUSCATION=cr
     export MERIDIAN_BETA_POLICY=strip-all

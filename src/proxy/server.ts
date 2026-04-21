@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server"
 import type { Server } from "node:http"
 import type { Context } from "hono"
 import { DEFAULT_PROXY_CONFIG } from "./types"
-import { envBool } from "../env"
+import { envBool, envInt } from "../env"
 import type { ProxyConfig, ProxyInstance, ProxyServer } from "./types"
 export type { ProxyConfig, ProxyInstance, ProxyServer }
 import { claudeLog, withClaudeLogContext } from "../logger"
@@ -14,6 +14,7 @@ import { join } from "node:path"
 import { randomUUID } from "crypto"
 
 import { diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
+import { createConcurrencyGate } from "./concurrency"
 import { classifyError } from "./errors"
 import { refreshOAuthToken } from "./tokenRefresh"
 import { checkPluginConfigured } from "./setup"
@@ -79,28 +80,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   // --- Concurrency Control ---
   // Each request spawns an SDK subprocess (cli.js, ~11MB). Spawning multiple
   // simultaneously can crash the process. Serialize SDK queries with a queue.
-  const MAX_CONCURRENT_SESSIONS = parseInt((process.env.MERIDIAN_MAX_CONCURRENT ?? process.env.CLAUDE_PROXY_MAX_CONCURRENT) || "10", 10)
-  let activeSessions = 0
-  const sessionQueue: Array<{ resolve: () => void }> = []
-
-  async function acquireSession(): Promise<void> {
-    if (activeSessions < MAX_CONCURRENT_SESSIONS) {
-      activeSessions++
-      return
-    }
-    return new Promise<void>((resolve) => {
-      sessionQueue.push({ resolve })
-    })
-  }
-
-  function releaseSession(): void {
-    activeSessions--
-    const next = sessionQueue.shift()
-    if (next) {
-      activeSessions++
-      next.resolve()
-    }
-  }
+  //
+  // Setting MERIDIAN_MAX_CONCURRENT=0 (or any value <= 0) disables the queue
+  // entirely — every request proceeds immediately. Use with caution: a flood
+  // of simultaneous SDK subprocesses can OOM the host. The counter is still
+  // maintained for the telemetry log line.
+  const sessionGate = createConcurrencyGate(envInt("MAX_CONCURRENT", 10))
 
   const handleMessages = async (
     c: Context,
@@ -140,7 +125,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           return `${m.role}[${contentTypes}]`
         }).join(" → ")
         const msgCount = Array.isArray(body.messages) ? body.messages.length : 0
-        const requestLogLine = `${requestMeta.requestId} adapter=${adapter.name} model=${shared.model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""}${agentMode ? ` agent=${agentMode}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
+        const requestLogLine = `${requestMeta.requestId} adapter=${adapter.name} model=${shared.model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""}${agentMode ? ` agent=${agentMode}` : ""} active=${sessionGate.active}/${sessionGate.unlimited ? "∞" : sessionGate.max} msgCount=${msgCount}`
         console.error(`[PROXY] ${requestLogLine} msgs=${msgSummary}`)
         diagnosticLog.session(`${requestLogLine}`, requestMeta.requestId)
 
@@ -230,12 +215,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     const requestId = c.req.header("x-request-id") || randomUUID()
     const queueEnteredAt = Date.now()
     claudeLog("request.enter", { requestId, endpoint })
-    await acquireSession()
+    await sessionGate.acquire()
     const queueStartedAt = Date.now()
     try {
       return await handleMessages(c, { requestId, endpoint, queueEnteredAt, queueStartedAt })
     } finally {
-      releaseSession()
+      sessionGate.release()
     }
   }
 
