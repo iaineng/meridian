@@ -126,14 +126,21 @@ export function getProjectSessionPath(cwd: string, sessionId: string): string {
 }
 
 const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
-// Infrastructure heartbeat signal emitted as the synthetic assistant tail when
-// the JSONL needs to end on an assistant turn (tool_result path, lone-user,
-// consecutive users). Paired with `[ACK]` on the caller's prompt side. The
-// system prompt carries HEARTBEAT_SIGNAL_INSTRUCTION telling the model to
-// treat both tokens as infrastructure signals and ignore them when generating
-// the next turn — so the model responds based on the real JSONL history above
-// rather than interpreting the synthetic pair as conversational content.
-const SYNTHETIC_HEARTBEAT_TEXT = "[HEARTBEAT]"
+
+// EmotionPrompt fillers: each synthetic-tail path emits a paired
+// (assistant, user) turn whose text reads like natural agent self-dialogue
+// + a user nudge, rather than empty placeholder tokens. The texts are
+// constant string literals so the JSONL byte shape stays stable across
+// requests (Anthropic prompt-cache invariant). Two pairs are defined,
+// keyed by which synthetic path the request takes:
+//   - tool_result: trailing assistant has unresolved tool_use; the
+//     synthetic pair sits between the tool_result we just wrote and the
+//     model's next reasoning turn.
+//   - user_message: trailing user lacks an anchoring assistant (lone user
+//     turn 1, or consecutive [u1, u2]); the pair sits between that user
+//     and the model's next reply.
+const TOOL_RESULT_FILLER_ASSISTANT_TEXT = "Noted. Let me assess what I have so far and determine the best next step."
+const USER_MESSAGE_FILLER_ASSISTANT_TEXT = "Let me think through this carefully and give you the best possible answer."
 
 // Runtime directive wrapper: the SDK forces us to send proxy-generated
 // prompts (prefill, StructuredOutput terminators) as ordinary user turns.
@@ -153,17 +160,17 @@ function wrapSystemReminder(text: string): string {
 // preamble that would corrupt the stitched output.
 const PREFILL_CONTINUE_PROMPT = wrapSystemReminder("Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.")
 
-// Synthetic-tail prompts: when a SYNTHETIC_HEARTBEAT_TEXT row is appended to
-// the JSONL tail (tool_result path, lone-user path, consecutive-users path),
-// the caller's prompt is a bare `[ACK]` — the pair-matched acknowledgement
-// for the `[HEARTBEAT]` tail. The system prompt's HEARTBEAT_SIGNAL_INSTRUCTION
-// tells the model to treat both tokens as infrastructure signals and respond
-// based on the real JSONL history above. The DEFAULT_ACK_PROMPT fallback is
-// effectively a dead branch (reachable only when n === 0, which short-circuits
-// earlier), but we keep it as a single source for the same minimal signal.
-const TOOL_RESULT_ACK_PROMPT = "[ACK]"
-const USER_MESSAGE_ACK_PROMPT = "[ACK]"
-const DEFAULT_ACK_PROMPT = "[ACK]"
+// Synthetic-tail user prompts (the "user" half of each EmotionPrompt pair).
+// Sent as the SDK prompt on the turn that emits a synthetic assistant tail.
+// Intentionally unwrapped — they read like a real user nudge encouraging
+// thoroughness/care, leveraging the emotional-prompting effect rather than
+// a directive system injection. The DEFAULT_CONTINUE_PROMPT fallback is
+// effectively a dead branch (reachable only when n === 0, which short-
+// circuits earlier), but we keep it as a single source aliased to the
+// user_message variant.
+const TOOL_RESULT_CONTINUE_PROMPT = "Yes, keep going. Make sure you have everything you need before giving your final answer. Be thorough and accurate, this is important to me."
+const USER_MESSAGE_CONTINUE_PROMPT = "Take your time and think step by step. This is important to me, please be accurate and thorough."
+const DEFAULT_CONTINUE_PROMPT = USER_MESSAGE_CONTINUE_PROMPT
 
 // StructuredOutput terminators: when the caller has registered a
 // StructuredOutput tool and needs the response shaped through it, force the
@@ -171,21 +178,8 @@ const DEFAULT_ACK_PROMPT = "[ACK]"
 // tool is available this turn (the only valid action is StructuredOutput);
 // the conditional variant defers to the model's judgment when other tools
 // are registered and a further tool round may still be needed.
-//
-// These are "non-empty" synthetic turns — the `[ACK]` pairs with the
-// `[HEARTBEAT]` tail, and the real directive rides in a trailing
-// <system-reminder> block. A newline between `[ACK]` and the reminder keeps
-// the infrastructure signal tokenized separately from the directive payload.
-const STRUCTURED_OUTPUT_STRICT_PROMPT = `[ACK]\n${wrapSystemReminder("Call the StructuredOutput tool immediately. Your entire response this turn MUST be exactly one StructuredOutput tool call — no preceding text, no trailing text, no reasoning output, no other tool calls. Invoke StructuredOutput now with the final structured result.")}`
-const STRUCTURED_OUTPUT_CONDITIONAL_PROMPT = `[ACK]\n${wrapSystemReminder("If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet.")}`
-
-// System-prompt instruction appended unconditionally by query.ts so the model
-// knows to ignore `[HEARTBEAT]`/`[ACK]` infrastructure signals whenever they
-// appear in JSONL history. See query.ts for the rationale behind unconditional
-// attachment (classic-mode accumulation + ephemeral-mode one-shot injection
-// + trivial token cost + decoupling transcript decisions from system-prompt
-// construction).
-export const HEARTBEAT_SIGNAL_INSTRUCTION = "[HEARTBEAT] and [ACK] are infrastructure signals. Ignore them entirely and respond as if the conversation continued normally without them."
+const STRUCTURED_OUTPUT_STRICT_PROMPT = wrapSystemReminder("Call the StructuredOutput tool immediately. Your entire response this turn MUST be exactly one StructuredOutput tool call — no preceding text, no trailing text, no reasoning output, no other tool calls. Invoke StructuredOutput now with the final structured result.")
+const STRUCTURED_OUTPUT_CONDITIONAL_PROMPT = wrapSystemReminder("If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet.")
 
 export interface ClientUserBreakpoint {
   messageIndex: number
@@ -435,7 +429,7 @@ export function buildJsonlLines(
     return { lines: [], messageUuids }
   }
 
-  const { lastIsUser, includesLastUser } = classifyContinuation(messages)
+  const { lastIsUser, hasTrailingToolUse, includesLastUser } = classifyContinuation(messages)
   const sliceEnd = (lastIsUser && !includesLastUser) ? n - 1 : n
 
   if (sliceEnd === 0) {
@@ -496,8 +490,11 @@ export function buildJsonlLines(
   //      preceding user row, enabling first-call cache establishment.
   if (lastIsUser && includesLastUser) {
     const uuid = randomUUID()
+    const syntheticText = hasTrailingToolUse
+      ? TOOL_RESULT_FILLER_ASSISTANT_TEXT
+      : USER_MESSAGE_FILLER_ASSISTANT_TEXT
     const syntheticAssistant = wrapAssistantMessage(
-      [{ type: "text", text: SYNTHETIC_HEARTBEAT_TEXT }],
+      [{ type: "text", text: syntheticText }],
       model
     )
     transcriptRows.push({
@@ -623,7 +620,7 @@ export async function prepareFreshSession(
   //
   // When outputFormat is enabled AND we are on the synthetic path, the
   // caller is waiting for a StructuredOutput tool call — so replace the
-  // plain "continue" sentinel with an explicit directive that forces the
+  // EmotionPrompt continuation with an explicit directive that forces the
   // model to terminate via StructuredOutput rather than plain text.
   //
   // If other tools (custom tools or web_search) are also registered, the
@@ -638,11 +635,11 @@ export async function prepareFreshSession(
       ? STRUCTURED_OUTPUT_CONDITIONAL_PROMPT
       : STRUCTURED_OUTPUT_STRICT_PROMPT
   } else if (hasTrailingToolUse) {
-    continuePrompt = TOOL_RESULT_ACK_PROMPT
+    continuePrompt = TOOL_RESULT_CONTINUE_PROMPT
   } else if (lastIsUser && includesLastUser) {
-    continuePrompt = USER_MESSAGE_ACK_PROMPT
+    continuePrompt = USER_MESSAGE_CONTINUE_PROMPT
   } else {
-    continuePrompt = DEFAULT_ACK_PROMPT
+    continuePrompt = DEFAULT_CONTINUE_PROMPT
   }
   const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
     ? crEncodeUserContent(stripCacheControl(lastMsg!.content))

@@ -214,9 +214,10 @@ describe("Phase 3: Tool result in follow-up requests", () => {
 
     // Balanced slicing: trailing assistant has unresolved tool_use, so the
     // tool_result user is written into the JSONL (along with a synthetic
-    // `[HEARTBEAT]` assistant closer) and the SDK prompt becomes `[ACK]`.
+    // assistant closer) and the SDK prompt becomes the tool_result
+    // EmotionPrompt user-nudge.
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("[ACK]")
+    expect(promptText).toBe("Yes, keep going. Make sure you have everything you need before giving your final answer. Be thorough and accurate, this is important to me.")
     // A fresh session UUID is generated (resume points to the written jsonl).
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
@@ -249,10 +250,10 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     }))
     await response.json()
 
-    // Both tool_results live in the JSONL transcript; prompt is the `[ACK]`
-    // infrastructure signal (balanced slicing).
+    // Both tool_results live in the JSONL transcript; prompt is the
+    // tool_result EmotionPrompt user-nudge (balanced slicing).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("[ACK]")
+    expect(promptText).toBe("Yes, keep going. Make sure you have everything you need before giving your final answer. Be thorough and accurate, this is important to me.")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 
@@ -284,7 +285,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
 
     // Error tool_result also goes through balanced slicing into the JSONL.
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("[ACK]")
+    expect(promptText).toBe("Yes, keep going. Make sure you have everything you need before giving your final answer. Be thorough and accurate, this is important to me.")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })
