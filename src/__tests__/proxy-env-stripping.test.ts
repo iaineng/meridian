@@ -10,10 +10,14 @@
  */
 
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 // Capture the env passed to query()
 let capturedQueryOptions: any = null
 const savedEnv: Record<string, string | undefined> = {}
+let tmpHome: string = ""
 
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   query: (params: any) => {
@@ -68,14 +72,33 @@ const BASIC_REQUEST = {
   messages: [{ role: "user", content: "hello" }],
 }
 
+const OAUTH_ENV_KEYS = [
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_ACCOUNT_UUID",
+  "CLAUDE_CODE_USER_EMAIL",
+  "CLAUDE_CODE_ORGANIZATION_UUID",
+] as const
+
 describe("Environment variable stripping", () => {
   beforeEach(() => {
     capturedQueryOptions = null
     clearSessionCache()
     // Save current env
-    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"]) {
+    for (const key of [
+      "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+      "HOME", "USERPROFILE",
+      ...OAUTH_ENV_KEYS,
+    ]) {
       savedEnv[key] = process.env[key]
     }
+    // Isolate HOME so the OAuth env resolver can't pick up the runner's
+    // real ~/.claude.json. Also drop any parent CLAUDE_CODE_* the runner
+    // inherited so positive assertions below are deterministic.
+    tmpHome = mkdtempSync(join(tmpdir(), "meridian-env-strip-home-"))
+    process.env.HOME = tmpHome
+    process.env.USERPROFILE = tmpHome
+    for (const k of OAUTH_ENV_KEYS) delete process.env[k]
   })
 
   afterEach(() => {
@@ -87,6 +110,7 @@ describe("Environment variable stripping", () => {
         process.env[key] = value
       }
     }
+    try { rmSync(tmpHome, { recursive: true, force: true }) } catch {}
   })
 
   it("should strip ANTHROPIC_API_KEY from subprocess env", async () => {
@@ -138,6 +162,19 @@ describe("Environment variable stripping", () => {
     const app = createTestApp()
     await post(app, BASIC_REQUEST)
     expect(capturedQueryOptions.env.ENABLE_TOOL_SEARCH).toBe("false")
+  })
+
+  it("should always set CLAUDE_CODE_ENTRYPOINT to local-agent", async () => {
+    const app = createTestApp()
+    await post(app, BASIC_REQUEST)
+    expect(capturedQueryOptions.env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
+  })
+
+  it("should strip parent CLAUDE_CODE_ENTRYPOINT=cli and override with local-agent", async () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli"
+    const app = createTestApp()
+    await post(app, BASIC_REQUEST)
+    expect(capturedQueryOptions.env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
   })
 
   it("should still strip CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", async () => {

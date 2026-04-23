@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { claudeLog } from "../../logger"
 import { buildQueryOptions } from "../query"
@@ -11,6 +12,11 @@ import {
   isExpiredTokenError,
 } from "../errors"
 import { refreshOAuthToken } from "../tokenRefresh"
+import {
+  resolveClaudeOauthEnv,
+  invalidateClaudeOauthEnvCache,
+  CLAUDE_OAUTH_ENV_KEYS,
+} from "../claudeOauthEnv"
 import {
   hasExtendedContext,
   stripExtendedContext,
@@ -108,33 +114,48 @@ async function* runSdkQueryWithRetry(
   let rateLimitRetries = 0
   let tokenRefreshed = false
 
-  const baseOpts = () => ({
-    model: shared.model,
-    workingDirectory,
-    systemContext,
-    claudeExecutable,
-    passthrough,
-    stream: true as const,
-    sdkAgents,
-    passthroughMcp,
-    cleanEnv: profileEnv,
-    sdkHooks,
-    adapter,
-    outputFormat,
-    thinking,
-    useBuiltinWebSearch,
-    maxOutputTokens: body.max_tokens,
-    onStderr,
-    effort,
-    taskBudget,
-    betas,
-  })
+  const baseOpts = async () => {
+    // Strip the 5 OAuth env keys from the parent-inherited env so a stale
+    // `CLAUDE_CODE_*` value (e.g. from the Meridian process itself being
+    // launched by Claude Code) can never leak into the subprocess. The
+    // resolver below re-supplies them for claude-max profiles; api profiles
+    // get none — intentional, since they authenticate via ANTHROPIC_API_KEY.
+    const strippedEnv: Record<string, string | undefined> = { ...profileEnv }
+    for (const k of CLAUDE_OAUTH_ENV_KEYS) delete strippedEnv[k]
+
+    const oauthEnv = shared.profile.type === "api"
+      ? {}
+      : await resolveClaudeOauthEnv({
+          configDir: shared.profile.env.CLAUDE_CONFIG_DIR ?? homedir(),
+        })
+    return {
+      model: shared.model,
+      workingDirectory,
+      systemContext,
+      claudeExecutable,
+      passthrough,
+      stream: true as const,
+      sdkAgents,
+      passthroughMcp,
+      cleanEnv: { ...strippedEnv, ...oauthEnv },
+      sdkHooks,
+      adapter,
+      outputFormat,
+      thinking,
+      useBuiltinWebSearch,
+      maxOutputTokens: body.max_tokens,
+      onStderr,
+      effort,
+      taskBudget,
+      betas,
+    }
+  }
 
   while (true) {
     let didYieldContent = false
     try {
       for await (const event of query(buildQueryOptions({
-        ...baseOpts(),
+        ...(await baseOpts()),
         prompt: makePrompt(),
         resumeSessionId: resumeSessionId ?? freshSessionId,
         isUndo,
@@ -156,7 +177,7 @@ async function* runSdkQueryWithRetry(
       if (isStaleSessionError(error) && callbacks.onStaleSession) {
         const retry = await callbacks.onStaleSession({ sdkUuidMap, mode })
         yield* query(buildQueryOptions({
-          ...baseOpts(),
+          ...(await baseOpts()),
           prompt: retry.prompt,
           resumeSessionId: retry.resumeSessionId,
           isUndo: false,
@@ -183,6 +204,9 @@ async function* runSdkQueryWithRetry(
         tokenRefreshed = true
         const refreshed = await refreshOAuthToken()
         if (refreshed) {
+          // Drop the cached OAuth env so the retry picks up the new access
+          // token instead of waiting for the 30s TTL to expire.
+          invalidateClaudeOauthEnvCache()
           claudeLog("token_refresh.retrying", { mode })
           console.error(`[PROXY] ${requestMeta.requestId} OAuth token expired — refreshed, retrying`)
           continue
