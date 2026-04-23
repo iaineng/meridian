@@ -119,7 +119,7 @@ export async function buildSharedContext(
   )
 
   const rawBetaHeader = c.req.header("anthropic-beta")
-  const model = resolveModel(body.model || "sonnet", rawBetaHeader)
+  const model = resolveModel(body.model || "sonnet")
   const agentMode = c.req.header("x-opencode-agent-mode") ?? null
   const outputFormat = body.output_config?.format
   if (outputFormat?.schema?.$schema) delete outputFormat.schema.$schema

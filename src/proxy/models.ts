@@ -29,66 +29,26 @@ let cachedAuthStatusIsFailure = false
 let cachedAuthStatusPromise: Promise<ClaudeAuthStatus | null> | null = null
 
 /**
- * Pass through the client model and append [1m] when:
- * - The model contains "opus-4-6" (always gets 1m context), or
- * - The anthropic-beta header contains a context-1m beta.
- * Skips [1m] during the cooldown window after a confirmed Extra Usage failure.
+ * Pass through the client model and append [1m] only for opus-4-6 / opus-4-7.
+ * Those are the only models whose 1M context is included with Max; every other
+ * model (including Sonnet 4.x) would require Extra Usage billing and is left
+ * at its base tier regardless of any context-1m beta the client announces.
  */
-export function resolveModel(model: string, rawBetaHeader?: string): string {
+export function resolveModel(model: string): string {
   if (model.includes("opus-4-6") || model.includes("opus-4-7")) return model + "[1m]"
-  if (isExtendedContextKnownUnavailable()) return model
-  if (rawBetaHeader && rawBetaHeader.includes("context-1m")) {
-    return model + "[1m]"
-  }
   return model
-}
-
-// ---------------------------------------------------------------------------
-// Extended context availability — time-based cooldown
-// ---------------------------------------------------------------------------
-
-/** How long to skip [1m] models after confirming Extra Usage is not enabled. */
-const EXTRA_USAGE_RETRY_MS = 60 * 60 * 1000 // 1 hour
-
-let extraUsageUnavailableAt = 0
-
-/**
- * Record that Extra Usage is not enabled on this subscription.
- * For the next hour, resolveModel will skip [1m] — no failed attempt
- * per request. After the cooldown the next request probes [1m] once;
- * if Extra Usage was enabled in the meantime it succeeds and the flag
- * is never set again.
- */
-export function recordExtendedContextUnavailable(): void {
-  extraUsageUnavailableAt = Date.now()
-}
-
-/**
- * Returns true while within the cooldown window after a confirmed
- * Extra Usage failure. After the window expires this returns false,
- * allowing one probe to check whether Extra Usage has been enabled.
- */
-export function isExtendedContextKnownUnavailable(): boolean {
-  return extraUsageUnavailableAt > 0 &&
-    Date.now() - extraUsageUnavailableAt < EXTRA_USAGE_RETRY_MS
-}
-
-/** Reset the Extended Context unavailability timer — for testing only. */
-export function resetExtendedContextUnavailable(): void {
-  extraUsageUnavailableAt = 0
 }
 
 /**
  * Strip the [1m] suffix from a model, returning the base variant.
- * Used for fallback when the 1M context window is rate-limited.
+ * Used by the executor to fall back when the 1M window is rate-limited
+ * or Extra Usage is not enabled on the account.
  */
 export function stripExtendedContext(model: string): string {
   return model.endsWith("[1m]") ? model.slice(0, -4) : model
 }
 
-/**
- * Check whether a model is using extended (1M) context.
- */
+/** Check whether a model is using extended (1M) context. */
 export function hasExtendedContext(model: string): boolean {
   return model.endsWith("[1m]")
 }

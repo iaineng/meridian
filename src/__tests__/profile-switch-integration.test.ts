@@ -38,7 +38,6 @@ mock.module("../proxy/models", () => ({
   hasExtendedContext: () => false,
   stripExtendedContext: (m: string) => m,
   isClosedControllerError: (e: unknown) => e instanceof Error && e.message.includes("controller is closed"),
-  recordExtendedContextUnavailable: () => {},
 }))
 
 const { createProxyServer } = await import("../proxy/server")

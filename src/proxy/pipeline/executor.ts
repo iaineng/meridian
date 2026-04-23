@@ -20,7 +20,6 @@ import {
 import {
   hasExtendedContext,
   stripExtendedContext,
-  recordExtendedContextUnavailable,
   isClosedControllerError,
 } from "../models"
 import { stripMcpPrefix, PASSTHROUGH_MCP_PREFIX } from "../passthroughTools"
@@ -189,14 +188,13 @@ async function* runSdkQueryWithRetry(
       if (isExtraUsageRequiredError(errMsg) && hasExtendedContext(shared.model)) {
         const from = shared.model
         shared.model = stripExtendedContext(shared.model)
-        recordExtendedContextUnavailable()
         claudeLog("upstream.context_fallback", {
           mode,
           from,
           to: shared.model,
           reason: "extra_usage_required",
         })
-        console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${shared.model} (skipping [1m] for 1h)`)
+        console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${shared.model}`)
         continue
       }
 

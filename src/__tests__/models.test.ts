@@ -1,79 +1,27 @@
 /**
  * Unit tests for model resolution and utility functions.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test"
-import { resolveModel, isClosedControllerError, stripExtendedContext, hasExtendedContext, recordExtendedContextUnavailable, isExtendedContextKnownUnavailable, resetExtendedContextUnavailable } from "../proxy/models"
+import { describe, it, expect } from "bun:test"
+import { resolveModel, isClosedControllerError, stripExtendedContext, hasExtendedContext } from "../proxy/models"
 
 describe("resolveModel", () => {
-  it("passes through model without beta header", () => {
+  it("passes through base aliases unchanged", () => {
     expect(resolveModel("claude-sonnet-4-6")).toBe("claude-sonnet-4-6")
     expect(resolveModel("sonnet")).toBe("sonnet")
     expect(resolveModel("haiku")).toBe("haiku")
+    expect(resolveModel("opus")).toBe("opus")
   })
 
-  it("always appends [1m] for opus-4-6 models regardless of beta header", () => {
+  it("appends [1m] for opus-4-6 and opus-4-7", () => {
     expect(resolveModel("claude-opus-4-6")).toBe("claude-opus-4-6[1m]")
-    expect(resolveModel("claude-opus-4-6", "prompt-caching-2024-07-31")).toBe("claude-opus-4-6[1m]")
-    expect(resolveModel("claude-opus-4-6", undefined)).toBe("claude-opus-4-6[1m]")
+    expect(resolveModel("claude-opus-4-7")).toBe("claude-opus-4-7[1m]")
   })
 
-  it("appends [1m] when context-1m beta is present", () => {
-    expect(resolveModel("sonnet", "context-1m-2025-08-07")).toBe("sonnet[1m]")
-    expect(resolveModel("opus", "context-1m-2025-08-07")).toBe("opus[1m]")
-    expect(resolveModel("claude-sonnet-4-6", "context-1m-2025-08-07")).toBe("claude-sonnet-4-6[1m]")
-  })
-
-  it("appends [1m] when context-1m is among multiple betas", () => {
-    expect(resolveModel("sonnet", "prompt-caching-2024-07-31,context-1m-2025-08-07")).toBe("sonnet[1m]")
-    expect(resolveModel("opus", "context-1m-2025-08-07, prompt-caching-2024-07-31")).toBe("opus[1m]")
-  })
-
-  it("does not append [1m] when context-1m beta is absent", () => {
-    expect(resolveModel("sonnet", "prompt-caching-2024-07-31")).toBe("sonnet")
-    expect(resolveModel("opus", "fine-grained-tool-streaming-2025-05-14")).toBe("opus")
-  })
-
-  it("does not append [1m] for empty or undefined beta header", () => {
-    expect(resolveModel("opus", "")).toBe("opus")
-    expect(resolveModel("opus", undefined)).toBe("opus")
-  })
-})
-
-describe("Extra Usage cooldown", () => {
-  beforeEach(() => resetExtendedContextUnavailable())
-  afterEach(() => resetExtendedContextUnavailable())
-
-  it("isExtendedContextKnownUnavailable is false by default", () => {
-    expect(isExtendedContextKnownUnavailable()).toBe(false)
-  })
-
-  it("isExtendedContextKnownUnavailable is true immediately after recording", () => {
-    recordExtendedContextUnavailable()
-    expect(isExtendedContextKnownUnavailable()).toBe(true)
-  })
-
-  it("resolveModel skips [1m] during cooldown even with context-1m beta", () => {
-    recordExtendedContextUnavailable()
-    expect(resolveModel("sonnet", "context-1m-2025-08-07")).toBe("sonnet")
-    expect(resolveModel("opus", "context-1m-2025-08-07")).toBe("opus")
-  })
-
-  it("opus-4-6 always gets [1m] even during cooldown", () => {
-    recordExtendedContextUnavailable()
-    expect(resolveModel("claude-opus-4-6")).toBe("claude-opus-4-6[1m]")
-    expect(resolveModel("claude-opus-4-6", "context-1m-2025-08-07")).toBe("claude-opus-4-6[1m]")
-  })
-
-  it("resolveModel appends [1m] after cooldown is cleared", () => {
-    recordExtendedContextUnavailable()
-    resetExtendedContextUnavailable()
-    expect(resolveModel("sonnet", "context-1m-2025-08-07")).toBe("sonnet[1m]")
-  })
-
-  it("cooldown does not affect requests without context-1m beta", () => {
-    recordExtendedContextUnavailable()
-    expect(resolveModel("sonnet", "prompt-caching-2024-07-31")).toBe("sonnet")
+  it("never appends [1m] to non-opus-4-6/4-7 models", () => {
     expect(resolveModel("sonnet")).toBe("sonnet")
+    expect(resolveModel("claude-sonnet-4-6")).toBe("claude-sonnet-4-6")
+    expect(resolveModel("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4-5-20250929")
+    expect(resolveModel("haiku")).toBe("haiku")
   })
 })
 

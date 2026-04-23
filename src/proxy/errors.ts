@@ -35,13 +35,10 @@ export function classifyError(errMsg: string): ClassifiedError {
 
   // Rate limiting
   if (lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")) {
-    const hint = lower.includes("1m") || lower.includes("context")
-      ? " If you're frequently hitting this, set MERIDIAN_SONNET_MODEL=sonnet to use the 200k model instead."
-      : ""
     return {
       status: 429,
       type: "rate_limit_error",
-      message: `Claude Max rate limit reached. Wait a moment and try again.${hint}`
+      message: "Claude Max rate limit reached. Wait a moment and try again."
     }
   }
 

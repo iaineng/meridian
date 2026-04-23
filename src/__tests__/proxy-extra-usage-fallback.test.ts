@@ -27,18 +27,16 @@ let mockBehavior: "extra_usage_then_succeed" | "always_extra_usage" | "succeed" 
 
 const EXTRA_USAGE_ERROR = "Claude Code returned an error result: API Error: Extra usage is required for 1M context · enable extra usage at claude.ai/settings/usage, or use --model to switch"
 
-// Force [1m] by simulating context-1m beta header detection.
+// Force [1m] regardless of input so the executor's extra-usage fallback path
+// is exercised. The real resolveModel only upgrades opus-4-6/4-7, but this
+// test focuses on executor behaviour, not on the model-resolution policy.
 mock.module("../proxy/models", () => ({
-  resolveModel: (model: string, rawBetaHeader?: string) => {
-    if (rawBetaHeader && rawBetaHeader.includes("context-1m")) return model + "[1m]"
-    return model
-  },
+  resolveModel: (model: string) => model + "[1m]",
   resolveClaudeExecutableAsync: async () => "claude",
   getClaudeAuthStatusAsync: async () => ({ loggedIn: true, subscriptionType: "max" }),
   hasExtendedContext: (model: string) => model.endsWith("[1m]"),
   stripExtendedContext: (model: string) => model.replace("[1m]", ""),
   isClosedControllerError: () => false,
-  recordExtendedContextUnavailable: () => {},
   getAuthCacheInfo: () => ({ lastCheckedAt: 0, lastSuccessAt: 0, isFailure: false }),
 }))
 
