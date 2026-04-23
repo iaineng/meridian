@@ -100,6 +100,7 @@ describe("OAuth env var injection", () => {
   let tmp: string
   let savedHome: string | undefined
   let savedUserprofile: string | undefined
+  let savedEntrypoint: string | undefined
 
   beforeEach(() => {
     capturedOptions = null
@@ -108,10 +109,13 @@ describe("OAuth env var injection", () => {
     tmp = mkdtempSync(join(tmpdir(), "meridian-oauth-inj-"))
     savedHome = process.env.HOME
     savedUserprofile = process.env.USERPROFILE
+    savedEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT
     // Point homedir() at an empty tmp dir so the default (no-profile) path
-    // never leaks the runner's real ~/.claude.json.
+    // never leaks the runner's real ~/.claude.json. Also drop any parent
+    // CLAUDE_CODE_ENTRYPOINT so assertions about its absence are deterministic.
     process.env.HOME = tmp
     process.env.USERPROFILE = tmp
+    delete process.env.CLAUDE_CODE_ENTRYPOINT
   })
 
   afterEach(() => {
@@ -119,6 +123,8 @@ describe("OAuth env var injection", () => {
     else process.env.HOME = savedHome
     if (savedUserprofile === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = savedUserprofile
+    if (savedEntrypoint === undefined) delete process.env.CLAUDE_CODE_ENTRYPOINT
+    else process.env.CLAUDE_CODE_ENTRYPOINT = savedEntrypoint
     try { rmSync(tmp, { recursive: true, force: true }) } catch {}
   })
 
@@ -134,7 +140,6 @@ describe("OAuth env var injection", () => {
       expect(capturedOptions).toBeDefined()
       const env = capturedOptions.env
       expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-profile-token")
-      expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
       expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBe(FIXTURE_ACCOUNT.accountUuid)
       expect(env.CLAUDE_CODE_USER_EMAIL).toBe(FIXTURE_ACCOUNT.emailAddress)
       expect(env.CLAUDE_CODE_ORGANIZATION_UUID).toBe(FIXTURE_ACCOUNT.organizationUuid)
@@ -151,7 +156,6 @@ describe("OAuth env var injection", () => {
     expect(capturedOptions).toBeDefined()
     const env = capturedOptions.env
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
-    expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
     expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBeUndefined()
     expect(env.CLAUDE_CODE_USER_EMAIL).toBeUndefined()
     expect(env.CLAUDE_CODE_ORGANIZATION_UUID).toBeUndefined()
@@ -180,12 +184,12 @@ describe("OAuth env var injection", () => {
     }
   })
 
-  it("always sets CLAUDE_CODE_ENTRYPOINT even when other sources are absent", async () => {
-    // Default (no profile) path + empty tmp HOME → only ENTRYPOINT present.
+  it("does not inject CLAUDE_CODE_ENTRYPOINT even when other sources are absent", async () => {
+    // Default (no profile) path + empty tmp HOME → no managed OAuth env present.
     await postApp(undefined, REQUEST)
     expect(capturedOptions).toBeDefined()
     const env = capturedOptions.env
-    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
     expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBeUndefined()
   })

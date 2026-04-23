@@ -1,14 +1,16 @@
 /**
- * Resolves the 5 OAuth-related env vars that the Claude Agent SDK subprocess
+ * Resolves the 4 OAuth-related env vars that the Claude Agent SDK subprocess
  * expects when acting as a local agent (Claude Max auth path):
  *
  *   - CLAUDE_CODE_OAUTH_TOKEN       — access token; source priority:
  *       1. <configDir>/setup-token (single-line file, trimmed)
  *       2. platform credential store (macOS Keychain / Linux file)
- *   - CLAUDE_CODE_ENTRYPOINT        — static "local-agent"
  *   - CLAUDE_CODE_ACCOUNT_UUID      — oauthAccount.accountUuid from .claude.json
  *   - CLAUDE_CODE_USER_EMAIL        — oauthAccount.emailAddress from .claude.json
  *   - CLAUDE_CODE_ORGANIZATION_UUID — oauthAccount.organizationUuid from .claude.json
+ *
+ * CLAUDE_CODE_ENTRYPOINT is intentionally NOT managed here — the SDK picks its
+ * own default, and the parent process's value (if any) flows through.
  *
  * Leaf module — no imports from server.ts, session/, pipeline/, or handlers/.
  *
@@ -18,7 +20,7 @@
  *
  * Best-effort: any read/parse failure yields `undefined` for the affected key
  * (the env var is simply omitted). The module never throws — a misconfigured
- * host must not break the SDK call path. ENTRYPOINT is always set.
+ * host must not break the SDK call path.
  */
 
 import { existsSync, readFileSync } from "node:fs"
@@ -29,14 +31,12 @@ import { createPlatformCredentialStore, type CredentialStore } from "./tokenRefr
 
 export const CLAUDE_OAUTH_ENV_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
-  "CLAUDE_CODE_ENTRYPOINT",
   "CLAUDE_CODE_ACCOUNT_UUID",
   "CLAUDE_CODE_USER_EMAIL",
   "CLAUDE_CODE_ORGANIZATION_UUID",
 ] as const
 
 export interface ClaudeOauthEnv {
-  CLAUDE_CODE_ENTRYPOINT: "local-agent"
   CLAUDE_CODE_OAUTH_TOKEN?: string
   CLAUDE_CODE_ACCOUNT_UUID?: string
   CLAUDE_CODE_USER_EMAIL?: string
@@ -131,7 +131,7 @@ export async function resolveClaudeOauthEnv(
     readSetupToken(configDir) ?? (await readTokenFromStore(store))
   const account = readOauthAccount(configDir)
 
-  const env: ClaudeOauthEnv = { CLAUDE_CODE_ENTRYPOINT: "local-agent" }
+  const env: ClaudeOauthEnv = {}
   if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token
   if (account.accountUuid) env.CLAUDE_CODE_ACCOUNT_UUID = account.accountUuid
   if (account.emailAddress) env.CLAUDE_CODE_USER_EMAIL = account.emailAddress

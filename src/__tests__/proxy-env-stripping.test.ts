@@ -74,7 +74,6 @@ const BASIC_REQUEST = {
 
 const OAUTH_ENV_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
-  "CLAUDE_CODE_ENTRYPOINT",
   "CLAUDE_CODE_ACCOUNT_UUID",
   "CLAUDE_CODE_USER_EMAIL",
   "CLAUDE_CODE_ORGANIZATION_UUID",
@@ -88,6 +87,7 @@ describe("Environment variable stripping", () => {
     for (const key of [
       "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
       "HOME", "USERPROFILE",
+      "CLAUDE_CODE_ENTRYPOINT",
       ...OAUTH_ENV_KEYS,
     ]) {
       savedEnv[key] = process.env[key]
@@ -99,6 +99,7 @@ describe("Environment variable stripping", () => {
     process.env.HOME = tmpHome
     process.env.USERPROFILE = tmpHome
     for (const k of OAUTH_ENV_KEYS) delete process.env[k]
+    delete process.env.CLAUDE_CODE_ENTRYPOINT
   })
 
   afterEach(() => {
@@ -164,17 +165,17 @@ describe("Environment variable stripping", () => {
     expect(capturedQueryOptions.env.ENABLE_TOOL_SEARCH).toBe("false")
   })
 
-  it("should always set CLAUDE_CODE_ENTRYPOINT to local-agent", async () => {
+  it("should not inject CLAUDE_CODE_ENTRYPOINT when parent is unset", async () => {
     const app = createTestApp()
     await post(app, BASIC_REQUEST)
-    expect(capturedQueryOptions.env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
+    expect(capturedQueryOptions.env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
   })
 
-  it("should strip parent CLAUDE_CODE_ENTRYPOINT=cli and override with local-agent", async () => {
+  it("should pass parent CLAUDE_CODE_ENTRYPOINT through unchanged", async () => {
     process.env.CLAUDE_CODE_ENTRYPOINT = "cli"
     const app = createTestApp()
     await post(app, BASIC_REQUEST)
-    expect(capturedQueryOptions.env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
+    expect(capturedQueryOptions.env.CLAUDE_CODE_ENTRYPOINT).toBe("cli")
   })
 
   it("should still strip CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", async () => {

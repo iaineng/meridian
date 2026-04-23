@@ -71,10 +71,10 @@ describe("resolveClaudeOauthEnv", () => {
     dir = mkTmpConfigDir()
   })
 
-  it("always sets CLAUDE_CODE_ENTRYPOINT to local-agent", async () => {
+  it("does not set CLAUDE_CODE_ENTRYPOINT", async () => {
     const { store } = makeStore(null)
     const env = await resolveClaudeOauthEnv({ configDir: dir, credentialStore: store })
-    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
+    expect((env as Record<string, unknown>).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
   })
 
   it("reads CLAUDE_CODE_OAUTH_TOKEN from setup-token (trimmed) when present", async () => {
@@ -110,7 +110,7 @@ describe("resolveClaudeOauthEnv", () => {
     const env = await resolveClaudeOauthEnv({ configDir: dir, credentialStore: store })
 
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
-    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
+    expect((env as Record<string, unknown>).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
   })
 
   it("omits CLAUDE_CODE_OAUTH_TOKEN when store returns empty accessToken", async () => {
@@ -200,7 +200,7 @@ describe("resolveClaudeOauthEnv", () => {
 
     const env = await resolveClaudeOauthEnv({ configDir: dir, credentialStore: store })
 
-    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("local-agent")
+    expect((env as Record<string, unknown>).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
     expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBeUndefined()
   })
 
