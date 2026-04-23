@@ -567,6 +567,38 @@ cmd_auth() {
     email=$(echo "$auth_check" | grep -o '"email": "[^"]*"' | head -1 | sed 's/"email": "//;s/"//')
     echo "  Authenticated as: $email"
 
+    # Generate a setup-token inside the container, then write it to
+    # /home/claude/setup-token. The proxy reads this file as a source for
+    # the CLAUDE_CODE_OAUTH_TOKEN env injected into the SDK subprocess.
+    # Leave the token input blank to skip.
+    echo ""
+    echo "  Generating setup-token (used for CLAUDE_CODE_OAUTH_TOKEN env injection)."
+    echo "  Running 'claude setup-token' inside the container..."
+    echo "  Copy the token it prints, then paste it below."
+    echo ""
+    docker exec -it --user claude "$CONTAINER_NAME" bash -c "
+      $(proxy_env)
+      export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
+      claude setup-token
+    " || true
+
+    echo ""
+    echo "  Paste the token printed above (input hidden). Press Enter with empty input to skip."
+    local setup_token=""
+    # -s: silent (token stays off the screen). No timeout — user may need
+    # arbitrary time to complete the browser flow and copy the token.
+    read -r -s -p "  setup-token> " setup_token || true
+    echo ""
+
+    if [ -n "$setup_token" ]; then
+      # Pipe via stdin — token never touches argv or process listings.
+      printf '%s' "$setup_token" | docker exec -i --user claude "$CONTAINER_NAME" \
+        bash -c 'cat > /home/claude/setup-token && chmod 600 /home/claude/setup-token'
+      echo "  setup-token written to /home/claude/setup-token (mode 600)."
+    else
+      echo "  No setup-token provided (skipped)."
+    fi
+
     # Patch hasCompletedOnboarding to suppress interactive prompts
     docker exec --user claude "$CONTAINER_NAME" bash -c '
       CLAUDE_JSON="/home/claude/.claude.json"
