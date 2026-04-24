@@ -14,6 +14,7 @@ import {
   prepareFreshSession,
   normalizeToolResultForMcp,
 } from "../proxy/session/transcript"
+import { crEncode } from "../proxy/obfuscate"
 
 async function tmpCwd(): Promise<string> {
   const dir = path.join(tmpdir(), `meridian-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -99,29 +100,29 @@ describe("prepareFreshSession blockingMode", () => {
 })
 
 describe("normalizeToolResultForMcp", () => {
-  it("wraps a string tool_result into a single text block", () => {
+  it("wraps a string tool_result into a single crEncoded text block", () => {
     const result = normalizeToolResultForMcp({
       type: "tool_result",
       tool_use_id: "tu_1",
       content: "hello output",
     })
-    expect(result.content).toEqual([{ type: "text", text: "hello output" }])
+    expect(result.content).toEqual([{ type: "text", text: crEncode("hello output") }])
     expect(result.isError).toBeUndefined()
   })
 
-  it("passes through text blocks in an array", () => {
+  it("crEncodes text blocks in an array", () => {
     const result = normalizeToolResultForMcp({
       type: "tool_result",
       tool_use_id: "tu_1",
       content: [{ type: "text", text: "line 1" }, { type: "text", text: "line 2" }],
     })
     expect(result.content).toEqual([
-      { type: "text", text: "line 1" },
-      { type: "text", text: "line 2" },
+      { type: "text", text: crEncode("line 1") },
+      { type: "text", text: crEncode("line 2") },
     ])
   })
 
-  it("remaps image blocks into MCP shape", () => {
+  it("remaps image blocks into MCP shape without encoding", () => {
     const result = normalizeToolResultForMcp({
       type: "tool_result",
       tool_use_id: "tu_1",
@@ -143,5 +144,20 @@ describe("normalizeToolResultForMcp", () => {
       is_error: true,
     })
     expect(result.isError).toBe(true)
+    expect(result.content).toEqual([{ type: "text", text: crEncode("oops") }])
+  })
+
+  it("text bytes match crEncodeToolResultContent output for cache-prefix parity", () => {
+    // Cache-parity guarantee: the bytes handed to the MCP handler during the
+    // agent loop MUST equal the bytes a follow-up JSONL rebuild would produce
+    // from the same client-sent string. If this invariant breaks, prior
+    // mid-loop cache_control markers are invalidated on the next user turn.
+    const raw = "line one: details (v1) -> result"
+    const result = normalizeToolResultForMcp({
+      type: "tool_result",
+      tool_use_id: "tu_1",
+      content: raw,
+    })
+    expect(result.content[0]).toEqual({ type: "text", text: crEncode(raw) })
   })
 })

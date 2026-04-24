@@ -678,6 +678,14 @@ export async function prepareFreshSession(
  *  - string content → `[{type:"text", text}]`
  *  - block array    → preserve text blocks; image blocks remapped to MCP shape
  *  - `is_error`      → `isError: true`
+ *
+ * `crEncode` is applied to every text payload so the bytes the SDK sees here
+ * (and replays on every subsequent in-memory turn) match what
+ * `crEncodeToolResultContent` would write if the same tool_result was
+ * rebuilt into JSONL on a follow-up request. Without this the agent-loop
+ * cache entries are keyed on raw text while the follow-up JSONL's prefix
+ * starts with CR-escaped text — prefix bytes diverge at the first
+ * tool_result turn and every mid-loop cache entry is invalidated.
  */
 export function normalizeToolResultForMcp(block: {
   type?: string
@@ -688,26 +696,26 @@ export function normalizeToolResultForMcp(block: {
   const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = []
   const raw = block.content
   if (typeof raw === "string") {
-    content.push({ type: "text", text: raw })
+    content.push({ type: "text", text: crEncode(raw) })
   } else if (Array.isArray(raw)) {
     for (const b of raw) {
       if (!b || typeof b !== "object") continue
       const rec = b as Record<string, unknown>
       if (rec.type === "text" && typeof rec.text === "string") {
-        content.push({ type: "text", text: rec.text })
+        content.push({ type: "text", text: crEncode(rec.text) })
       } else if (rec.type === "image" && rec.source && typeof rec.source === "object") {
         const src = rec.source as Record<string, unknown>
         const data = typeof src.data === "string" ? src.data : ""
         const mimeType = typeof src.media_type === "string" ? src.media_type : "image/png"
         if (data) content.push({ type: "image", data, mimeType })
       } else if (typeof rec.text === "string") {
-        content.push({ type: "text", text: rec.text })
+        content.push({ type: "text", text: crEncode(rec.text) })
       }
     }
   } else if (raw == null) {
     // empty content — leave array empty
   } else {
-    content.push({ type: "text", text: String(raw) })
+    content.push({ type: "text", text: crEncode(String(raw)) })
   }
   return block.is_error ? { content, isError: true } : { content }
 }
