@@ -39,12 +39,14 @@ export interface RequestMetric {
   isEphemeral: boolean
 
   /** Session lineage classification: how the incoming messages related to the stored session.
-   *  - continuation: normal follow-up (prefix matched)
-   *  - compaction:   older messages rewritten, recent preserved (suffix matched)
-   *  - undo:         user undid recent messages (prefix preserved, suffix changed) → SDK fork
-   *  - diverged:     no overlap with stored session → fresh start
-   *  - new:          first request, no stored session to compare */
-  lineageType?: "continuation" | "compaction" | "undo" | "diverged" | "new"
+   *  - continuation:          normal follow-up (prefix matched)
+   *  - compaction:            older messages rewritten, recent preserved (suffix matched)
+   *  - undo:                  user undid recent messages (prefix preserved, suffix changed) → SDK fork
+   *  - diverged:              no overlap with stored session → fresh start
+   *  - new:                   first request, no stored session to compare
+   *  - blocking:              initial request of a blocking-MCP (interleaved-thinking) session
+   *  - blocking_continuation: subsequent tool_result round resolving pending handlers */
+  lineageType?: "continuation" | "compaction" | "undo" | "diverged" | "new" | "blocking" | "blocking_continuation"
 
   /** Number of messages in the request */
   messageCount?: number

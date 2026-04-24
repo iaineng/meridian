@@ -173,8 +173,9 @@ function render(s, reqs, logs) {
     return;
   }
 
-  // Count lineage types for badges. Ephemeral requests are tracked separately
-  // via ephemeralCount and must not appear in the Lineage breakdown.
+  // Count lineage types for badges. Ephemeral requests (including blocking-MCP
+  // variants) are tracked separately via ephemeralCount and must not appear
+  // in the Lineage breakdown.
   const lineageCounts = {};
   for (const r of reqs) {
     if (r.isEphemeral) continue;
@@ -269,9 +270,15 @@ function render(s, reqs, logs) {
     const ttfbW = Math.max((r.ttfbMs || 0) * scale, 0);
     const respW = Math.max((r.upstreamDurationMs - (r.ttfbMs || 0)) * scale, 2);
 
-    const lineageBadge = r.isEphemeral
-      ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--blue);color:var(--bg)">ephemeral</span>'
-      : (r.lineageType ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + ({continuation:'var(--green)',compaction:'var(--yellow)',undo:'var(--purple)',diverged:'var(--red)',new:'var(--muted)'}[r.lineageType] || 'var(--muted)') + ';color:var(--bg)">' + r.lineageType + '</span>' : '');
+    // Blocking-MCP requests are ephemeral but carry an explicit lineageType
+    // ("blocking" or "blocking_continuation") so we surface that instead of
+    // the generic "ephemeral" badge.
+    const blockingBadgeColors = { blocking: 'var(--purple)', blocking_continuation: 'var(--ttfb)' };
+    const lineageBadge = (r.isEphemeral && (r.lineageType === 'blocking' || r.lineageType === 'blocking_continuation'))
+      ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + blockingBadgeColors[r.lineageType] + ';color:var(--bg)">' + r.lineageType + '</span>'
+      : r.isEphemeral
+        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--blue);color:var(--bg)">ephemeral</span>'
+        : (r.lineageType ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + ({continuation:'var(--green)',compaction:'var(--yellow)',undo:'var(--purple)',diverged:'var(--red)',new:'var(--muted)'}[r.lineageType] || 'var(--muted)') + ';color:var(--bg)">' + r.lineageType + '</span>' : '');
     const sessionShort = r.sdkSessionId ? r.sdkSessionId.slice(0, 8) : '—';
     const msgCount = r.messageCount != null ? r.messageCount : '?';
 

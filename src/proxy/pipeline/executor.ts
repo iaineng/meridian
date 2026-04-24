@@ -605,6 +605,17 @@ export function runStream(
   env: ExecutorEnv,
   cleanupEphemeral: () => Promise<void>,
 ): Response {
+  // Blocking-MCP path: delegates to a dedicated streaming pipeline that keeps
+  // the SDK iterator alive across multiple HTTP requests.
+  if (handler.blockingMode) {
+    // cleanupEphemeral is handled inside the blocking pool; the handler
+    // itself supplies a no-op cleanup and the pool release fires the real
+    // one when the session terminates.
+    void cleanupEphemeral
+    // Lazy import to avoid circularity at module load.
+    const { runBlockingStream } = require("./blockingStream") as typeof import("./blockingStream")
+    return runBlockingStream(shared, handler, promptBundle, hooks, env)
+  }
   const { body, adapter, outputFormat, requestMeta, allMessages } = shared
   const { resumeSessionId } = handler
   const {

@@ -83,6 +83,14 @@ export interface TranscriptOptions {
    * the final result is ready. Ignored when `outputFormat` is false.
    */
   hasOtherTools?: boolean
+  /**
+   * Blocking MCP mode: the SDK query will live across multiple HTTP rounds
+   * with real Promise-blocked MCP handlers. No synthetic filler / continue
+   * prompt is needed because `resume` is never used. Trailing-user histories
+   * are sliced normally (last user becomes the prompt); trailing tool_use is
+   * treated as a normal prefix write without the synthetic tail.
+   */
+  blockingMode?: boolean
 }
 
 export interface BuildJsonlResult {
@@ -428,7 +436,13 @@ export function buildJsonlLines(
     return { lines: [], messageUuids }
   }
 
-  const { lastIsUser, hasTrailingToolUse, includesLastUser } = classifyContinuation(messages)
+  const rawClass = classifyContinuation(messages)
+  // Blocking mode never needs the synthetic tail: the SDK query lives across
+  // turns, so there is no resume-time byte-shape stability concern. Slice
+  // trailing-user histories normally (last user becomes the prompt).
+  const includesLastUser = opts?.blockingMode ? false : rawClass.includesLastUser
+  const lastIsUser = rawClass.lastIsUser
+  const hasTrailingToolUse = rawClass.hasTrailingToolUse
   const sliceEnd = (lastIsUser && !includesLastUser) ? n - 1 : n
 
   if (sliceEnd === 0) {
@@ -610,7 +624,12 @@ export async function prepareFreshSession(
   const lastMsg = messages[n - 1]
   // Shared classifier — identical decision surface as buildJsonlLines so the
   // prompt (here) and the JSONL tail (there) can never drift out of sync.
-  const { lastIsUser, hasTrailingToolUse, includesLastUser } = classifyContinuation(messages)
+  const rawClass = classifyContinuation(messages)
+  const lastIsUser = rawClass.lastIsUser
+  const hasTrailingToolUse = rawClass.hasTrailingToolUse
+  // Blocking mode: skip synthetic tail injection for the same reason as
+  // buildJsonlLines. The last user content becomes the real prompt.
+  const includesLastUser = opts?.blockingMode ? false : rawClass.includesLastUser
 
   // Apply the SAME crEncode we use when writing history to JSONL so that
   // the u_N bytes on request N (prompt path) match u_N bytes on request N+1
@@ -650,4 +669,45 @@ export async function prepareFreshSession(
 
   await writeSessionTranscript(cwd, sessionId, lines)
   return { sessionId, lastUserPrompt, messageUuids, wroteTranscript: true }
+}
+
+/**
+ * Convert an Anthropic-format `tool_result` block into MCP's CallToolResult
+ * shape used to resolve suspended blocking-MCP tool handlers.
+ *
+ *  - string content → `[{type:"text", text}]`
+ *  - block array    → preserve text blocks; image blocks remapped to MCP shape
+ *  - `is_error`      → `isError: true`
+ */
+export function normalizeToolResultForMcp(block: {
+  type?: string
+  tool_use_id?: string
+  content?: unknown
+  is_error?: boolean
+}): { content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean } {
+  const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = []
+  const raw = block.content
+  if (typeof raw === "string") {
+    content.push({ type: "text", text: raw })
+  } else if (Array.isArray(raw)) {
+    for (const b of raw) {
+      if (!b || typeof b !== "object") continue
+      const rec = b as Record<string, unknown>
+      if (rec.type === "text" && typeof rec.text === "string") {
+        content.push({ type: "text", text: rec.text })
+      } else if (rec.type === "image" && rec.source && typeof rec.source === "object") {
+        const src = rec.source as Record<string, unknown>
+        const data = typeof src.data === "string" ? src.data : ""
+        const mimeType = typeof src.media_type === "string" ? src.media_type : "image/png"
+        if (data) content.push({ type: "image", data, mimeType })
+      } else if (typeof rec.text === "string") {
+        content.push({ type: "text", text: rec.text })
+      }
+    }
+  } else if (raw == null) {
+    // empty content — leave array empty
+  } else {
+    content.push({ type: "text", text: String(raw) })
+  }
+  return block.is_error ? { content, isError: true } : { content }
 }

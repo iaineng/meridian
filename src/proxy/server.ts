@@ -26,6 +26,7 @@ import { buildHookBundle } from "./pipeline/hooks"
 import { recordRequestError } from "./pipeline/telemetry"
 import { runNonStream, runStream, type ExecutorCallbacks, type ExecutorEnv } from "./pipeline/executor"
 import { buildEphemeralHandler } from "./handlers/ephemeral"
+import { buildBlockingHandler, BlockingProtocolMismatchError } from "./handlers/blocking"
 import { buildClassicHandler, persistClassicSession, staleSessionRetryClassic } from "./handlers/classic"
 import type { HandlerContext } from "./handlers/types"
 import { detectAdapter } from "./adapters/detect"
@@ -107,13 +108,38 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
         const { body, agentMode, stream } = shared
 
-        // Dispatch: ephemeral vs classic. Ephemeral bypasses lineage/cache and
-        // writes a JSONL transcript per request; classic uses the LRU session
-        // cache and optionally prewarms JSONL for diverged multi-message starts.
+        // Dispatch: blocking-MCP > ephemeral > classic.
+        //  - blocking-MCP: keeps one SDK query alive across HTTP rounds by
+        //    suspending MCP handlers; requires ephemeral + passthrough + tools
+        //    + streaming + no outputFormat.
+        //  - ephemeral: bypasses lineage/cache, one-shot JSONL transcript.
+        //  - classic: LRU session cache with optional JSONL prewarm.
         const isEphemeral = envBool("EPHEMERAL_JSONL")
-        const handler: HandlerContext = isEphemeral
-          ? await buildEphemeralHandler(shared)
-          : await buildClassicHandler(shared)
+        const hasTools = Array.isArray(shared.body?.tools) && shared.body.tools.length > 0
+        const blockingEnvOn = envBool("BLOCKING_MCP")
+        const isBlockingMcp =
+          isEphemeral
+          && blockingEnvOn
+          && shared.initialPassthrough
+          && hasTools
+          && shared.stream
+          && !shared.outputFormat
+        if (blockingEnvOn && !isBlockingMcp) {
+          // Surface the exact precondition that gated blocking out so deploy
+          // operators can diagnose without enabling debug logging.
+          claudeLog("blocking.dispatch.skipped", {
+            isEphemeral,
+            initialPassthrough: shared.initialPassthrough,
+            hasTools,
+            stream: shared.stream,
+            outputFormat: !!shared.outputFormat,
+          })
+        }
+        const handler: HandlerContext = isBlockingMcp
+          ? await buildBlockingHandler(shared)
+          : isEphemeral
+            ? await buildEphemeralHandler(shared)
+            : await buildClassicHandler(shared)
         cleanupEphemeral = handler.cleanup
 
         const { isUndo, resumeSessionId, undoRollbackUuid, lineageType } = handler
@@ -150,6 +176,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           adapter,
           sdkAgents: shared.sdkAgents,
           passthrough: shared.initialPassthrough,
+          blockingMode: handler.blockingMode,
+          prebuiltPassthroughMcp: handler.prebuiltPassthroughMcp,
+          blockingState: handler.blockingState,
         })
 
         // Lazy-resolve the claude executable for both stream and non-stream.
@@ -182,6 +211,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         ephemeralDeferredToStream = true
         return res
       } catch (error) {
+        // Blocking-MCP protocol violation: client sent the wrong set of
+        // tool_result ids. Return a crisp 400 without falling back, so the
+        // client fixes its request instead of masking the bug.
+        if (error instanceof BlockingProtocolMismatchError) {
+          claudeLog("blocking.protocol_mismatch", {
+            durationMs: Date.now() - requestStartAt,
+            error: error.message,
+          })
+          return new Response(
+            JSON.stringify({
+              type: "error",
+              error: { type: "invalid_request_error", message: error.message },
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          )
+        }
+
         const errMsg = error instanceof Error ? error.message : String(error)
         claudeLog("error.unhandled", {
           durationMs: Date.now() - requestStartAt,

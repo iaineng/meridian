@@ -12,6 +12,16 @@
 
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod"
+import type {
+  BlockingSessionState,
+  CallToolResult,
+  PendingTool,
+  ToolUseBinding,
+  BindingSlot,
+  Deferred,
+} from "./session/blockingPool"
+import { defer } from "./session/blockingPool"
+import { claudeLog } from "../logger"
 
 export const PASSTHROUGH_MCP_NAME = "tools"
 export const PASSTHROUGH_MCP_PREFIX = `mcp__${PASSTHROUGH_MCP_NAME}__`
@@ -105,4 +115,166 @@ export function stripMcpPrefix(toolName: string): string {
     return toolName.slice(PASSTHROUGH_MCP_PREFIX.length)
   }
   return toolName
+}
+
+/**
+ * Two-gate round closer for blocking sessions. Fires a `close_round` event
+ * exactly once per turn, when both of the following hold:
+ *   1. The API has emitted `message_delta(stop_reason:"tool_use")` for the
+ *      current turn (captured into `state.pendingRoundClose.expectedIds` by
+ *      `translateBlockingMessage`).
+ *   2. Every expected `tool_use_id` is present in `state.pendingTools` —
+ *      i.e. every handler has entered and registered its resolver.
+ *
+ * Safe to call from either edge: `translateBlockingMessage` calls it when
+ * the `message_delta` arrives; the MCP handler calls it after registering
+ * its `PendingTool`. Whichever edge is last wins.
+ */
+export function maybeCloseRound(state: BlockingSessionState): void {
+  if (state.status === "terminated") return
+  const gate = state.pendingRoundClose
+  if (!gate) return
+  for (const id of gate.expectedIds) {
+    if (!state.pendingTools.has(id)) return
+  }
+  state.pendingRoundClose = null
+  state.status = "awaiting_results"
+  const sink = state.activeSink
+  const evt = { kind: "close_round" as const, stopReason: "tool_use" as const }
+  if (sink) sink(evt)
+  else state.eventBuffer.push(evt)
+}
+
+function getOrInitSlot(state: BlockingSessionState, toolName: string): BindingSlot {
+  let slot = state.bindingsByToolName.get(toolName)
+  if (!slot) {
+    slot = { bindings: [], waiters: [] }
+    state.bindingsByToolName.set(toolName, slot)
+  }
+  return slot
+}
+
+function consumeBinding(state: BlockingSessionState, toolName: string): Promise<ToolUseBinding> {
+  const slot = getOrInitSlot(state, toolName)
+  const head = slot.bindings.shift()
+  if (head) return head.promise
+  const waiter = defer<ToolUseBinding>()
+  slot.waiters.push(waiter)
+  return waiter.promise
+}
+
+/**
+ * Producer side: called by the consumer task when it observes a tool_use
+ * `content_block_start` event. Pairs with the next handler entry for the
+ * same tool name.
+ */
+export function registerToolUseBinding(
+  state: BlockingSessionState,
+  toolName: string,
+  binding: ToolUseBinding,
+): void {
+  const slot = getOrInitSlot(state, toolName)
+  const waiter = slot.waiters.shift()
+  if (waiter) {
+    waiter.resolve(binding)
+    return
+  }
+  const d = defer<ToolUseBinding>()
+  d.resolve(binding)
+  slot.bindings.push(d)
+}
+
+/**
+ * Blocking-mode MCP server: every tool handler returns a suspended Promise
+ * that only resolves when the client returns a matching `tool_result`. Each
+ * tool definition carries `annotations: { readOnlyHint: true }` so the
+ * Anthropic API treats them as safe to interleave with thinking.
+ *
+ * This uses the SDK's `tool()` helper + `createSdkMcpServer({ tools: [...] })`
+ * predeclared form (rather than `.instance.tool()`), which is the recommended
+ * path for tools carrying annotations.
+ */
+export function createBlockingPassthroughMcpServer(
+  tools: Array<{ name: string; description?: string; input_schema?: any }>,
+  state: BlockingSessionState,
+) {
+  // Lazy-require `tool` so test suites that mock `@anthropic-ai/claude-agent-sdk`
+  // do not need to stub it — the mock replaces the module object at eval time
+  // and static imports of un-stubbed names fail at link time.
+  const sdk = require("@anthropic-ai/claude-agent-sdk") as { tool: (...args: any[]) => any }
+  const makeTool = sdk.tool
+  const toolNames: string[] = []
+  const defs: any[] = []
+
+  for (const t of tools) {
+    const mcpToolName = t.name
+    const clientToolName = t.name
+    let shape: Record<string, z.ZodTypeAny>
+    try {
+      const zodSchema = t.input_schema?.properties
+        ? jsonSchemaToZod(t.input_schema)
+        : z.object({})
+      shape = zodSchema instanceof z.ZodObject
+        ? (zodSchema as any).shape
+        : { input: z.any() }
+    } catch {
+      shape = { input: z.string().optional() }
+    }
+
+    const handler = async (_args: unknown, _extra: unknown): Promise<CallToolResult> => {
+      if (state.status === "terminated") {
+        return { content: [{ type: "text", text: "blocking session terminated" }], isError: true }
+      }
+      // Pair with the matching stream_event tool_use_id.
+      let binding: ToolUseBinding
+      try {
+        binding = await consumeBinding(state, mcpToolName)
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+          isError: true,
+        }
+      }
+      const { toolUseId, input } = binding
+
+      // Create the outer suspended Promise — resolved by the next HTTP
+      // request's tool_result handoff (see blockingStream.ts). After
+      // registering the PendingTool, call `maybeCloseRound` to check the
+      // two-gate close condition (API stop_reason + all handlers entered).
+      return await new Promise<CallToolResult>((resolve, reject) => {
+        const pending: PendingTool = {
+          mcpToolName,
+          clientToolName,
+          toolUseId,
+          input,
+          resolve,
+          reject,
+          startedAt: Date.now(),
+        }
+        state.pendingTools.set(toolUseId, pending)
+        state.currentRoundToolIds.push(toolUseId)
+        claudeLog("blocking.handler.entered", {
+          toolUseId,
+          tool: clientToolName,
+          pending: state.pendingTools.size,
+        })
+        maybeCloseRound(state)
+      })
+    }
+
+    defs.push(makeTool(
+      mcpToolName,
+      t.description || mcpToolName,
+      shape,
+      handler,
+      { annotations: { readOnlyHint: true } },
+    ))
+    toolNames.push(`${PASSTHROUGH_MCP_PREFIX}${mcpToolName}`)
+  }
+
+  const server = createSdkMcpServer({
+    name: PASSTHROUGH_MCP_NAME,
+    tools: defs,
+  })
+  return { server, toolNames }
 }

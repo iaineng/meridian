@@ -182,6 +182,118 @@ Agent-specific behavior is isolated behind the `AgentAdapter` interface (`adapte
 | Passthrough mode | `passthroughTools.ts` | Agent-agnostic but OpenCode-motivated. Keep as-is. |
 | `ALLOWED_MCP_TOOLS` usage in `server.ts` | Line ~176 | Used for `buildAgentDefinitions`. Move when adapter handles agent defs. |
 
+## Blocking-MCP Mode (Interleaved-Thinking Preservation)
+
+Triggered when **all** of these hold:
+
+- `MERIDIAN_EPHEMERAL_JSONL=1`
+- `MERIDIAN_BLOCKING_MCP=1`
+- `shared.initialPassthrough === true` (adapter override or `MERIDIAN_PASSTHROUGH=1`)
+- `body.tools.length > 0`
+- `shared.stream === true`
+- `shared.outputFormat` is unset
+
+Any missing precondition → silent fallback to plain ephemeral passthrough (synthetic filler / continue).
+
+### Why
+
+The default ephemeral+passthrough flow finishes each SDK query with `maxTurns: 1`, so every round of tool calls is a fresh SDK invocation. That defeats `anthropic-beta: interleaved-thinking-*`: the SDK cannot replay the model's signed `thinking` blocks at resume time, so the model drops the chain. It also forces synthetic filler / continue-prompt placeholders on every JSONL rewrite, polluting prompt cache and token counts.
+
+Blocking-MCP keeps **one** SDK query alive across all HTTP rounds by making the passthrough MCP handlers real Promise-blocked suspenders: the SDK calls the handler, we stash the resolver, stream the tool_use out to the client, close the HTTP with `stop_reason: "tool_use"`, and wait for the next HTTP to bring the matching `tool_result` — then resolve the suspended handler and the SDK continues with its signed thinking intact.
+
+### State Machine
+
+```
+                 initial HTTP
+                 (buildBlockingHandler acquires pool state,
+                  spawnConsumer starts SDK iterator)
+                 │
+                 ▼
+    ┌──────► streaming ──────────────────────────┐  (SDK producing content)
+    │         │                                   │
+    │         │ two-gate round close:             │
+    │         │   (a) API message_delta           │  close_round fired
+    │         │       (stop_reason:"tool_use")    │  when both gates met
+    │         │   (b) every expected tool_use_id  │
+    │         │       has a PendingTool           │
+    │         ▼                                   ▼
+    │      awaiting_results ◄────────── HTTP closes with
+    │         │                          stop_reason:"tool_use"
+    │         │                                   │
+    │         │                                   ▼
+    │         │                           next HTTP arrives
+    │         │                           (buildBlockingHandler.continuation)
+    │         │                                   │
+    │         │                                   ▼
+    │         │                           resolve pending tools,
+    │         │                           emit fresh message_start,
+    │         └──────────────────────◄──── attach new sink
+    │
+    └── sdk emits message_delta(end_turn) ──► terminated
+                                              (blockingPool.release:
+                                               cleanup JSONL, free pool id)
+```
+
+### Data Flow
+
+```
+SDK async iterator (lives in spawnConsumer)
+        │
+        │   for await (msg of iterator) {
+        │     frames = translateBlockingMessage(msg, state)
+        │     for (f of frames) pushEvent(state, {kind:"sse", frame:f})
+        │   }
+        ▼
+BlockingSessionState.eventBuffer  ◄── 0 or 1 ──► state.activeSink (current HTTP's deliver())
+        │                                             │
+        │  (flushed on attach)                        ▼
+        └──────────────────────────────►  HTTP ReadableStream controller
+```
+
+### Wire Protocol (per HTTP round)
+
+Every HTTP response is a complete Anthropic SSE sequence:
+
+```
+event: message_start       ← meridian-generated, fresh msg_<id> each HTTP
+event: content_block_start ← forwarded from SDK, index remapped
+event: content_block_delta ← ditto
+event: content_block_stop  ← ditto
+...
+event: message_delta       ← meridian-generated at close_round OR SDK end
+       {stop_reason:"tool_use"|"end_turn"|"max_tokens"}
+event: message_stop        ← ditto
+```
+
+SDK's own `message_start` / `message_delta` / `message_stop` events are **suppressed** — blocking mode owns the framing. `X-Claude-Session-ID` carries `stringifyBlockingKey(key)` so clients can include it as an explicit session id on the next HTTP (optional — lineage-hash matching is the fallback).
+
+### Failure Handling
+
+| Scenario | Handling |
+|----------|----------|
+| Preconditions not met (non-stream, outputFormat, no tools, …) | Dispatch goes through the plain ephemeral handler (no blocking). |
+| Continuation hits pool but the stored `priorMessageHashes` is not a prefix of the incoming prior (tampering / undo / different branch) | `buildBlockingHandler` falls through to `buildEphemeralHandler` silently. |
+| Continuation hash matches but `tool_result` id set ≠ pending set | `BlockingProtocolMismatchError` → 400 `invalid_request_error`, session released. |
+| Continuation hash matches but pool has no entry (server restart, timeout) | Fall through to `buildEphemeralHandler`. |
+| SDK query errors mid-flight | `error` SSE event + `message_delta(end_turn)` + `message_stop`; session released. |
+| 30-min idle (janitor) | All pending tools rejected, JSONL cleaned up, pool entry dropped. |
+| Client disconnect mid-HTTP | `detachSink`; state keeps running, consumer pushes into buffer; next reconnect / continuation attaches. |
+
+### Known Limits (v1)
+
+- No `outputFormat` (StructuredOutput) integration — falls back.
+- No `stale_session_error` retry (resume semantics do not apply inside a live query).
+- Per-session timeout only; no per-tool deadline (see DEFERRED.md).
+- Sub-agent (Task) nested `parent_tool_use_id` streams are not validated — see DEFERRED.md.
+
+### Critical Files
+
+- `src/proxy/session/blockingPool.ts` — registry, janitor, session state shape.
+- `src/proxy/handlers/blocking.ts` — initial vs continuation dispatch, `BlockingProtocolMismatchError`.
+- `src/proxy/pipeline/blockingStream.ts` — consumer task, sink attach/detach, per-HTTP meridian framing.
+- `src/proxy/passthroughTools.ts` — `createBlockingPassthroughMcpServer` with `annotations: { readOnlyHint: true }` and FIFO `tool_use_id` rendezvous.
+- `src/proxy/query.ts` — `blockingMode` → `maxTurns: 10_000` + `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=1800000`.
+
 ## Session Management
 
 Sessions map an agent's conversation ID to a Claude SDK session ID. Two caches work in tandem:

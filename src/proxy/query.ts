@@ -29,6 +29,14 @@ export interface QueryContext {
   sdkAgents: Record<string, any>
   /** Passthrough MCP server (if passthrough mode + tools present) */
   passthroughMcp?: ReturnType<typeof createPassthroughMcpServer>
+  /**
+   * Blocking MCP mode — integrated with MERIDIAN_EPHEMERAL_JSONL + passthrough.
+   * When true: `maxTurns` is raised to a very large value, the MCP server
+   * (provided via `passthroughMcp`) is expected to use real Promise-blocked
+   * handlers, and `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` is bumped to 30min so
+   * the SDK does not abort mid-wait.
+   */
+  blockingMode?: boolean
   /** Cleaned environment variables (API keys stripped) */
   cleanEnv: Record<string, string | undefined>
   /** SDK session ID for resume (if continuing a session) */
@@ -110,7 +118,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       // Hosts like OpenCode embed Bun, so the check fires even when `bun`
       // is not in PATH — causing subprocess spawns to fail.
       executable: "node" as const,
-      maxTurns: passthrough ? 1 : 200,
+      maxTurns: passthrough ? (ctx.blockingMode ? 10_000 : 1) : 200,
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
@@ -145,6 +153,10 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
         ENABLE_TOOL_SEARCH: "false",
         DISABLE_AUTO_COMPACT: "1",
         ...(passthrough ? { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } : {}),
+        // Blocking mode: MCP handlers may suspend for up to 30 min waiting
+        // for the client's next HTTP request to deliver tool_result. Default
+        // SDK timeout is 60s, which would abort the whole query.
+        ...(ctx.blockingMode ? { CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: "1800000" } : {}),
         // Pass through client's max_tokens directly. The streaming event model
         // handles max_tokens cleanly via message_delta break, so the SDK's
         // internal 3-retry recovery loop is no longer a concern.

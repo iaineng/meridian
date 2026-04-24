@@ -1,7 +1,8 @@
 import type { AgentAdapter } from "../adapter"
-import { createPassthroughMcpServer, stripMcpPrefix } from "../passthroughTools"
+import { createPassthroughMcpServer, createBlockingPassthroughMcpServer, stripMcpPrefix } from "../passthroughTools"
 import { createFileChangeHook, type FileChange } from "../fileChanges"
 import { claudeLog } from "../../logger"
+import type { BlockingSessionState } from "../session/blockingPool"
 
 export interface HookBundle {
   sdkHooks: any
@@ -32,6 +33,12 @@ export interface BuildHookBundleInput {
   sdkAgents: Record<string, any>
   /** Initial passthrough mode (may be flipped to false by single-web_search detection). */
   passthrough: boolean
+  /** Blocking MCP mode — suppresses PreToolUse hook; MCP handlers block instead. */
+  blockingMode?: boolean
+  /** Pre-built blocking MCP server (from the blocking handler). */
+  prebuiltPassthroughMcp?: ReturnType<typeof createBlockingPassthroughMcpServer>
+  /** Blocking session state (required when blockingMode is true). */
+  blockingState?: BlockingSessionState
 }
 
 /**
@@ -68,9 +75,19 @@ export function buildHookBundle(input: BuildHookBundleInput): HookBundle {
 
   // In passthrough mode, register the agent's tools as MCP tools so Claude
   // can actually call them (not just see them as text descriptions).
+  //
+  // Blocking mode uses a pre-built MCP server constructed by the blocking
+  // handler (which captured the session state needed for Promise-blocked
+  // tool handlers). The shape matches createPassthroughMcpServer but the
+  // handlers are real — they suspend on Promise until the client returns
+  // a matching tool_result in a follow-up HTTP request.
   let passthroughMcp: ReturnType<typeof createPassthroughMcpServer> | undefined
   if (passthrough && effectiveTools.length > 0) {
-    passthroughMcp = createPassthroughMcpServer(effectiveTools)
+    if (input.blockingMode && input.prebuiltPassthroughMcp) {
+      passthroughMcp = input.prebuiltPassthroughMcp as ReturnType<typeof createPassthroughMcpServer>
+    } else {
+      passthroughMcp = createPassthroughMcpServer(effectiveTools)
+    }
   }
 
   const mcpPrefix = `mcp__${adapter.getMcpServerName()}__`
@@ -105,22 +122,27 @@ export function buildHookBundle(input: BuildHookBundleInput): HookBundle {
   if (webSearchHook) postToolUseHooks.push(webSearchHook)
 
   const sdkHooks = passthrough
-    ? {
-        PreToolUse: [{
-          matcher: "",  // Match ALL tools
-          hooks: [async (hookInput: any) => {
-            capturedToolUses.push({
-              id: hookInput.tool_use_id,
-              name: stripMcpPrefix(hookInput.tool_name),
-              input: hookInput.tool_input,
-            })
-            return {
-              decision: "block" as const,
-              reason: "Forwarding to client for execution",
-            }
-          }],
-        }],
-      }
+    ? (input.blockingMode
+        // Blocking mode: let MCP handlers run. They return Promises that
+        // suspend until the next HTTP delivers a matching tool_result, so
+        // we do NOT want PreToolUse to block them.
+        ? {}
+        : {
+            PreToolUse: [{
+              matcher: "",  // Match ALL tools
+              hooks: [async (hookInput: any) => {
+                capturedToolUses.push({
+                  id: hookInput.tool_use_id,
+                  name: stripMcpPrefix(hookInput.tool_name),
+                  input: hookInput.tool_input,
+                })
+                return {
+                  decision: "block" as const,
+                  reason: "Forwarding to client for execution",
+                }
+              }],
+            }],
+          })
     : {
         ...(adapter.buildSdkHooks?.(body, sdkAgents) ?? {}),
         ...(postToolUseHooks.length > 0 ? { PostToolUse: postToolUseHooks } : {}),

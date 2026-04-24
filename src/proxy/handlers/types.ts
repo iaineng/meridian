@@ -1,8 +1,10 @@
 import type { LineageResult, SessionState, TokenUsage } from "../session/lineage"
+import type { BlockingSessionKey, BlockingSessionState } from "../session/blockingPool"
+import type { createBlockingPassthroughMcpServer } from "../passthroughTools"
 
 /** Log-line classification. `diverged` never reaches this field — classic
  *  handler rewrites it to `new`; ephemeral synthesises `ephemeral` directly. */
-export type HandlerLineageType = "continuation" | "compaction" | "undo" | "new" | "ephemeral"
+export type HandlerLineageType = "continuation" | "compaction" | "undo" | "new" | "ephemeral" | "blocking" | "blocking_continuation"
 
 /**
  * Per-request session-lifecycle state produced by either the classic or the
@@ -38,6 +40,20 @@ export interface HandlerContext {
 
   // Cleanup — ephemeral-only; classic returns an async no-op.
   cleanup: () => Promise<void>
+
+  // --- Blocking-MCP mode (optional) ---
+  /** True when the request is being handled by the blocking-MCP pipeline. */
+  blockingMode?: boolean
+  /** True when this request is a continuation of an existing blocking session. */
+  isBlockingContinuation?: boolean
+  /** Key used to look up / register the blocking session. */
+  blockingSessionKey?: BlockingSessionKey
+  /** Live state for continuation requests — already acquired from pool. */
+  blockingState?: BlockingSessionState
+  /** Pre-built passthrough MCP server (blocking mode stashes it on the handler). */
+  prebuiltPassthroughMcp?: ReturnType<typeof createBlockingPassthroughMcpServer>
+  /** Continuation-only: tool_result content blocks extracted from the last user message. */
+  pendingToolResults?: Array<{ tool_use_id: string; content: unknown; is_error?: boolean }>
 }
 
 export interface ClassicRetryResult {

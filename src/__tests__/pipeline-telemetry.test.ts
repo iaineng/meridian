@@ -96,6 +96,58 @@ describe("pipeline/telemetry — proxyOverheadMs", () => {
     expect(metric!.proxyOverheadMs).toBe(0)
   })
 
+  it("blocking lineageType survives telemetry (not collapsed to undefined)", () => {
+    const base = 3_000_000_000
+    const ctx = makeCtx({ queueEnteredAt: base, queueStartedAt: base, requestStartAt: base })
+    const handler = { isEphemeral: true, isResume: false, lineageType: "blocking" } as unknown as HandlerContext
+    recordRequestSuccess(ctx, makeShared(), handler, {
+      mode: "stream",
+      upstreamStartAt: base + 10,
+      firstChunkAt: base + 50,
+      sdkSessionId: "s-blocking",
+      contentBlocks: 1,
+      textEvents: 0,
+      passthrough: true,
+    })
+    const [metric] = telemetryStore.getRecent({ limit: 1 })
+    expect(metric!.isEphemeral).toBe(true)
+    expect(metric!.lineageType).toBe("blocking")
+  })
+
+  it("blocking_continuation lineageType survives telemetry", () => {
+    const base = 3_500_000_000
+    const ctx = makeCtx({ queueEnteredAt: base, queueStartedAt: base, requestStartAt: base })
+    const handler = { isEphemeral: true, isResume: false, lineageType: "blocking_continuation" } as unknown as HandlerContext
+    recordRequestSuccess(ctx, makeShared(), handler, {
+      mode: "stream",
+      upstreamStartAt: base + 10,
+      firstChunkAt: base + 50,
+      sdkSessionId: "s-blocking-c",
+      contentBlocks: 1,
+      textEvents: 0,
+      passthrough: true,
+    })
+    const [metric] = telemetryStore.getRecent({ limit: 1 })
+    expect(metric!.lineageType).toBe("blocking_continuation")
+  })
+
+  it("plain ephemeral still collapses to undefined (regression)", () => {
+    const base = 4_000_000_000
+    const ctx = makeCtx({ queueEnteredAt: base, queueStartedAt: base, requestStartAt: base })
+    const handler = { isEphemeral: true, isResume: false, lineageType: "ephemeral" } as unknown as HandlerContext
+    recordRequestSuccess(ctx, makeShared(), handler, {
+      mode: "non-stream",
+      upstreamStartAt: base + 10,
+      firstChunkAt: base + 50,
+      sdkSessionId: "s-eph",
+      contentBlocks: 1,
+      textEvents: 0,
+      passthrough: false,
+    })
+    const [metric] = telemetryStore.getRecent({ limit: 1 })
+    expect(metric!.lineageType).toBeUndefined()
+  })
+
   it("error path: proxyOverheadMs excludes queue wait", () => {
     // Use real `now` as anchor so `Date.now() - requestStartAt` stays bounded
     // to test-runtime ms (the function under test calls Date.now() inside).

@@ -64,9 +64,12 @@ export function recordRequestSuccess(
     isResume: handler.isResume,
     isPassthrough: input.passthrough,
     isEphemeral: handler.isEphemeral,
-    // Ephemeral has no real session lineage — keep it out of the Lineage
-    // breakdown and rely on `isEphemeral` for the dedicated card/badge.
-    lineageType: handler.isEphemeral || handler.lineageType === "ephemeral"
+    // Plain ephemeral has no real session lineage — collapse to undefined so
+    // it doesn't pollute the Lineage breakdown. Blocking-MCP variants keep
+    // their explicit lineageType so the dashboard can render "blocking" /
+    // "blocking_continuation" badges on the request row.
+    lineageType: (handler.isEphemeral && handler.lineageType !== "blocking" && handler.lineageType !== "blocking_continuation")
+      || handler.lineageType === "ephemeral"
       ? undefined
       : handler.lineageType,
     messageCount: shared.allMessages.length,
