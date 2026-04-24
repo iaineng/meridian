@@ -11,8 +11,10 @@
  *  - `lineage`: a hash of the conversation history prefix (messages minus the
  *               trailing `tool_result` user message)
  *
- * A 30-minute janitor reaps sessions that go idle without a continuation
- * HTTP request.
+ * A 10-minute janitor reaps sessions that go idle without a continuation
+ * HTTP request. The pool also installs process-termination hooks on first
+ * use so that SIGINT / SIGTERM / natural exit drains all live sessions
+ * (rejects pending handlers, deletes JSONL transcripts, stops the janitor).
  */
 
 import { claudeLog } from "../../logger"
@@ -102,7 +104,7 @@ export interface BlockingSessionState {
   ephemeralSessionId: string
   workingDirectory: string
   createdAt: number
-  /** Absolute ms timestamp (Date.now() + 30min). Janitor reaps past this. */
+  /** Absolute ms timestamp (Date.now() + 10min). Janitor reaps past this. */
   expiresAt: number
   status: BlockingSessionStatus
 
@@ -155,13 +157,14 @@ export interface BlockingSessionState {
   abort?: () => void
 }
 
-const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1_000
 const JANITOR_TICK_MS = 60_000
 
 class BlockingPool {
   private readonly sessions = new Map<string, BlockingSessionState>()
   private janitor: ReturnType<typeof setInterval> | null = null
   private timeoutMs = DEFAULT_TIMEOUT_MS
+  private shutdownInstalled = false
 
   /**
    * Acquire a new session state. Throws if the key is already occupied —
@@ -206,6 +209,7 @@ class BlockingPool {
     }
     this.sessions.set(id, state)
     this.startJanitorIfNeeded()
+    this.installShutdownHandlers()
     claudeLog("blocking.session.acquired", { key: id, ephemeralSessionId: init.ephemeralSessionId })
     return state
   }
@@ -238,6 +242,13 @@ class BlockingPool {
     if (state.status !== "terminated") {
       state.status = "terminated"
       state.pendingRoundClose = null
+      // Abort the SDK query BEFORE rejecting pending handlers. Rejecting a
+      // handler's Promise causes the MCP SDK to serialise an error
+      // CallToolResult back to the Claude subprocess, which would then post
+      // that tool_result to the API as a billable follow-up turn whose
+      // response nobody reads. Killing the subprocess first closes the stdio
+      // transport so the error results never leave this process.
+      try { state.abort?.() } catch {}
       const err = new Error(`blocking session released: ${reason}`)
       for (const [, pending] of state.pendingTools) {
         try { pending.reject(err) } catch {}
@@ -248,7 +259,6 @@ class BlockingPool {
         for (const d of slot.waiters) { try { d.reject(err) } catch {} }
       }
       state.bindingsByToolName.clear()
-      try { state.abort?.() } catch {}
     }
     this.sessions.delete(id)
     try { await state.cleanup() } catch (e) {
@@ -260,6 +270,41 @@ class BlockingPool {
 
   size(): number {
     return this.sessions.size
+  }
+
+  /**
+   * Drain all live sessions. Idempotent — safe to call multiple times and
+   * from process-termination paths where async awaits may not complete.
+   */
+  async shutdown(reason: string): Promise<void> {
+    const keys = Array.from(this.sessions.values()).map(s => s.key)
+    for (const key of keys) {
+      try { await this.release(key, reason) } catch {}
+    }
+    this.stopJanitor()
+  }
+
+  /**
+   * Register process-termination hooks once per pool lifetime. On SIGINT /
+   * SIGTERM we best-effort drain sessions and then re-exit with the signal's
+   * conventional code; on `beforeExit` (natural shutdown) we await the drain
+   * fully. Installed lazily on first `acquire` so the hooks are absent when
+   * blocking mode is never used.
+   */
+  private installShutdownHandlers(): void {
+    if (this.shutdownInstalled) return
+    if (typeof process === "undefined" || typeof process.once !== "function") return
+    this.shutdownInstalled = true
+
+    const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
+      const code = signal === "SIGINT" ? 130 : 143
+      this.shutdown(`process_${signal.toLowerCase()}`).finally(() => {
+        process.exit(code)
+      })
+    }
+    process.once("SIGINT", () => onSignal("SIGINT"))
+    process.once("SIGTERM", () => onSignal("SIGTERM"))
+    process.once("beforeExit", () => { void this.shutdown("before_exit") })
   }
 
   private startJanitorIfNeeded(): void {

@@ -68,6 +68,15 @@ export interface QueryContext {
   taskBudget?: { total: number }
   /** Beta features to enable */
   betas?: string[]
+  /**
+   * Abort controller to cancel the SDK query. In blocking mode we wire this
+   * to `BlockingSessionState.abort` so `blockingPool.release` can tear down
+   * the Claude subprocess *before* rejecting pending MCP handlers — otherwise
+   * the rejections are serialised as error CallToolResults over stdio to a
+   * still-alive subprocess, triggering a billable follow-up API call whose
+   * response we immediately drop.
+   */
+  abortController?: AbortController
 }
 
 /**
@@ -100,7 +109,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv,
     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
     outputFormat, thinking, onStderr,
-    effort, taskBudget, betas,
+    effort, taskBudget, betas, abortController,
   } = ctx
 
   let blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
@@ -181,6 +190,7 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       ...(thinking ? { thinking: withDefaultThinkingDisplay(thinking) } : {}),
       ...(taskBudget ? { taskBudget } : {}),
       ...(betas && betas.length > 0 ? { betas: betas as SdkBeta[] } : {}),
+      ...(abortController ? { abortController } : {}),
     }
   }
 }

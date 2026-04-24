@@ -433,8 +433,19 @@ export function runBlockingStream(
 
       // Initial HTTP only: build and spawn the SDK consumer task.
       if (!isContinuation) {
+        // Wire the abort controller onto the session BEFORE starting the SDK
+        // iterator so that `blockingPool.release` — which fires on SIGTERM,
+        // janitor timeout, continuation mismatch, etc. — can kill the Claude
+        // subprocess before we reject pending MCP handlers. Without this,
+        // rejected handlers serialise error CallToolResults over the stdio
+        // transport to a still-alive subprocess, which then posts a tool_result
+        // to the API (billable) whose response we immediately discard.
+        const abortController = new AbortController()
+        state.abort = () => {
+          try { abortController.abort() } catch {}
+        }
         try {
-          const iterator = await startSdkIterator(shared, handler, promptBundle, hooks, env)
+          const iterator = await startSdkIterator(shared, handler, promptBundle, hooks, env, abortController)
           // Fire-and-forget: the consumer runs as long as the session is alive.
           void spawnConsumer(state, iterator, encoder)
         } catch (err) {
@@ -481,6 +492,7 @@ async function startSdkIterator(
   promptBundle: PromptBundle,
   hooks: HookBundle,
   env: ExecutorEnv,
+  abortController: AbortController,
 ): Promise<AsyncIterable<unknown>> {
   const { body, workingDirectory, systemContext, profileEnv, adapter, sdkAgents,
           thinking, effort, taskBudget, betas, outputFormat } = shared
@@ -520,6 +532,7 @@ async function startSdkIterator(
     taskBudget,
     betas,
     blockingMode: true,
+    abortController,
   })
 
   return query({ prompt, options })
