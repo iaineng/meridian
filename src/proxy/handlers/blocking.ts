@@ -195,12 +195,11 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
         sessionId: ephemeralId,
         outputFormat: !!outputFormat,
         hasOtherTools: Array.isArray(shared.body?.tools) && shared.body.tools.length > 0,
-        blockingMode: true,
       })
       // Only forward `freshSessionId` to the SDK as a resume target when the
-      // JSONL was actually written. For lone-user inputs in blocking mode the
-      // sliced history is empty, no JSONL is written, and resuming a non-
-      // existent session id would crash the SDK ("No conversation found").
+      // JSONL was actually written. Empty message inputs short-circuit
+      // transcript writes; resuming a non-existent session id would crash
+      // the SDK ("No conversation found").
       freshSessionId = prep.wroteTranscript ? prep.sessionId : undefined
       freshMessageUuids = prep.wroteTranscript ? prep.messageUuids : undefined
       effectiveUseJsonlFresh = prep.wroteTranscript

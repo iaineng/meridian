@@ -83,14 +83,6 @@ export interface TranscriptOptions {
    * the final result is ready. Ignored when `outputFormat` is false.
    */
   hasOtherTools?: boolean
-  /**
-   * Blocking MCP mode: the SDK query will live across multiple HTTP rounds
-   * with real Promise-blocked MCP handlers. No synthetic filler / continue
-   * prompt is needed because `resume` is never used. Trailing-user histories
-   * are sliced normally (last user becomes the prompt); trailing tool_use is
-   * treated as a normal prefix write without the synthetic tail.
-   */
-  blockingMode?: boolean
 }
 
 export interface BuildJsonlResult {
@@ -437,10 +429,7 @@ export function buildJsonlLines(
   }
 
   const rawClass = classifyContinuation(messages)
-  // Blocking mode never needs the synthetic tail: the SDK query lives across
-  // turns, so there is no resume-time byte-shape stability concern. Slice
-  // trailing-user histories normally (last user becomes the prompt).
-  const includesLastUser = opts?.blockingMode ? false : rawClass.includesLastUser
+  const includesLastUser = rawClass.includesLastUser
   const lastIsUser = rawClass.lastIsUser
   const hasTrailingToolUse = rawClass.hasTrailingToolUse
   const sliceEnd = (lastIsUser && !includesLastUser) ? n - 1 : n
@@ -627,9 +616,7 @@ export async function prepareFreshSession(
   const rawClass = classifyContinuation(messages)
   const lastIsUser = rawClass.lastIsUser
   const hasTrailingToolUse = rawClass.hasTrailingToolUse
-  // Blocking mode: skip synthetic tail injection for the same reason as
-  // buildJsonlLines. The last user content becomes the real prompt.
-  const includesLastUser = opts?.blockingMode ? false : rawClass.includesLastUser
+  const includesLastUser = rawClass.includesLastUser
 
   // Apply the SAME crEncode we use when writing history to JSONL so that
   // the u_N bytes on request N (prompt path) match u_N bytes on request N+1

@@ -1,9 +1,12 @@
 /**
- * Unit tests for the blockingMode flag on prepareFreshSession and the
- * normalizeToolResultForMcp helper. Verifies:
- *   - blockingMode: false (default) still injects synthetic filler
- *   - blockingMode: true skips synthetic filler on lone-user / trailing-user
- *   - tool_result → MCP CallToolResult shape conversion (string / blocks / images)
+ * Unit tests for prepareFreshSession (ephemeral/blocking share the same JSONL
+ * construction) and the normalizeToolResultForMcp helper. Verifies:
+ *   - lone-user, [u1, u2], trailing tool_use paths all get synthetic FILLER
+ *     so the JSONL always ends on assistant (avoids CLI's
+ *     deserializeMessages injecting a `NO_RESPONSE_REQUESTED` sentinel on
+ *     resume).
+ *   - tool_result → MCP CallToolResult shape conversion (string / blocks /
+ *     images)
  */
 
 import { describe, it, expect } from "bun:test"
@@ -29,73 +32,75 @@ async function readJsonl(cwd: string, sessionId: string): Promise<any[]> {
   return text.trim().split("\n").map(l => JSON.parse(l))
 }
 
-describe("prepareFreshSession blockingMode", () => {
-  it("default mode: lone-user gets synthetic filler + CONTINUE prompt", async () => {
+function hasSyntheticAssistant(rows: any[]): boolean {
+  return rows.some(r =>
+    r.type === "assistant" &&
+    Array.isArray(r.message?.content) &&
+    r.message.content.some((b: any) => b.type === "text" && b.text === "One moment."),
+  )
+}
+
+describe("prepareFreshSession (ephemeral/blocking share identical JSONL construction)", () => {
+  it("lone-user: filler appended, prompt = 'Continue.', JSONL ends on assistant", async () => {
     const cwd = await tmpCwd()
-    const messages = [{ role: "user", content: "hello" }]
-    const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(messages, cwd, {})
+    const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(
+      [{ role: "user", content: "hello" }], cwd, {},
+    )
     expect(wroteTranscript).toBe(true)
     expect(lastUserPrompt).toBe("Continue.")
     const rows = await readJsonl(cwd, sessionId)
-    const hasSyntheticAssistant = rows.some(r =>
-      r.type === "assistant" &&
-      Array.isArray(r.message?.content) &&
-      r.message.content.some((b: any) => b.type === "text" && b.text === "One moment."),
+    expect(hasSyntheticAssistant(rows)).toBe(true)
+    // CLI-compat invariant: JSONL last row must be assistant so
+    // deserializeMessages does NOT splice in a NO_RESPONSE_REQUESTED sentinel.
+    expect(rows[rows.length - 1]!.type).toBe("assistant")
+  })
+
+  it("[u1, u2] (no assistant history): filler appended, prompt = 'Continue.', JSONL ends on assistant", async () => {
+    const cwd = await tmpCwd()
+    const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(
+      [
+        { role: "user", content: "prep context" },
+        { role: "user", content: "do the thing" },
+      ], cwd, {},
     )
-    expect(hasSyntheticAssistant).toBe(true)
+    expect(wroteTranscript).toBe(true)
+    expect(lastUserPrompt).toBe("Continue.")
+    const rows = await readJsonl(cwd, sessionId)
+    expect(hasSyntheticAssistant(rows)).toBe(true)
+    expect(rows[rows.length - 1]!.type).toBe("assistant")
   })
 
-  it("blockingMode: lone-user uses real user content as prompt, no synthetic filler", async () => {
+  it("trailing tool_use + tool_result: filler appended, prompt = 'Proceed as appropriate.'", async () => {
     const cwd = await tmpCwd()
-    const messages = [{ role: "user", content: "hello there" }]
-    const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(messages, cwd, {
-      blockingMode: true,
-    })
-    // lone-user + blocking → no JSONL rows needed (last user becomes prompt)
-    expect(wroteTranscript).toBe(false)
-    // Result is crEncode-processed [{type:"text", text: <encoded>}]
-    expect(Array.isArray(lastUserPrompt)).toBe(true)
-    const arr = lastUserPrompt as any[]
-    expect(arr.length).toBeGreaterThan(0)
-    expect(arr[0].type).toBe("text")
-    // Session id is generated regardless of wroteTranscript
-    expect(sessionId).toMatch(/^[0-9a-f-]{36}$/i)
-  })
-
-  it("blockingMode: no JSONL file exists on disk when wroteTranscript is false (regression)", async () => {
-    // Regression: the blocking handler must NOT forward `sessionId` as an SDK
-    // resume target when no JSONL was written — otherwise the SDK reports
-    // "No conversation found with session ID: <uuid>" on the first request.
-    const cwd = await tmpCwd()
-    const messages = [{ role: "user", content: "first turn" }]
-    const { sessionId, wroteTranscript } = await prepareFreshSession(messages, cwd, { blockingMode: true })
-    expect(wroteTranscript).toBe(false)
-    const baseDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(require("os").homedir(), ".claude")
-    const file = path.join(baseDir, "projects", cwd.replace(/[\\/:]/g, "-"), `${sessionId}.jsonl`)
-    let existed = true
-    try { await fs.access(file) } catch { existed = false }
-    expect(existed).toBe(false)
-  })
-
-  it("blockingMode: trailing tool_use (pseudo-continuation) also skips synthetic tail", async () => {
-    const cwd = await tmpCwd()
-    // Assistant with unresolved tool_use + trailing user (simulating resume shape).
     const messages = [
       { role: "user", content: "do something" },
       { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "Read", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_1", content: "ok" }] },
     ]
-    const { sessionId, wroteTranscript } = await prepareFreshSession(messages, cwd, {
-      blockingMode: true,
-    })
+    const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(messages, cwd, {})
     expect(wroteTranscript).toBe(true)
+    expect(lastUserPrompt).toBe("Proceed as appropriate.")
     const rows = await readJsonl(cwd, sessionId)
-    const hasSyntheticAssistant = rows.some(r =>
-      r.type === "assistant" &&
-      Array.isArray(r.message?.content) &&
-      r.message.content.some((b: any) => b.type === "text" && b.text === "One moment."),
-    )
-    expect(hasSyntheticAssistant).toBe(false)
+    expect(hasSyntheticAssistant(rows)).toBe(true)
+    expect(rows[rows.length - 1]!.type).toBe("assistant")
+  })
+
+  it("normal [u, a, u]: no filler, prompt = real u content, JSONL ends on assistant a", async () => {
+    const cwd = await tmpCwd()
+    const messages = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: [{ type: "text", text: "hi" }] },
+      { role: "user", content: "follow-up" },
+    ]
+    const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(messages, cwd, {})
+    expect(wroteTranscript).toBe(true)
+    // Trailing user becomes the prompt (crEncoded + wrapped as array).
+    expect(Array.isArray(lastUserPrompt)).toBe(true)
+    expect((lastUserPrompt as any[])[0].text).toBe(crEncode("follow-up"))
+    const rows = await readJsonl(cwd, sessionId)
+    expect(hasSyntheticAssistant(rows)).toBe(false)
+    // JSONL last row is real assistant `a`, not a filler.
+    expect(rows[rows.length - 1]!.type).toBe("assistant")
   })
 })
 
