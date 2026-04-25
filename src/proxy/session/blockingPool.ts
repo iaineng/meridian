@@ -18,7 +18,7 @@
  */
 
 import { claudeLog } from "../../logger"
-import type { TokenUsage } from "./lineage"
+import { measurePrefixOverlap, type TokenUsage } from "./lineage"
 
 export type BlockingSessionKey =
   | { kind: "header"; value: string }
@@ -90,6 +90,16 @@ export type BufferedEvent =
   | { kind: "error"; error: Error }
 
 /**
+ * Compact form of an assistant content block, used for verifying that the
+ * client's reported assistant turn matches what the SDK actually emitted.
+ * Thinking blocks are intentionally excluded — see
+ * `lastEmittedAssistantBlocks` on `BlockingSessionState`.
+ */
+export type EmittedAssistantBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; name: string; input: unknown }
+
+/**
  * Per-tool-name rendezvous slot: `bindings` are producer-first (pre-resolved
  * by the consumer task); `waiters` are handler-first (unresolved, awaiting
  * the stream event's tool_use_id).
@@ -136,8 +146,24 @@ export interface BlockingSessionState {
 
   /** Input-json accumulator per SDK block index, for tool_use bindings. */
   inputJsonAccum: Map<number, string>
+  /** Text accumulator per SDK block index for text content blocks (used by
+   *  the emitted-assistant snapshot for drift detection). */
+  textAccum: Map<number, string>
+  /** Block kind per SDK block index (for the snapshot's ordering and
+   *  filtering — only text and tool_use are tracked). */
+  blockTypes: Map<number, "text" | "tool_use">
   /** tool_use info keyed by SDK block index, captured at content_block_start. */
   toolUseIdBySdkIdx: Map<number, { toolName: string; toolUseId: string }>
+  /**
+   * Snapshot of the most recent assistant turn the SDK emitted (only text
+   * and tool_use blocks; thinking is intentionally ignored). Captured at
+   * `message_delta(stop_reason="tool_use")` and used by the next
+   * continuation request to verify the client's view of the assistant turn
+   * matches what we actually emitted. Mismatch = client desynced (forked
+   * locally, fabricated content, etc.) → release + promote to a fresh
+   * sibling rather than feed bogus tool_results into the live handler.
+   */
+  lastEmittedAssistantBlocks: Array<EmittedAssistantBlock> | null
   /** Lifetime usage accumulator — summed across all SDK turns. Diagnostic only;
    *  the wire protocol relies on the SDK's native `message_start` / `message_delta`
    *  frames being forwarded verbatim, so meridian no longer synthesises usage. */
@@ -161,14 +187,22 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1_000
 const JANITOR_TICK_MS = 60_000
 
 class BlockingPool {
-  private readonly sessions = new Map<string, BlockingSessionState>()
+  /**
+   * Multi-sibling storage: a single stringified conversation-identity key
+   * can map to several concurrent live states. This models forked branches
+   * of the same conversation (same `firstUserHash` or `agentSessionId` but
+   * divergent `priorMessageHashes`). A lookup selects the sibling whose
+   * stored prior-hash array is the longest strict prefix of the incoming.
+   */
+  private readonly siblings = new Map<string, BlockingSessionState[]>()
   private janitor: ReturnType<typeof setInterval> | null = null
   private timeoutMs = DEFAULT_TIMEOUT_MS
   private shutdownInstalled = false
 
   /**
-   * Acquire a new session state. Throws if the key is already occupied —
-   * callers are expected to have checked `lookup` first.
+   * Acquire a new session state. Never throws on key collision — appends a
+   * sibling to the array at this key. Janitor and shutdown handlers are
+   * installed on first use.
    */
   acquire(
     key: BlockingSessionKey,
@@ -177,18 +211,17 @@ class BlockingPool {
       | "status" | "bindingsByToolName" | "pendingTools" | "currentRoundToolIds"
       | "pendingRoundClose" | "cumulativeUsage"
       | "eventBuffer" | "activeSink" | "sdkEnded" | "createdAt" | "expiresAt"
-      | "inputJsonAccum" | "toolUseIdBySdkIdx"
+      | "inputJsonAccum" | "textAccum" | "blockTypes" | "toolUseIdBySdkIdx"
+      | "lastEmittedAssistantBlocks"
     >,
   ): BlockingSessionState {
     const id = stringifyBlockingKey(key)
-    const existing = this.sessions.get(id)
-    if (existing) {
-      // If the existing session is already terminated, replace it.
-      if (existing.status === "terminated") {
-        this.sessions.delete(id)
-      } else {
-        throw new Error(`blockingPool.acquire: key already in use: ${id}`)
-      }
+    const arr = this.siblings.get(id) ?? []
+    // Defensive prune: drop any terminated residue that a bypass path may
+    // have left behind. `release` already splices on teardown, so this is
+    // belt-and-braces for tests and unusual shutdown sequences.
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i]!.status === "terminated") arr.splice(i, 1)
     }
     const now = Date.now()
     const state: BlockingSessionState = {
@@ -201,44 +234,75 @@ class BlockingPool {
       currentRoundToolIds: [],
       pendingRoundClose: null,
       inputJsonAccum: new Map(),
+      textAccum: new Map(),
+      blockTypes: new Map(),
       toolUseIdBySdkIdx: new Map(),
+      lastEmittedAssistantBlocks: null,
       cumulativeUsage: {},
       eventBuffer: [],
       activeSink: null,
       sdkEnded: false,
     }
-    this.sessions.set(id, state)
+    arr.push(state)
+    this.siblings.set(id, arr)
     this.startJanitorIfNeeded()
     this.installShutdownHandlers()
-    claudeLog("blocking.session.acquired", { key: id, ephemeralSessionId: init.ephemeralSessionId })
+    claudeLog("blocking.session.acquired", {
+      key: id,
+      ephemeralSessionId: init.ephemeralSessionId,
+      siblingCount: arr.length,
+    })
+    if (arr.length > 4) {
+      claudeLog("blocking.siblings.high_water", { key: id, siblingCount: arr.length })
+    }
     return state
   }
 
-  lookup(key: BlockingSessionKey): BlockingSessionState | undefined {
-    const state = this.sessions.get(stringifyBlockingKey(key))
-    if (!state) return undefined
-    if (state.status === "terminated") return undefined
-    return state
+  /**
+   * Find the sibling at `key` whose stored `priorMessageHashes` is the
+   * longest strict prefix of `priorMessageHashes`. Returns undefined when
+   * no sibling's stored priors are a prefix of the incoming.
+   *
+   * Tiebreaker on equal prefix length: the sibling with the larger
+   * `createdAt` (most recently acquired).
+   */
+  lookup(key: BlockingSessionKey, priorMessageHashes: string[]): BlockingSessionState | undefined {
+    const arr = this.siblings.get(stringifyBlockingKey(key))
+    if (!arr || arr.length === 0) return undefined
+    let best: BlockingSessionState | undefined
+    for (const s of arr) {
+      if (s.status === "terminated") continue
+      const overlap = measurePrefixOverlap(s.priorMessageHashes, priorMessageHashes)
+      if (overlap !== s.priorMessageHashes.length) continue
+      if (!best) { best = s; continue }
+      if (s.priorMessageHashes.length > best.priorMessageHashes.length) { best = s; continue }
+      if (s.priorMessageHashes.length === best.priorMessageHashes.length && s.createdAt > best.createdAt) {
+        best = s
+      }
+    }
+    return best
   }
 
   /**
    * Renew a session's deadline. Called on every HTTP attach / SDK event so
-   * idle sessions time out but active ones do not.
+   * idle sessions time out but active ones do not. Per-state (not per-key)
+   * because sibling states under one key have independent expiry.
    */
-  touch(key: BlockingSessionKey): void {
-    const state = this.sessions.get(stringifyBlockingKey(key))
-    if (!state) return
+  touch(state: BlockingSessionState): void {
+    if (state.status === "terminated") return
     state.expiresAt = Date.now() + this.timeoutMs
   }
 
   /**
-   * Remove a session. Rejects all pending tools and runs cleanup closure.
-   * Idempotent.
+   * Remove a specific sibling state. Rejects all pending tools and runs
+   * cleanup closure. Identified by reference (not by key) because multiple
+   * siblings can coexist under one key. Idempotent.
    */
-  async release(key: BlockingSessionKey, reason: string): Promise<void> {
-    const id = stringifyBlockingKey(key)
-    const state = this.sessions.get(id)
-    if (!state) return
+  async release(state: BlockingSessionState, reason: string): Promise<void> {
+    const id = stringifyBlockingKey(state.key)
+    const arr = this.siblings.get(id)
+    const wasMember = arr ? arr.indexOf(state) >= 0 : false
+    if (state.status === "terminated" && !wasMember) return
     if (state.status !== "terminated") {
       state.status = "terminated"
       state.pendingRoundClose = null
@@ -260,16 +324,42 @@ class BlockingPool {
       }
       state.bindingsByToolName.clear()
     }
-    this.sessions.delete(id)
+    if (arr) {
+      const i = arr.indexOf(state)
+      if (i >= 0) arr.splice(i, 1)
+      if (arr.length === 0) this.siblings.delete(id)
+    }
     try { await state.cleanup() } catch (e) {
       claudeLog("blocking.cleanup_failed", { key: id, error: e instanceof Error ? e.message : String(e) })
     }
     claudeLog("blocking.session.released", { key: id, reason })
-    if (this.sessions.size === 0) this.stopJanitor()
+    if (this.totalSize() === 0) this.stopJanitor()
   }
 
+  /**
+   * Release every sibling under a key. For admin/drain paths; not used by
+   * the normal request pipeline. Snapshots the array before iterating
+   * because `release` mutates it.
+   */
+  async releaseAll(key: BlockingSessionKey, reason: string): Promise<void> {
+    const arr = this.siblings.get(stringifyBlockingKey(key))
+    if (!arr || arr.length === 0) return
+    const snapshot = [...arr]
+    for (const s of snapshot) {
+      try { await this.release(s, reason) } catch {}
+    }
+  }
+
+  /** Number of distinct conversation-identity keys currently live. */
   size(): number {
-    return this.sessions.size
+    return this.siblings.size
+  }
+
+  /** Total number of live sibling states across all keys. */
+  totalSize(): number {
+    let n = 0
+    for (const arr of this.siblings.values()) n += arr.length
+    return n
   }
 
   /**
@@ -277,9 +367,10 @@ class BlockingPool {
    * from process-termination paths where async awaits may not complete.
    */
   async shutdown(reason: string): Promise<void> {
-    const keys = Array.from(this.sessions.values()).map(s => s.key)
-    for (const key of keys) {
-      try { await this.release(key, reason) } catch {}
+    const all: BlockingSessionState[] = []
+    for (const arr of this.siblings.values()) all.push(...arr)
+    for (const s of all) {
+      try { await this.release(s, reason) } catch {}
     }
     this.stopJanitor()
   }
@@ -319,12 +410,16 @@ class BlockingPool {
 
   private async tick(): Promise<void> {
     const now = Date.now()
-    const expired: BlockingSessionKey[] = []
-    for (const state of this.sessions.values()) {
-      if (state.expiresAt <= now) expired.push(state.key)
+    // Flat-snapshot before release: release() splices the shared sibling
+    // array, so a direct iteration would skip neighbours after a splice.
+    const expired: BlockingSessionState[] = []
+    for (const arr of this.siblings.values()) {
+      for (const s of arr) {
+        if (s.expiresAt <= now) expired.push(s)
+      }
     }
-    for (const key of expired) {
-      await this.release(key, "timeout")
+    for (const s of expired) {
+      await this.release(s, "timeout")
     }
   }
 
@@ -334,8 +429,10 @@ class BlockingPool {
   async _runJanitor(): Promise<void> { await this.tick() }
   /** Test-only: full reset. */
   async _reset(): Promise<void> {
-    for (const state of Array.from(this.sessions.values())) {
-      await this.release(state.key, "reset")
+    const all: BlockingSessionState[] = []
+    for (const arr of this.siblings.values()) all.push(...arr)
+    for (const s of all) {
+      await this.release(s, "reset")
     }
     this.timeoutMs = DEFAULT_TIMEOUT_MS
     this.stopJanitor()

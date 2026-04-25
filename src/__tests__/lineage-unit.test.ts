@@ -10,8 +10,10 @@ import {
   measurePrefixOverlap,
   measureSuffixOverlap,
   verifyLineage,
+  verifyEmittedAssistant,
   MIN_SUFFIX_FOR_COMPACTION,
   type SessionState,
+  type EmittedAssistantBlock,
 } from "../proxy/session/lineage"
 
 function msg(role: string, content: string) {
@@ -433,5 +435,122 @@ describe("verifyLineage", () => {
     // Must NOT be compaction — the suffix is at the wrong position
     expect(result.type).not.toBe("compaction")
     expect(result.type).toBe("diverged")
+  })
+})
+
+describe("verifyEmittedAssistant", () => {
+  const txt = (text: string): EmittedAssistantBlock => ({ type: "text", text })
+  const tu = (name: string, input: unknown): EmittedAssistantBlock => ({ type: "tool_use", name, input })
+
+  it("matches identical text + tool_use sequence", () => {
+    const emitted = [txt("Looking now."), tu("Read", { path: "/etc/hosts" })]
+    const client = [
+      { type: "text", text: "Looking now." },
+      { type: "tool_use", id: "tu_A", name: "Read", input: { path: "/etc/hosts" } },
+    ]
+    expect(verifyEmittedAssistant(emitted, client)).toEqual({ match: true })
+  })
+
+  it("ignores tool_use_id (intentionally — clients may rewrite)", () => {
+    const emitted = [tu("Read", { path: "x" })]
+    const a = [{ type: "tool_use", id: "tu_REAL", name: "Read", input: { path: "x" } }]
+    const b = [{ type: "tool_use", id: "tu_REWRITTEN", name: "Read", input: { path: "x" } }]
+    const c = [{ type: "tool_use", name: "Read", input: { path: "x" } }] // missing id
+    expect(verifyEmittedAssistant(emitted, a)).toEqual({ match: true })
+    expect(verifyEmittedAssistant(emitted, b)).toEqual({ match: true })
+    expect(verifyEmittedAssistant(emitted, c)).toEqual({ match: true })
+  })
+
+  it("filters thinking blocks out of client content before comparing", () => {
+    const emitted = [txt("Result"), tu("Read", { path: "x" })]
+    const client = [
+      { type: "thinking", thinking: "let me reason...", signature: "sig" },
+      { type: "text", text: "Result" },
+      { type: "tool_use", id: "tu_A", name: "Read", input: { path: "x" } },
+      { type: "thinking", thinking: "more thoughts", signature: "sig2" },
+    ]
+    expect(verifyEmittedAssistant(emitted, client)).toEqual({ match: true })
+  })
+
+  it("treats client string content as a single text block", () => {
+    const emitted = [txt("Hello.")]
+    expect(verifyEmittedAssistant(emitted, "Hello.")).toEqual({ match: true })
+    const out = verifyEmittedAssistant(emitted, "Different.")
+    expect(out.match).toBe(false)
+  })
+
+  it("canonicalizes tool_use input — key reorder is OK", () => {
+    const emitted = [tu("Bash", { cmd: "ls", cwd: "/tmp" })]
+    const client = [{ type: "tool_use", id: "x", name: "Bash", input: { cwd: "/tmp", cmd: "ls" } }]
+    expect(verifyEmittedAssistant(emitted, client)).toEqual({ match: true })
+  })
+
+  it("canonicalizes nested input — deep key reorder is OK", () => {
+    const emitted = [tu("X", { a: { x: 1, y: 2 }, b: [{ p: 1, q: 2 }] })]
+    const client = [{ type: "tool_use", name: "X", input: { b: [{ q: 2, p: 1 }], a: { y: 2, x: 1 } } }]
+    expect(verifyEmittedAssistant(emitted, client)).toEqual({ match: true })
+  })
+
+  it("array order in input is significant (not reordered)", () => {
+    const emitted = [tu("X", { items: ["a", "b", "c"] })]
+    const reordered = [{ type: "tool_use", name: "X", input: { items: ["b", "a", "c"] } }]
+    const out = verifyEmittedAssistant(emitted, reordered)
+    expect(out.match).toBe(false)
+  })
+
+  it("count differs → mismatch", () => {
+    const emitted = [tu("Read", { path: "x" })]
+    const client = [
+      { type: "tool_use", name: "Read", input: { path: "x" } },
+      { type: "tool_use", name: "Bash", input: { cmd: "ls" } },
+    ]
+    const out = verifyEmittedAssistant(emitted, client)
+    expect(out.match).toBe(false)
+    if (!out.match) expect(out.reason).toContain("block count differs")
+  })
+
+  it("block kind differs → mismatch", () => {
+    const emitted = [tu("Read", { path: "x" })]
+    const client = [{ type: "text", text: "fake" }]
+    const out = verifyEmittedAssistant(emitted, client)
+    expect(out.match).toBe(false)
+    if (!out.match) expect(out.reason).toContain("type differs")
+  })
+
+  it("text content differs → mismatch", () => {
+    const emitted = [txt("hello")]
+    const client = [{ type: "text", text: "hello world" }]
+    const out = verifyEmittedAssistant(emitted, client)
+    expect(out.match).toBe(false)
+    if (!out.match) expect(out.reason).toContain("text content differs")
+  })
+
+  it("tool_use name differs → mismatch", () => {
+    const emitted = [tu("Read", { path: "x" })]
+    const client = [{ type: "tool_use", name: "Bash", input: { path: "x" } }]
+    const out = verifyEmittedAssistant(emitted, client)
+    expect(out.match).toBe(false)
+    if (!out.match) expect(out.reason).toContain("tool_use name differs")
+  })
+
+  it("tool_use input differs → mismatch", () => {
+    const emitted = [tu("Read", { path: "/etc/hosts" })]
+    const client = [{ type: "tool_use", name: "Read", input: { path: "/etc/passwd" } }]
+    const out = verifyEmittedAssistant(emitted, client)
+    expect(out.match).toBe(false)
+    if (!out.match) expect(out.reason).toContain("tool_use input differs")
+  })
+
+  it("rejects malformed client content (neither string nor array)", () => {
+    const emitted = [txt("hello")]
+    const out = verifyEmittedAssistant(emitted, { not: "an array" })
+    expect(out.match).toBe(false)
+    if (!out.match) expect(out.reason).toContain("neither string nor array")
+  })
+
+  it("empty emitted vs empty client (both filtered to []) → match", () => {
+    expect(verifyEmittedAssistant([], [])).toEqual({ match: true })
+    // Client has only thinking blocks → filtered to empty → matches empty emitted
+    expect(verifyEmittedAssistant([], [{ type: "thinking", thinking: "x" }])).toEqual({ match: true })
   })
 })

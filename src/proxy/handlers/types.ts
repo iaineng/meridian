@@ -52,8 +52,14 @@ export interface HandlerContext {
   blockingState?: BlockingSessionState
   /** Pre-built passthrough MCP server (blocking mode stashes it on the handler). */
   prebuiltPassthroughMcp?: ReturnType<typeof createBlockingPassthroughMcpServer>
-  /** Continuation-only: tool_result content blocks extracted from the last user message. */
-  pendingToolResults?: Array<{ tool_use_id: string; content: unknown; is_error?: boolean }>
+  /**
+   * Continuation-only: tool_result content blocks extracted from the last
+   * user message, in the order the client sent them. `tool_use_id` is
+   * optional — clients may rewrite or omit the value, so the streaming
+   * pipeline routes results positionally via `state.currentRoundToolIds`
+   * and only consults `tool_use_id` as a hint.
+   */
+  pendingToolResults?: Array<{ tool_use_id?: string; content: unknown; is_error?: boolean }>
 }
 
 export interface ClassicRetryResult {

@@ -124,10 +124,15 @@ export function translateBlockingMessage(
   const frames: Uint8Array[] = []
 
   if (eventType === "message_start") {
-    // New SDK turn → new HTTP round's message. Reset per-turn tool_use
-    // tracking (input_json accumulators, SDK-index → tool_use_id map) so
-    // the next turn's bindings don't see stale entries. Forward verbatim.
+    // New SDK turn → new HTTP round's message. Reset per-turn accumulators
+    // (input_json, text, SDK-index → tool_use_id map, block-kind map) so
+    // the next turn's bindings/snapshot don't see stale entries. Note we
+    // do NOT clear `lastEmittedAssistantBlocks` here — the next continuation
+    // request needs it for drift detection and it gets overwritten the next
+    // time the SDK reaches `message_delta(stop_reason=tool_use)`.
     state.inputJsonAccum.clear()
+    state.textAccum.clear()
+    state.blockTypes.clear()
     state.toolUseIdBySdkIdx.clear()
     const startUsage = event.message?.usage as TokenUsage | undefined
     if (startUsage) state.cumulativeUsage = sumUsage(state.cumulativeUsage, startUsage)
@@ -156,6 +161,23 @@ export function translateBlockingMessage(
       const expectedIds = new Set<string>()
       for (const [, v] of state.toolUseIdBySdkIdx) expectedIds.add(v.toolUseId)
       if (expectedIds.size > 0) state.pendingRoundClose = { expectedIds }
+      // Snapshot the assistant turn for the next continuation's drift check.
+      // Only text and tool_use blocks are tracked (thinking is intentionally
+      // excluded — clients may or may not echo signature-bearing blocks
+      // verbatim and they don't affect tool routing). Sorted by SDK block
+      // index so the order matches what the client received via SSE.
+      state.lastEmittedAssistantBlocks = Array.from(state.blockTypes.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([idx, kind]) => {
+          if (kind === "text") {
+            return { type: "text" as const, text: state.textAccum.get(idx) ?? "" }
+          }
+          const tu = state.toolUseIdBySdkIdx.get(idx)
+          const raw = state.inputJsonAccum.get(idx) ?? ""
+          let input: unknown = {}
+          if (raw) { try { input = JSON.parse(raw) } catch {} }
+          return { type: "tool_use" as const, name: tu?.toolName ?? "", input }
+        })
     }
     frames.push(encoder.encode(`event: message_delta\ndata: ${JSON.stringify(event)}\n\n`))
     return frames
@@ -175,6 +197,7 @@ export function translateBlockingMessage(
         if (eventIndex !== undefined) {
           state.toolUseIdBySdkIdx.set(eventIndex, { toolName: clientName, toolUseId: block.id })
           state.inputJsonAccum.set(eventIndex, "")
+          state.blockTypes.set(eventIndex, "tool_use")
         }
       }
       // Forward with the MCP prefix stripped; keep SDK's native block index.
@@ -183,6 +206,14 @@ export function translateBlockingMessage(
         content_block: { ...block, name: clientName, input: {} },
       })}\n\n`))
       return frames
+    }
+    if (block?.type === "text" && eventIndex !== undefined) {
+      // Track text blocks for the emitted-assistant snapshot. The block's
+      // initial text is usually empty (deltas carry the content) but seed
+      // it just in case.
+      const initial = typeof block.text === "string" ? block.text : ""
+      state.textAccum.set(eventIndex, initial)
+      state.blockTypes.set(eventIndex, "text")
     }
     frames.push(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify(event)}\n\n`))
     return frames
@@ -195,6 +226,11 @@ export function translateBlockingMessage(
           && state.inputJsonAccum.has(eventIndex)) {
         const prev = state.inputJsonAccum.get(eventIndex) ?? ""
         state.inputJsonAccum.set(eventIndex, prev + delta.partial_json)
+      }
+      if (delta?.type === "text_delta" && typeof delta.text === "string"
+          && state.textAccum.has(eventIndex)) {
+        const prev = state.textAccum.get(eventIndex) ?? ""
+        state.textAccum.set(eventIndex, prev + delta.text)
       }
     }
     frames.push(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify(event)}\n\n`))
@@ -294,12 +330,29 @@ export function runBlockingStream(
       key: stringifyBlockingKey(key),
       resolving: handler.pendingToolResults?.length ?? 0,
     })
-    for (const tr of handler.pendingToolResults ?? []) {
-      const pending = state.pendingTools.get(tr.tool_use_id)
+    // Route incoming tool_results to suspended handlers. Strategy:
+    //   1. If the incoming `tool_use_id` happens to match a pending entry,
+    //      use it (this preserves the cheap/correct path when the client's
+    //      IDs are reliable).
+    //   2. Otherwise fall back to positional routing against
+    //      `state.currentRoundToolIds`, which records the tool_use IDs in
+    //      the order the SDK emitted them this turn. Many clients rewrite
+    //      or omit IDs between rounds, but they preserve order.
+    const orderedRoundIds = state.currentRoundToolIds.slice()
+    const results = handler.pendingToolResults ?? []
+    for (let i = 0; i < results.length; i++) {
+      const tr = results[i]!
+      let pending = (typeof tr.tool_use_id === "string")
+        ? state.pendingTools.get(tr.tool_use_id)
+        : undefined
+      if (!pending) {
+        const positionalId = orderedRoundIds[i]
+        if (positionalId) pending = state.pendingTools.get(positionalId)
+      }
       if (!pending) continue
       const mcpResult = normalizeToolResultForMcp(tr)
       try { pending.resolve(mcpResult) } catch {}
-      state.pendingTools.delete(tr.tool_use_id)
+      state.pendingTools.delete(pending.toolUseId)
     }
     state.currentRoundToolIds = []
     state.pendingRoundClose = null
@@ -318,7 +371,7 @@ export function runBlockingStream(
     })
   }
 
-  blockingPool.touch(key)
+  blockingPool.touch(state)
 
   let streamClosed = false
   let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -414,7 +467,7 @@ export function runBlockingStream(
           safeEnqueue(makeMessageStopFrame(encoder))
           recordTelemetry()
           closeHttp()
-          void blockingPool.release(key, `sdk_ended:${evt.reason}`)
+          void blockingPool.release(state, `sdk_ended:${evt.reason}`)
           return
         }
         if (evt.kind === "error") {
@@ -424,7 +477,7 @@ export function runBlockingStream(
           })}\n\n`))
           recordTelemetry(evt.error)
           closeHttp()
-          void blockingPool.release(key, "sdk_error")
+          void blockingPool.release(state, "sdk_error")
           return
         }
       }

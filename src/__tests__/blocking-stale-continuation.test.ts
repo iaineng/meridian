@@ -66,7 +66,7 @@ describe("blocking handler: stale continuation fall-through", () => {
     } as any
   }
 
-  it("retry on final round: pendingTools empty → release + ephemeral fall-through (no 400)", async () => {
+  it("retry on final round: pendingTools empty → release stale sibling + promote to blocking initial", async () => {
     const messages = [
       { role: "user", content: "read README" },
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
@@ -76,29 +76,34 @@ describe("blocking handler: stale continuation fall-through", () => {
     const firstUserHash = priorHashes[0]!
     const key = { kind: "lineage", hash: firstUserHash } as const
 
-    const state = blockingPool.acquire(key, {
+    const stale = blockingPool.acquire(key, {
       key,
       ephemeralSessionId: "00000000-0000-0000-0000-000000000001",
       workingDirectory: cwd,
       priorMessageHashes: priorHashes,
       cleanup: async () => {},
     })
-    expect(state.pendingTools.size).toBe(0)
+    expect(stale.pendingTools.size).toBe(0)
 
     const result = await buildBlockingHandler(makeShared({ messages }))
 
-    // Stale blocking session released — the key is gone from the pool.
-    expect(blockingPool.lookup(key)).toBeUndefined()
-    // Returned context is the ephemeral shape, not the blocking_continuation one.
-    expect(result.isBlockingContinuation).toBeFalsy()
-    expect(result.blockingMode).toBeFalsy()
+    // Stale sibling was released; a fresh blocking sibling now occupies the key.
+    expect(stale.status).toBe("terminated")
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(result.blockingMode).toBe(true)
+    expect(result.lineageType).toBe("blocking")
+    expect(blockingPool.totalSize()).toBe(1)
+    const fresh = blockingPool.lookup(key, priorHashes)
+    expect(fresh).toBeDefined()
+    expect(fresh).not.toBe(stale)
   })
 
   // Undo / rewritten-history scenarios: the first-user hash matches (same
   // conversation root) so the pool key collides, but prefix overlap against
-  // the stored priorMessageHashes fails → continuation branch is NOT entered
-  // (goes to the initial / else path instead of resolving pending tools with
-  // wrong data). None of these should throw 400.
+  // the live sibling's stored priorMessageHashes fails → continuation
+  // lookup misses → handler PROMOTES to the initial path, appending a NEW
+  // sibling alongside the live one. The live sibling's pending handler
+  // stays untouched. None of these should throw 400.
   describe("undo does not falsely trigger continuation", () => {
     // Helper: populate a blocking state representing a multi-round conversation
     // already in progress, with pending tool_use Z outstanding.
@@ -120,7 +125,7 @@ describe("blocking handler: stale continuation fall-through", () => {
       return { key, state }
     }
 
-    it("undo shortens history → prefix miss → falls through (no continuation, no 400)", async () => {
+    it("undo shortens history → prefix miss → promotes to a new sibling alongside live", async () => {
       // State reflects the live conversation up through asst3(tool_use Z).
       const live = [
         { role: "user", content: "q0" },
@@ -142,22 +147,21 @@ describe("blocking handler: stale continuation fall-through", () => {
       ]
       const result = await buildBlockingHandler(makeShared({ messages: undoShort }))
 
-      // prefix miss → continuation branch not entered; handler must not have
-      // resolved the pending tool with the undo's tool_result. Falls through
-      // to ephemeral (or initial); in either case the result is NOT a
-      // blocking_continuation.
-      expect(result.isBlockingContinuation).toBeFalsy()
-      // The live state's pending handler must NOT have been resolved or
-      // rejected by the undo request — it's still waiting for its real
-      // tool_result.
+      // prefix miss → continuation branch not entered; promoted to initial
+      // path → a new sibling appended. The live sibling stays untouched.
+      expect(result.blockingMode).toBe(true)
+      expect(result.isBlockingContinuation).toBe(false)
+      expect(result.lineageType).toBe("blocking")
       expect(pendingRejected).toBe(false)
-      // Live state may remain (key_conflict path) or get torn down, but if
-      // it remains, pending is untouched.
-      const after = blockingPool.lookup(key)
-      if (after) expect(after.pendingTools.has("toolu_Z")).toBe(true)
+      expect(state.status).toBe("streaming")
+      expect(state.pendingTools.has("toolu_Z")).toBe(true)
+      // The live sibling is still the one that matches its own priors.
+      expect(blockingPool.lookup(key, state.priorMessageHashes)).toBe(state)
+      // Two siblings now coexist under the same key.
+      expect(blockingPool.totalSize()).toBe(2)
     })
 
-    it("undo rewrites middle of history → prefix miss → falls through", async () => {
+    it("undo rewrites middle of history → prefix miss → promotes to a new sibling alongside live", async () => {
       const live = [
         { role: "user", content: "q0" },
         { role: "assistant", content: [{ type: "text", text: "a1" }] },
@@ -180,18 +184,26 @@ describe("blocking handler: stale continuation fall-through", () => {
       ]
       const result = await buildBlockingHandler(makeShared({ messages: undoEdited }))
 
-      expect(result.isBlockingContinuation).toBeFalsy()
+      expect(result.blockingMode).toBe(true)
+      expect(result.isBlockingContinuation).toBe(false)
+      expect(result.lineageType).toBe("blocking")
       expect(pendingRejected).toBe(false)
-      const after = blockingPool.lookup(key)
-      if (after) expect(after.pendingTools.has("toolu_Z")).toBe(true)
+      expect(state.status).toBe("streaming")
+      expect(state.pendingTools.has("toolu_Z")).toBe(true)
+      expect(blockingPool.lookup(key, state.priorMessageHashes)).toBe(state)
+      expect(blockingPool.totalSize()).toBe(2)
     })
   })
 
-  it("non-stale mismatch (pending non-empty, ids differ) still throws 400", async () => {
+  it("count mismatch (incoming count != pending count) still throws 400", async () => {
     const messages = [
       { role: "user", content: "read README" },
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
-      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_WRONG", content: "ok" }] },
+      // Two tool_results when the model only emitted one tool_use.
+      { role: "user", content: [
+        { type: "tool_result", tool_use_id: "toolu_X", content: "ok" },
+        { type: "tool_result", tool_use_id: "toolu_EXTRA", content: "ok" },
+      ] },
     ]
     const priorHashes = computeMessageHashes(messages.slice(0, -1))
     const firstUserHash = priorHashes[0]!
@@ -210,8 +222,71 @@ describe("blocking handler: stale continuation fall-through", () => {
     })
 
     await expect(buildBlockingHandler(makeShared({ messages }))).rejects.toThrow(
-      /tool_result count\/id mismatch: expected 1 \(toolu_X\), got 1 \(toolu_WRONG\)/,
+      /tool_result count mismatch: expected 1, got 2/,
     )
-    expect(blockingPool.lookup(key)).toBeUndefined()
+    expect(blockingPool.lookup(key, priorHashes)).toBeUndefined()
+    expect(state.status).toBe("terminated")
+  })
+
+  it("incoming tool_use_id differs from pending (count matches) → continuation accepted; resolve routes positionally", async () => {
+    const messages = [
+      { role: "user", content: "read README" },
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
+      // Client rewrote the tool_use_id to something else; count still matches.
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_REWRITTEN", content: "ok" }] },
+    ]
+    const priorHashes = computeMessageHashes(messages.slice(0, -1))
+    const firstUserHash = priorHashes[0]!
+    const key = { kind: "lineage", hash: firstUserHash } as const
+
+    const state = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: "00000000-0000-0000-0000-000000000003",
+      workingDirectory: cwd,
+      priorMessageHashes: priorHashes,
+      cleanup: async () => {},
+    })
+    state.pendingTools.set("toolu_X", {
+      mcpToolName: "Read", clientToolName: "Read", toolUseId: "toolu_X",
+      input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
+    })
+
+    const result = await buildBlockingHandler(makeShared({ messages }))
+
+    expect(result.isBlockingContinuation).toBe(true)
+    expect(result.lineageType).toBe("blocking_continuation")
+    expect(result.blockingState).toBe(state)
+    // Live sibling untouched; the resolve happens later in blockingStream.
+    expect(state.status).toBe("streaming")
+    expect(state.pendingTools.has("toolu_X")).toBe(true)
+  })
+
+  it("incoming tool_result with no tool_use_id field is still recognized as continuation shape", async () => {
+    const messages = [
+      { role: "user", content: "read README" },
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
+      // No tool_use_id at all on the tool_result block.
+      { role: "user", content: [{ type: "tool_result", content: "ok" }] },
+    ]
+    const priorHashes = computeMessageHashes(messages.slice(0, -1))
+    const firstUserHash = priorHashes[0]!
+    const key = { kind: "lineage", hash: firstUserHash } as const
+
+    const state = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: "00000000-0000-0000-0000-000000000004",
+      workingDirectory: cwd,
+      priorMessageHashes: priorHashes,
+      cleanup: async () => {},
+    })
+    state.pendingTools.set("toolu_X", {
+      mcpToolName: "Read", clientToolName: "Read", toolUseId: "toolu_X",
+      input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
+    })
+
+    const result = await buildBlockingHandler(makeShared({ messages }))
+
+    expect(result.isBlockingContinuation).toBe(true)
+    expect(result.lineageType).toBe("blocking_continuation")
   })
 })

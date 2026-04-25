@@ -117,6 +117,111 @@ export function measurePrefixOverlap(storedHashes: string[], incomingHashes: str
 }
 
 /**
+ * Compact form of an assistant content block, mirrored from
+ * `BlockingSessionState.lastEmittedAssistantBlocks`. Defined here (rather
+ * than imported from the pool) because lineage.ts is the pure-helper
+ * module — keeping the type local avoids a downward dep into pool state.
+ */
+export type EmittedAssistantBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; name: string; input: unknown }
+
+/**
+ * Canonical-JSON encode: deeply sort object keys before serialising. Used
+ * to compare tool_use `input` objects independent of key insertion order.
+ * Arrays preserve order; primitives pass through.
+ */
+function canonicalJson(v: unknown): string {
+  return JSON.stringify(canonicalizeValue(v))
+}
+
+function canonicalizeValue(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v
+  if (Array.isArray(v)) return v.map(canonicalizeValue)
+  const sorted: Record<string, unknown> = {}
+  for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+    sorted[k] = canonicalizeValue((v as Record<string, unknown>)[k])
+  }
+  return sorted
+}
+
+/**
+ * Verify that the client's reported assistant turn matches what the SDK
+ * actually emitted. Only `text` and `tool_use` blocks are compared
+ * (thinking blocks are filtered out of the client's content first — they
+ * carry signatures the model returns but we don't track them in the
+ * server-side snapshot). For each remaining block:
+ *
+ *   - block kind must match positionally
+ *   - text blocks: exact string equality
+ *   - tool_use blocks: name equality AND canonical-JSON input equality
+ *     (key order does not matter; arrays preserve order)
+ *
+ * `tool_use_id` is INTENTIONALLY ignored — many clients rewrite IDs
+ * between rounds. Routing is positional via `state.currentRoundToolIds`.
+ *
+ * Returns a discriminated result so callers can log the precise mismatch
+ * reason. A drift detection should release the live sibling and promote
+ * the request to a fresh blocking initial (the client has effectively
+ * forked from a point the server cannot reconstruct).
+ */
+export function verifyEmittedAssistant(
+  emitted: ReadonlyArray<EmittedAssistantBlock>,
+  clientAssistantContent: unknown,
+): { match: true } | { match: false; reason: string } {
+  // Anthropic's API permits assistant message content to be either a
+  // string or a block array. Normalise the string form to a single text
+  // block so the rest of the comparison is uniform.
+  let clientBlocks: Array<{ type: string; [k: string]: unknown }>
+  if (typeof clientAssistantContent === "string") {
+    clientBlocks = [{ type: "text", text: clientAssistantContent }]
+  } else if (Array.isArray(clientAssistantContent)) {
+    clientBlocks = clientAssistantContent.filter(
+      (b: any) => b && typeof b === "object" && (b.type === "text" || b.type === "tool_use"),
+    )
+  } else {
+    return { match: false, reason: "client assistant content is neither string nor array" }
+  }
+
+  if (clientBlocks.length !== emitted.length) {
+    return {
+      match: false,
+      reason: `block count differs: emitted=${emitted.length}, client=${clientBlocks.length}`,
+    }
+  }
+
+  for (let i = 0; i < emitted.length; i++) {
+    const e = emitted[i]!
+    const c = clientBlocks[i]!
+    if (c.type !== e.type) {
+      return {
+        match: false,
+        reason: `block[${i}] type differs: emitted=${e.type}, client=${c.type}`,
+      }
+    }
+    if (e.type === "text") {
+      const cText = typeof c.text === "string" ? c.text : ""
+      if (e.text !== cText) {
+        return { match: false, reason: `block[${i}] text content differs` }
+      }
+    } else {
+      const cName = typeof c.name === "string" ? c.name : ""
+      if (e.name !== cName) {
+        return {
+          match: false,
+          reason: `block[${i}] tool_use name differs: emitted=${e.name}, client=${cName}`,
+        }
+      }
+      if (canonicalJson(e.input) !== canonicalJson(c.input)) {
+        return { match: false, reason: `block[${i}] tool_use input differs` }
+      }
+    }
+  }
+
+  return { match: true }
+}
+
+/**
  * Measure how many consecutive messages at the END of the stored array
  * appear as a contiguous run in the incoming array.
  *
