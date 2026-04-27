@@ -102,7 +102,11 @@ async function* runSdkQueryWithRetry(
     body, workingDirectory, systemContext, profileEnv, adapter, sdkAgents,
     thinking, effort, taskBudget, betas, outputFormat, requestMeta,
   } = shared
-  const { resumeSessionId, freshSessionId, isUndo, undoRollbackUuid } = handler
+  const { resumeSessionId, freshSessionId, isUndo, undoRollbackUuid, isQueryDirect } = handler
+  // Query-direct lone-user path: meridian did not write a JSONL — passing
+  // any resume id would crash the SDK with "No conversation found". Force
+  // the SDK to start a fresh session instead.
+  const effectiveResumeSessionId = isQueryDirect ? undefined : (resumeSessionId ?? freshSessionId)
   const { passthrough, sdkHooks, passthroughMcp, useBuiltinWebSearch, onStderr } = hooks
   const { makePrompt } = promptBundle
   const { claudeExecutable } = env
@@ -156,7 +160,7 @@ async function* runSdkQueryWithRetry(
       for await (const event of query(buildQueryOptions({
         ...(await baseOpts()),
         prompt: makePrompt(),
-        resumeSessionId: resumeSessionId ?? freshSessionId,
+        resumeSessionId: effectiveResumeSessionId,
         isUndo,
         undoRollbackUuid,
       }))) {

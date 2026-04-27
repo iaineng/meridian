@@ -6,6 +6,7 @@ import {
 } from "../messages"
 import { crEncode } from "../obfuscate"
 import { PASSTHROUGH_MCP_PREFIX } from "../passthroughTools"
+import type { QueryDirectMessage } from "../session/queryDirect"
 
 /**
  * Strip cache_control from content blocks — the SDK manages its own caching
@@ -186,6 +187,14 @@ export interface BuildPromptBundleInput {
   isResume: boolean
   useJsonlFresh: boolean
   passthrough: boolean
+  /**
+   * Query-direct path: if the handler classified the request as lone-user
+   * and pre-built byte-stable SDKUserMessage records, this short-circuits
+   * the JSONL/multimodal/text branches below — `makePrompt()` simply yields
+   * each record through an AsyncIterable. Mutually exclusive with
+   * `useJsonlFresh` (the handler guarantees they are not both set).
+   */
+  directPromptMessages?: QueryDirectMessage[]
 }
 
 /**
@@ -200,6 +209,23 @@ export interface BuildPromptBundleInput {
  */
 export function buildPromptBundle(input: BuildPromptBundleInput): PromptBundle {
   const { messagesToConvert, allMessages, isResume, useJsonlFresh, passthrough } = input
+
+  // Path 0 (highest precedence): query-direct lone-user. The handler has
+  // already produced byte-stable SDKUserMessage records (cache anchor and
+  // crEncode applied via the same primitives buildJsonlLines uses). Skip
+  // toolName scanning and multimodal/text branches entirely — those are
+  // for histories that must be flattened, not for direct user input.
+  if (input.directPromptMessages && input.directPromptMessages.length > 0) {
+    const direct = input.directPromptMessages
+    return {
+      structuredMessages: direct,
+      textPrompt: undefined,
+      toolNameById: new Map(),
+      toolPrefix: passthrough ? PASSTHROUGH_MCP_PREFIX : "",
+      hasMultimodal: false,
+      makePrompt: () => (async function* () { for (const m of direct) yield m })(),
+    }
+  }
 
   // Scan ALL messages for tool_use names — undo/fallback paths may slice
   // messagesToConvert to just the last user message whose tool_result blocks

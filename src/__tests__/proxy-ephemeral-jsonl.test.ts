@@ -180,7 +180,7 @@ describe("Ephemeral one-shot JSONL mode", () => {
     }
   })
 
-  it("single-message request also writes a JSONL (user + synthetic-assistant) and resumes", async () => {
+  it("single-message lone-user request goes query-direct: no JSONL, no resume, AsyncIterable prompt", async () => {
     process.env.MERIDIAN_EPHEMERAL_JSONL = "1"
     try {
       const app = createTestApp()
@@ -191,16 +191,13 @@ describe("Ephemeral one-shot JSONL mode", () => {
         messages: [{ role: "user", content: "one-shot request" }],
       })).json()
 
-      const uuid = resumedUuid()
-      expect(uuid).toBeDefined()
-      // JSONL existed while the SDK was running.
-      expect(jsonlExistedDuringQuery).toBe(true)
-
-      // Prompt is the "Continue." sentinel — the lone user lives in the JSONL.
+      // Lone-user shape now takes the query-direct path: no JSONL is written
+      // and no resume id is passed to the SDK. The user message is delivered
+      // as an AsyncIterable<SDKUserMessage> instead.
+      expect(resumedUuid()).toBeUndefined()
+      expect(jsonlExistedDuringQuery).toBe(false)
       expect(typeof capturedQueryParams.prompt).not.toBe("string")
-
-      // File deleted after response completes; pool slot back in available.
-      expect(await fileExists(jsonlPath(uuid!))).toBe(false)
+      // Pool slot returns to available after cleanup; no file to delete.
       expect(ephemeralSessionIdPool.stats()).toEqual({ available: 1, inUse: 0, pending: 0 })
     } finally {
       delete process.env.MERIDIAN_EPHEMERAL_JSONL

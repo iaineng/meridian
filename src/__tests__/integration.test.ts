@@ -216,7 +216,7 @@ describe("Integration: Full Anthropic API tool loop", () => {
     // history.
     expect(typeof capturedQueryParams.options.resume).toBe("string")
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Proceed as appropriate.")
+    expect(promptText).toBe("Continue from where you left off.")
   })
 })
 

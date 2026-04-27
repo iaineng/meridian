@@ -5,6 +5,7 @@ import type { HandlerContext } from "./types"
 import { prepareFreshSession, deleteSessionTranscript, backupSessionTranscript } from "../session/transcript"
 import { ephemeralSessionIdPool } from "../session/ephemeralPool"
 import { PASSTHROUGH_MCP_PREFIX } from "../passthroughTools"
+import { classifyQueryDirect, buildQueryDirectMessages } from "../session/queryDirect"
 import type { LineageResult } from "../session"
 
 /**
@@ -42,6 +43,47 @@ export async function buildEphemeralHandler(shared: SharedRequestContext): Promi
   // Passthrough for tool-name prefixing in the JSONL must match the value
   // the live request will use so resume tool_use names align.
   const passthroughForJsonl = shared.initialPassthrough
+
+  // Query-direct lone-user shortcut: classify whether the request can bypass
+  // prepareFreshSession + filler. When eligible, ship the user message(s)
+  // straight to SDK query() as an AsyncIterable and skip JSONL writing.
+  const qdVerdict = classifyQueryDirect(allMessages)
+  if (qdVerdict.eligible) {
+    claudeLog("session.query_direct", {
+      reason: qdVerdict.reason,
+      messageCount: allMessages.length,
+      ephemeral: true,
+    })
+    let cleanupDone = false
+    const queryDirectCleanup = async () => {
+      if (cleanupDone || !ephemeralId) return
+      cleanupDone = true
+      ephemeralSessionIdPool.release(ephemeralId)
+      claudeLog("session.ephemeral.released", {
+        sessionId: ephemeralId,
+        poolStats: ephemeralSessionIdPool.stats(),
+        queryDirect: true,
+      })
+      ephemeralId = undefined
+    }
+    return {
+      isEphemeral: true,
+      lineageResult: { type: "ephemeral" },
+      isResume: false,
+      isUndo: false,
+      cachedSession: undefined,
+      resumeSessionId: undefined,
+      undoRollbackUuid: undefined,
+      lineageType: "ephemeral",
+      messagesToConvert: [],
+      freshSessionId: undefined,
+      freshMessageUuids: undefined,
+      useJsonlFresh: false,
+      cleanup: queryDirectCleanup,
+      isQueryDirect: true,
+      directPromptMessages: buildQueryDirectMessages(allMessages),
+    }
+  }
 
   // Ephemeral always writes a JSONL when allMessages has at least one message.
   // buildJsonlLines emits [user, synthetic-assistant] for the lone-user case

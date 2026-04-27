@@ -217,7 +217,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     // assistant closer) and the SDK prompt becomes the tool_result
     // synthetic-tail user prompt.
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Proceed as appropriate.")
+    expect(promptText).toBe("Continue from where you left off.")
     // A fresh session UUID is generated (resume points to the written jsonl).
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
@@ -253,7 +253,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
     // Both tool_results live in the JSONL transcript; prompt is the
     // tool_result synthetic-tail user prompt (balanced slicing).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Proceed as appropriate.")
+    expect(promptText).toBe("Continue from where you left off.")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 
@@ -285,7 +285,7 @@ describe("Phase 3: Tool result in follow-up requests", () => {
 
     // Error tool_result also goes through balanced slicing into the JSONL.
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Proceed as appropriate.")
+    expect(promptText).toBe("Continue from where you left off.")
     expect(typeof capturedQueryParams.options.resume).toBe("string")
   })
 })

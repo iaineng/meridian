@@ -231,8 +231,9 @@ describe("JSONL-backed fresh session", () => {
     // Balanced slicing: trailing assistant has unresolved tool_use, so the
     // last user (tool_result) is written into the JSONL to keep the pair
     // intact. A minimal synthetic assistant ("...") is appended so the
-    // transcript ends on an assistant turn. Prompt is the "Continue."
-    // sentinel that opens a clean new user turn on top.
+    // transcript ends on an assistant turn. Prompt is the
+    // "Continue from where you left off." sentinel that opens a clean new
+    // user turn on top.
     // permission-mode + user + assistant(tool_use) + user(tool_result)
     //   + assistant(synthetic)
     expect(lines).toHaveLength(5)
@@ -249,11 +250,11 @@ describe("JSONL-backed fresh session", () => {
     const syntheticAssistantLine = lines[4]!
     expect(syntheticAssistantLine.type).toBe("assistant")
     expect(syntheticAssistantLine.message.content).toEqual([
-      { type: "text", text: "One moment." },
+      { type: "text", text: "No response requested." },
     ])
     // Tool-result payload is crEncoded (matches user content encoding).
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toBe("Proceed as appropriate.")
+    expect(promptText).toBe("Continue from where you left off.")
   })
 
   it("wraps a trailing assistant history with the prefill directive as prompt", async () => {
@@ -411,7 +412,7 @@ describe("JSONL-backed fresh session", () => {
       const syntheticAssistantLine = lines[4]!
       expect(syntheticAssistantLine.type).toBe("assistant")
       expect(syntheticAssistantLine.message.content).toEqual([
-        { type: "text", text: "One moment." },
+        { type: "text", text: "No response requested." },
       ])
     } finally {
       if (originalPassthrough === undefined) delete process.env.MERIDIAN_PASSTHROUGH

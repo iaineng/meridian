@@ -568,7 +568,10 @@ async function startSdkIterator(
     sdkAgents,
     passthroughMcp,
     cleanEnv: { ...strippedEnv, ...oauthEnv },
-    resumeSessionId: handler.resumeSessionId ?? handler.freshSessionId,
+    // Query-direct skips JSONL prewrite — must NOT pass resume to the SDK.
+    resumeSessionId: handler.isQueryDirect
+      ? undefined
+      : (handler.resumeSessionId ?? handler.freshSessionId),
     isUndo: handler.isUndo,
     undoRollbackUuid: handler.undoRollbackUuid,
     sdkHooks,

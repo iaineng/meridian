@@ -93,7 +93,7 @@ describe("buildJsonlLines", () => {
     expect(synthRow.type).toBe("assistant")
     expect(synthRow.parentUuid).toBe(userRow.uuid)
     expect(synthRow.message.content).toEqual([
-      { type: "text", text: "One moment." },
+      { type: "text", text: "No response requested." },
     ])
     // The lone user receives the JSONL history cache breakpoint so the
     // first call can establish prompt cache.
@@ -523,7 +523,7 @@ describe("buildJsonlLines", () => {
     expect(u1.type).toBe("user")
     expect(u2.type).toBe("user")
     expect(syntheticAssistant.type).toBe("assistant")
-    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "One moment." }])
+    expect(syntheticAssistant.message.content).toEqual([{ type: "text", text: "No response requested." }])
     // u2's client cache_control position is mirrored, value normalized to 1h.
     expect(u2.message.content[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
     // u1 stays untouched.
@@ -874,7 +874,7 @@ describe("prepareFreshSession", () => {
     expect(r.wroteTranscript).toBe(true)
     // Lone-user case: prompt is the user_message synthetic-tail user prompt,
     // paired with the matching synthetic assistant filler in the JSONL above.
-    expect(r.lastUserPrompt).toBe("Continue.")
+    expect(r.lastUserPrompt).toBe("Continue from where you left off.")
     expect(r.sessionId).toMatch(UUID_RE)
     expect(r.messageUuids).toHaveLength(1)
     expect(r.messageUuids[0]).toMatch(UUID_RE)
@@ -979,7 +979,7 @@ describe("prepareFreshSession", () => {
       "/p",
       { hasOtherTools: true }
     )
-    expect(noOutputFormat.lastUserPrompt).toBe("Continue.")
+    expect(noOutputFormat.lastUserPrompt).toBe("Continue from where you left off.")
   })
 
   it("generates a valid UUIDv4 session id", async () => {

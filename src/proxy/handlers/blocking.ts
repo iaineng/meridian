@@ -12,8 +12,8 @@
  *      (`miss`), the matched sibling had no pending handlers (`stale`),
  *      or the client's reported assistant turn drifted from the SDK's
  *      actual emission (`assistant_drift`)): write the JSONL transcript
- *      via `prepareFreshSession` — the synthetic "Proceed as appropriate."
- *      filler can seed a tool_result-tail conversation — then `acquire`
+ *      via `prepareFreshSession` — the synthetic "Continue from where you
+ *      left off." filler can seed a tool_result-tail conversation — then `acquire`
  *      a new sibling under the conversation key and prebuild the MCP
  *      server.
  *   3. Validation mismatch (sibling matched on prefix but the incoming
@@ -48,6 +48,7 @@ import {
   blockingPool,
   type BlockingSessionKey,
 } from "../session/blockingPool"
+import { classifyQueryDirect, buildQueryDirectMessages } from "../session/queryDirect"
 import type { LineageResult } from "../session"
 
 export class BlockingProtocolMismatchError extends Error {
@@ -211,7 +212,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
       // from an unseen point. NOT a 400: promote to the initial path so
       // a fresh blocking sibling is established (synthetic-filler
       // `prepareFreshSession` seeds a tool_result-tail conversation via
-      // the "Proceed as appropriate." prompt).
+      // the "Continue from where you left off." prompt).
       claudeLog("blocking.continuation.miss", {
         requestId: requestMeta.requestId,
         reason: "not_found",
@@ -232,6 +233,66 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     poolStats: ephemeralSessionIdPool.stats(),
     blocking: true,
   })
+
+  // Query-direct lone-user shortcut (parallel to ephemeral.ts). When the
+  // request shape qualifies, skip prepareFreshSession entirely. The blocking
+  // SDK iterator stays alive across HTTP rounds (in-memory tool_result
+  // injection), so no JSONL is needed for multi-turn coherence.
+  const qdVerdict = classifyQueryDirect(allMessages)
+  if (qdVerdict.eligible) {
+    claudeLog("session.query_direct", {
+      reason: qdVerdict.reason,
+      messageCount: allMessages.length,
+      ephemeral: true,
+      blocking: true,
+    })
+    let cleanupDone = false
+    const capturedIdQd = ephemeralId
+    const queryDirectCleanup = async () => {
+      if (cleanupDone || !capturedIdQd) return
+      cleanupDone = true
+      ephemeralSessionIdPool.release(capturedIdQd)
+      claudeLog("session.ephemeral.released", {
+        sessionId: capturedIdQd,
+        poolStats: ephemeralSessionIdPool.stats(),
+        blocking: true,
+        queryDirect: true,
+      })
+    }
+    const stateQd = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: capturedIdQd!,
+      workingDirectory,
+      priorMessageHashes,
+      cleanup: queryDirectCleanup,
+    })
+    const prebuiltPassthroughMcpQd = Array.isArray(shared.body?.tools) && shared.body.tools.length > 0
+      ? createBlockingPassthroughMcpServer(shared.body.tools, stateQd)
+      : undefined
+    const lineageResultQd: LineageResult = { type: "ephemeral" }
+    return {
+      isEphemeral: true,
+      lineageResult: lineageResultQd,
+      isResume: false,
+      isUndo: false,
+      cachedSession: undefined,
+      resumeSessionId: undefined,
+      undoRollbackUuid: undefined,
+      lineageType: "blocking",
+      messagesToConvert: [],
+      freshSessionId: undefined,
+      freshMessageUuids: undefined,
+      useJsonlFresh: false,
+      cleanup: async () => {},
+      blockingMode: true,
+      isBlockingContinuation: false,
+      blockingSessionKey: key,
+      blockingState: stateQd,
+      prebuiltPassthroughMcp: prebuiltPassthroughMcpQd,
+      isQueryDirect: true,
+      directPromptMessages: buildQueryDirectMessages(allMessages),
+    }
+  }
 
   const passthroughForJsonl = shared.initialPassthrough
   const useJsonlFresh = allMessages.length >= 1

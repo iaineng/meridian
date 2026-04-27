@@ -36,18 +36,18 @@ function hasSyntheticAssistant(rows: any[]): boolean {
   return rows.some(r =>
     r.type === "assistant" &&
     Array.isArray(r.message?.content) &&
-    r.message.content.some((b: any) => b.type === "text" && b.text === "One moment."),
+    r.message.content.some((b: any) => b.type === "text" && b.text === "No response requested."),
   )
 }
 
 describe("prepareFreshSession (ephemeral/blocking share identical JSONL construction)", () => {
-  it("lone-user: filler appended, prompt = 'Continue.', JSONL ends on assistant", async () => {
+  it("lone-user: filler appended, prompt = 'Continue from where you left off.', JSONL ends on assistant", async () => {
     const cwd = await tmpCwd()
     const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(
       [{ role: "user", content: "hello" }], cwd, {},
     )
     expect(wroteTranscript).toBe(true)
-    expect(lastUserPrompt).toBe("Continue.")
+    expect(lastUserPrompt).toBe("Continue from where you left off.")
     const rows = await readJsonl(cwd, sessionId)
     expect(hasSyntheticAssistant(rows)).toBe(true)
     // CLI-compat invariant: JSONL last row must be assistant so
@@ -55,7 +55,7 @@ describe("prepareFreshSession (ephemeral/blocking share identical JSONL construc
     expect(rows[rows.length - 1]!.type).toBe("assistant")
   })
 
-  it("[u1, u2] (no assistant history): filler appended, prompt = 'Continue.', JSONL ends on assistant", async () => {
+  it("[u1, u2] (no assistant history): filler appended, prompt = 'Continue from where you left off.', JSONL ends on assistant", async () => {
     const cwd = await tmpCwd()
     const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(
       [
@@ -64,13 +64,13 @@ describe("prepareFreshSession (ephemeral/blocking share identical JSONL construc
       ], cwd, {},
     )
     expect(wroteTranscript).toBe(true)
-    expect(lastUserPrompt).toBe("Continue.")
+    expect(lastUserPrompt).toBe("Continue from where you left off.")
     const rows = await readJsonl(cwd, sessionId)
     expect(hasSyntheticAssistant(rows)).toBe(true)
     expect(rows[rows.length - 1]!.type).toBe("assistant")
   })
 
-  it("trailing tool_use + tool_result: filler appended, prompt = 'Proceed as appropriate.'", async () => {
+  it("trailing tool_use + tool_result: filler appended, prompt = 'Continue from where you left off.'", async () => {
     const cwd = await tmpCwd()
     const messages = [
       { role: "user", content: "do something" },
@@ -79,7 +79,7 @@ describe("prepareFreshSession (ephemeral/blocking share identical JSONL construc
     ]
     const { sessionId, lastUserPrompt, wroteTranscript } = await prepareFreshSession(messages, cwd, {})
     expect(wroteTranscript).toBe(true)
-    expect(lastUserPrompt).toBe("Proceed as appropriate.")
+    expect(lastUserPrompt).toBe("Continue from where you left off.")
     const rows = await readJsonl(cwd, sessionId)
     expect(hasSyntheticAssistant(rows)).toBe(true)
     expect(rows[rows.length - 1]!.type).toBe("assistant")
@@ -164,5 +164,46 @@ describe("normalizeToolResultForMcp", () => {
       content: raw,
     })
     expect(result.content[0]).toEqual({ type: "text", text: crEncode(raw) })
+  })
+
+  it("collapses tool_reference blocks to a crEncoded text label", () => {
+    // Some clients emit `tool_reference` inside tool_result.content to nudge
+    // the model toward a related tool. Anthropic does not accept that as a
+    // valid inner type, so the proxy folds it to a text block with a stable
+    // "tool_reference: <name>" label that mirrors serializeToolResultContentToText.
+    const result = normalizeToolResultForMcp({
+      type: "tool_result",
+      tool_use_id: "tu_1",
+      content: [{ type: "tool_reference", tool_name: "Read" }],
+    })
+    expect(result.content).toEqual([
+      { type: "text", text: crEncode("tool_reference: Read") },
+    ])
+  })
+
+  it("preserves sibling text/image blocks alongside tool_reference", () => {
+    const result = normalizeToolResultForMcp({
+      type: "tool_result",
+      tool_use_id: "tu_1",
+      content: [
+        { type: "text", text: "see also:" },
+        { type: "tool_reference", tool_name: "Grep" },
+      ],
+    })
+    expect(result.content).toEqual([
+      { type: "text", text: crEncode("see also:") },
+      { type: "text", text: crEncode("tool_reference: Grep") },
+    ])
+  })
+
+  it("drops tool_reference blocks without a tool_name", () => {
+    // No tool_name → no useful payload. Skip the block instead of emitting
+    // an empty `tool_reference: ` label that would just confuse the model.
+    const result = normalizeToolResultForMcp({
+      type: "tool_result",
+      tool_use_id: "tu_1",
+      content: [{ type: "tool_reference" }],
+    })
+    expect(result.content).toEqual([])
   })
 })

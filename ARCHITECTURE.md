@@ -306,6 +306,64 @@ Because the aggregator consumes the exact frames the streaming path forwards, th
 - `src/proxy/passthroughTools.ts` — `createBlockingPassthroughMcpServer` with `annotations: { readOnlyHint: true }` and FIFO `tool_use_id` rendezvous.
 - `src/proxy/query.ts` — `blockingMode` → `maxTurns: 10_000` + `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=1800000`.
 
+## Query-Direct Lone-User Path
+
+Active under `MERIDIAN_EPHEMERAL_JSONL=1` (and the blocking variant) when the request matches the lone-user shape and carries no out-of-position cache_control. Bypasses `prepareFreshSession` entirely: no JSONL on disk, no `resume` to the SDK, no synthetic filler. The user message(s) are fed straight to `query()` as an `AsyncIterable<SDKUserMessage>`.
+
+### Trigger Conditions
+
+`classifyQueryDirect` (in `src/proxy/session/queryDirect.ts`) returns `eligible: true` when **all** of:
+
+- `messages.length >= 1` and the trailing message is a user turn.
+- `!hasTrailingToolUse` — the message before the trailing user is not an assistant carrying unresolved `tool_use` blocks (that's the tool_result-tail shape, owned by the existing JSONL path).
+- The trailing user has no anchoring assistant before it. Two shapes qualify:
+  - `[u1]` — strict lone-user
+  - `[u1, u2, ...]` — consecutive user turns (existing path would trigger filler here)
+- Any client-supplied `cache_control` breakpoint sits on the trailing user message (or there are none). When the client placed a breakpoint on a non-trailing message, the query-direct path cannot honor its position via the AsyncIterable prompt — fall back to the JSONL path where `applyJsonlHistoryBreakpoints` preserves position.
+
+Multimodal blocks (`image`/`document`/`file`) are explicitly supported on this path. The SDK's AsyncIterable prompt accepts native Anthropic block shapes, and `normalizeUserContentForSdk` passes them through unchanged (only `text` and `tool_result` blocks have their leaf strings touched). This avoids the flatten-to-XML-then-attach workaround that `buildPromptBundle`'s path 2 needs for history-bearing requests.
+
+### Byte-Equivalence Invariant
+
+The win is cache hits across HTTP boundaries: when R1 (lone-user) takes the query-direct path and R2 (the same conversation extended) is forced through `prepareFreshSession`, R2's rebuilt JSONL u1 row must be byte-equivalent (modulo `cache_control` markers) to the user message R1 sent over the AsyncIterable. Otherwise Anthropic's prompt cache misses on every R2.
+
+Both paths share the same content-shaping primitives in `src/proxy/session/transcript.ts`:
+
+- `stripCacheControlDeep` — recursively strip client cache_control.
+- `normalizeUserContentForSdk` — wrap strings as `[{type:"text", text: crEncode(s)}]` (matches the SDK's n6A normalization for "last" position so the bytes don't shape-shift across requests).
+
+`buildQueryDirectMessages` (R1) calls `normalizeUserContentForSdkPath` (= strip + normalize) on every message and **does not** add any `cache_control`. `buildJsonlLines` (R2) calls the same primitives during row construction; `applyJsonlHistoryBreakpoints` then stamps `JSONL_HISTORY_CACHE_CONTROL` on the last user row in the JSONL slice (R2's u1) so meridian's history anchor is in place when SDK sees the rebuilt history.
+
+#### Why R1 sets no cache_control
+
+The SDK's `addCacheBreakpoints` pass (cli.js `services/api/claude.ts:3063`) unconditionally rewrites the trailing message's last block via `userMessageToMessageParam(msg, addCache=true, ...)` (`claude.ts:609-620`), substituting whatever caller-supplied `cache_control` was there with the result of `getCacheControl({querySource})`. Setting cc on R1's trailing message would therefore be wasted work — and would also break byte equivalence with R2's u1 row (which keeps meridian's `applyJsonlHistoryBreakpoints` value because R2's u1 is no longer the last message).
+
+#### Cache-hit conditions
+
+- R1 final API body: `[u1 + sdk_cc]` where `sdk_cc = getCacheControl({querySource})`.
+- R2 final API body: `[u1 + meridian_cc(JSONL_HISTORY_CACHE_CONTROL), a1, u2 + sdk_cc]` — non-marker positions retain whatever cc the JSONL carried; only u2 (marker) gets SDK overwrite.
+
+R2's read at u1 hits R1's write iff `meridian_cc === sdk_cc` byte-for-byte. `getCacheControl` returns `{type:"ephemeral", ttl:"1h"}` exactly when `should1hCacheTTL(querySource)` is true (`claude.ts:393-432`) — the user is ant/Claude.ai-subscriber and the querySource matches the GrowthBook 1h allowlist. For Claude Max users on the SDK's tracked querySources this is the typical case and meridian's `JSONL_HISTORY_CACHE_CONTROL = {type:"ephemeral", ttl:"1h"}` matches. Outside that, R2 cache hit is not achievable; the filler-free transcript win still applies.
+
+For strict `[u1]` the non-cc prefix bytes match across R1 and R2. For `[u1, u2]` the prefix diverges in R2 (an assistant turn `a1` lands between `u1` and `u2`), so cache hits at the u1 boundary are not achievable even when the cc values match — but the filler-free transcript still applies.
+
+The byte-alignment unit test (`queryDirect-bytes-unit.test.ts`) strips `cache_control` from both sides before comparing so the assertion catches drift in the content-shaping primitives without being noisy about the asymmetric cc placement.
+
+### Pipeline Wiring
+
+- `HandlerContext` carries `isQueryDirect: boolean` and `directPromptMessages: QueryDirectMessage[]` (in `src/proxy/handlers/types.ts`). Mutually exclusive with `freshSessionId` / `useJsonlFresh`.
+- `buildPromptBundle` (in `src/proxy/pipeline/prompt.ts`) gains a Path 0 that short-circuits the JSONL/multimodal/text branches and returns an AsyncIterable yielding the pre-built records.
+- `runSdkQueryWithRetry` (in `src/proxy/pipeline/executor.ts`) and `startSdkIterator` (in `src/proxy/pipeline/blockingStream.ts`) drop `resumeSessionId` to `undefined` when `handler.isQueryDirect === true` so the SDK starts a fresh session instead of crashing on a non-existent resume id.
+- ephemeral and blocking handlers (`src/proxy/handlers/ephemeral.ts`, `src/proxy/handlers/blocking.ts`) classify the request first; eligible requests skip the prepareFreshSession block entirely. The cleanup closure releases the pool id without touching disk (no JSONL was written).
+
+In blocking-MCP mode the query-direct path is fully compatible with the multi-round SDK iterator — `applyContinuation` injects subsequent tool_results into the live generator, never touching JSONL. The SDK subprocess may write its own transcript at a self-generated UUID; meridian leaves that file alone (UUID collisions are negligible, and DEFERRED.md tracks an optional async-cleanup follow-up).
+
+### Critical Files
+
+- `src/proxy/session/queryDirect.ts` — `classifyQueryDirect`, `cacheBreakpointOnTrailingOnly`, `buildQueryDirectMessages`. Pure leaf module.
+- `src/proxy/session/transcript.ts` — exported byte-shaping primitives (`stripCacheControlDeep`, `normalizeUserContentForSdk`, `normalizeUserContentForSdkPath`, `setCacheControlAt`, `JSONL_HISTORY_CACHE_CONTROL`, `classifyContinuation`).
+- `src/__tests__/queryDirect-bytes-unit.test.ts` — load-bearing byte-alignment regression guard.
+
 ## Session Management
 
 Sessions map an agent's conversation ID to a Claude SDK session ID. Two caches work in tandem:

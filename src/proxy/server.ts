@@ -174,6 +174,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           isResume: handler.isResume,
           useJsonlFresh: handler.useJsonlFresh,
           passthrough: shared.initialPassthrough,
+          directPromptMessages: handler.directPromptMessages,
         })
 
         const hooks = buildHookBundle({

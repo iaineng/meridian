@@ -27,3 +27,10 @@ The `MERIDIAN_BLOCKING_MCP=1` path (see ARCHITECTURE.md) intentionally does not 
 13. **Per-`pendingTool` timeout** — currently the 30-min timeout is per-session. A single slow tool silently monopolises the budget; per-tool deadlines would allow the slow one to be aborted independently.
 14. **Strict message-id consistency** — each HTTP issues a new `msg_<id>`. Clients that hash the `id` for dedup would need a mode that reuses the logical id across rounds.
 15. **Same-turn divergent tool_result content across sibling sessions** — the multi-sibling pool routes continuations by longest-prefix overlap on `priorMessageHashes`. Two siblings sharing an identical stored-prior prefix whose next continuation carries an identical tool_use_id set but different tool_result content cannot be disambiguated; the newer sibling wins by `createdAt` tiebreaker and the other's pending handler waits for janitor reap. Clients needing fork-in-place behaviour should supply distinct `agentSessionId`s. Accepted; revisit if an adapter hits it.
+
+## Query-Direct Lone-User Path (v1 limitations)
+
+The query-direct path (see ARCHITECTURE.md "Query-Direct Lone-User Path") covers the dominant lone-user shape and the consecutive-user variant, but the gating rules in `classifyQueryDirect` deliberately exclude a few cases that are sound but unverified for v1:
+
+16. **Classic-path lone-user** — query-direct lives in the ephemeral and blocking handlers only. Classic-path lone-user already takes a flat-text `buildTextPromptWithHistory` route with no `prepareFreshSession` call to bypass; extending query-direct here is mostly cosmetic. Revisit if the two paths are unified.
+17. **SDK-written transcript cleanup** — when the SDK subprocess persists its own JSONL at a self-generated UUID, meridian leaves the file in place (UUID collisions are negligible). Optional follow-up: capture `session_id` from the first `system_init` event and `unlink` the file in the cleanup closure.

@@ -68,7 +68,7 @@ export interface TranscriptOptions {
    */
   sessionId?: string
   /**
-   * When true AND the synthetic "Continue." path is taken (lone-user or
+   * When true AND the synthetic "Continue from where you left off." path is taken (lone-user or
    * trailing tool_use), augment the prompt with an explicit instruction
    * to call the "StructuredOutput" tool so the model terminates via the
    * structured-output tool call expected by outputFormat consumers.
@@ -94,7 +94,7 @@ export interface BuildJsonlResult {
 
 export interface FreshSessionResult {
   sessionId: string
-  /** The content to send as the current prompt (last user message or "Continue."). */
+  /** The content to send as the current prompt (last user message or "Continue from where you left off."). */
   lastUserPrompt: string | any[]
   messageUuids: Array<string | null>
   wroteTranscript: boolean
@@ -125,7 +125,7 @@ export function getProjectSessionPath(cwd: string, sessionId: string): string {
   return path.join(baseDir, "projects", sanitizeCwdForProjectDir(cwd), `${sessionId}.jsonl`)
 }
 
-const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
+export const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
 
 // Synthetic-tail fillers: each synthetic-tail path emits a paired
 // (assistant, user) turn with minimal neutral continuation text rather
@@ -139,8 +139,8 @@ const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
 //   - user_message: trailing user lacks an anchoring assistant (lone user
 //     turn 1, or consecutive [u1, u2]); the pair sits between that user
 //     and the model's next reply.
-const TOOL_RESULT_FILLER_ASSISTANT_TEXT = "One moment."
-const USER_MESSAGE_FILLER_ASSISTANT_TEXT = "One moment."
+const TOOL_RESULT_FILLER_ASSISTANT_TEXT = "No response requested."
+const USER_MESSAGE_FILLER_ASSISTANT_TEXT = "No response requested."
 
 // Runtime directive wrapper: the SDK forces us to send proxy-generated
 // prompts (prefill, StructuredOutput terminators) as ordinary user turns.
@@ -167,8 +167,8 @@ const PREFILL_CONTINUE_PROMPT = wrapSystemReminder("Resume output starting at th
 // injection. The DEFAULT_CONTINUE_PROMPT fallback is effectively a dead
 // branch (reachable only when n === 0, which short-circuits earlier),
 // but we keep it as a single source aliased to the user_message variant.
-const TOOL_RESULT_CONTINUE_PROMPT = "Proceed as appropriate."
-const USER_MESSAGE_CONTINUE_PROMPT = "Continue."
+const TOOL_RESULT_CONTINUE_PROMPT = "Continue from where you left off."
+const USER_MESSAGE_CONTINUE_PROMPT = "Continue from where you left off."
 const DEFAULT_CONTINUE_PROMPT = USER_MESSAGE_CONTINUE_PROMPT
 
 // StructuredOutput terminators: when the caller has registered a
@@ -210,19 +210,42 @@ export function findClientUserBreakpoint(
   return null
 }
 
-/** Recursively strip `cache_control` from content blocks. */
-function stripCacheControl(content: any): any {
+/**
+ * Recursively strip `cache_control` from content blocks. Handles strings
+ * (returned unchanged), arrays (mapped), and objects (rest-spread, with
+ * tool_result.content recursed into).
+ *
+ * Exported so leaf modules outside transcript.ts (e.g. queryDirect) can
+ * apply the SAME stripping rule to user content destined for the SDK
+ * AsyncIterable prompt path. Cross-path byte equality with the JSONL
+ * writer depends on both sides calling this exact function.
+ *
+ * Distinct from `prompt.ts:stripCacheControl`, which is array-only and used
+ * by the flat-text prompt path.
+ */
+export function stripCacheControlDeep(content: any): any {
   if (content == null) return content
-  if (Array.isArray(content)) return content.map(stripCacheControl)
+  if (Array.isArray(content)) return content.map(stripCacheControlDeep)
   if (typeof content !== "object") return content
   const { cache_control, ...rest } = content
   if (rest.type === "tool_result" && Array.isArray(rest.content)) {
-    return { ...rest, content: rest.content.map(stripCacheControl) }
+    return { ...rest, content: rest.content.map(stripCacheControlDeep) }
   }
   return rest
 }
 
-function setCacheControlAt(content: any, blockIndex: number): any {
+/**
+ * Stamp meridian's 1h ephemeral `cache_control` onto a specific block in a
+ * content array. Returns a new array (no in-place mutation). Out-of-range
+ * indices and non-array inputs are returned unchanged so callers can pipe
+ * unknown content through safely.
+ *
+ * Exported so the query-direct path (queryDirect.ts) can establish the same
+ * prompt-cache anchor that `applyJsonlHistoryBreakpoints` plants on R2's
+ * JSONL — without that, R1 query-direct never writes a cache entry and R2
+ * cannot hit it.
+ */
+export function setCacheControlAt(content: any, blockIndex: number): any {
   if (!Array.isArray(content)) return content
   if (blockIndex < 0 || blockIndex >= content.length) return content
   return content.map((block: any, index: number) => index === blockIndex
@@ -283,13 +306,30 @@ function applyJsonlHistoryBreakpoints(
  * - string → [{type:"text", text: crEncode(string)}]
  * - array → map each block (text → crEncode; tool_result → recurse into .content)
  * - other → unchanged
+ *
+ * Exported so the query-direct path (queryDirect.ts) can produce SDK input
+ * bytes identical to what buildJsonlLines writes for the same message.
  */
-function crEncodeUserContent(content: any): any {
+export function normalizeUserContentForSdk(content: any): any {
   if (content == null) return content
   if (typeof content === "string") return [{ type: "text", text: crEncode(content) }]
   if (Array.isArray(content)) return content.map(crEncodeUserBlock)
   if (typeof content !== "object") return content
   return crEncodeUserBlock(content)
+}
+
+/**
+ * Convenience wrapper for the query-direct path: strip cache_control then
+ * apply SDK-shape normalization, guaranteeing byte identity with the
+ * corresponding user row produced by buildJsonlLines (line ~459-463).
+ *
+ * Always returns an array — the SDK AsyncIterable path expects user
+ * `message.content` to be an array of blocks.
+ */
+export function normalizeUserContentForSdkPath(content: any): any[] {
+  const stripped = stripCacheControlDeep(content)
+  const normalized = normalizeUserContentForSdk(stripped)
+  return Array.isArray(normalized) ? normalized : []
 }
 
 /** Per-block variant: never wraps a string into an array (used for
@@ -301,6 +341,14 @@ function crEncodeUserBlock(block: any): any {
   }
   if (block.type === "tool_result") {
     return { ...block, content: crEncodeToolResultContent(block.content) }
+  }
+  // Non-standard `tool_reference` block (some clients emit it inside
+  // tool_result.content to nudge the model toward a related tool). Anthropic
+  // does not accept `tool_reference` as a valid tool_result inner type, so
+  // collapse it to a text block. Format matches `serializeToolResultContentToText`
+  // in messages.ts so the textual prompt path and the JSONL/MCP path agree.
+  if (block.type === "tool_reference" && typeof block.tool_name === "string") {
+    return { type: "text", text: crEncode(`tool_reference: ${block.tool_name}`) }
   }
   return block
 }
@@ -356,7 +404,7 @@ function wrapAssistantMessage(content: any, model: string | undefined): Record<s
 /**
  * Shape decision shared by buildJsonlLines (where it drives slicing + the
  * synthetic assistant tail) and prepareFreshSession (where it drives the
- * "Continue." prompt). Kept as a pure helper so the two sites cannot drift.
+ * "Continue from where you left off." prompt). Kept as a pure helper so the two sites cannot drift.
  *
  * Semantics:
  *  - lastIsUser:       trailing message is a user turn (normal request shape).
@@ -369,9 +417,9 @@ function wrapAssistantMessage(content: any, model: string | undefined): Record<s
  *    n6A would shape-shift it between requests, breaking prompt cache).
  *  - includesLastUser: either reason above — include the last user in the
  *    JSONL and append a synthetic assistant tail so the transcript ends on
- *    an assistant turn; caller sends "Continue." as prompt.
+ *    an assistant turn; caller sends "Continue from where you left off." as prompt.
  */
-function classifyContinuation(
+export function classifyContinuation(
   messages: ReadonlyArray<{ role: string; content: any }>
 ): { lastIsUser: boolean; hasTrailingToolUse: boolean; isLoneUser: boolean; includesLastUser: boolean } {
   const n = messages.length
@@ -409,7 +457,7 @@ function classifyContinuation(
  *  - Normal case (last message is a user prompt): messages[0..N-2] are written,
  *    messageUuids[N-1] is null (the final user message is the prompt, not history).
  *  - Trailing assistant message: ALL N messages are written (caller synthesizes
- *    a "Continue." prompt).
+ *    a "Continue from where you left off." prompt).
  *  - First written message has parentUuid: null; each subsequent line's parentUuid
  *    points to the previous line's uuid.
  *  - A permission-mode sentinel line is emitted as the first JSONL row to mirror
@@ -439,7 +487,7 @@ export function buildJsonlLines(
   }
 
   // Must capture client breakpoints from the original messages BEFORE any
-  // stripCacheControl runs — the per-row build below wipes cache_control as
+  // stripCacheControlDeep runs — the per-row build below wipes cache_control as
   // part of normal cleanup.
   const clientBreakpoint = findClientUserBreakpoint(messages, sliceEnd)
 
@@ -456,11 +504,11 @@ export function buildJsonlLines(
     const m = messages[i]!
     const uuid = randomUUID()
     const role = m.role === "assistant" ? "assistant" : "user"
-    const cleaned = stripCacheControl(m.content)
+    const cleaned = stripCacheControlDeep(m.content)
 
     const message = role === "assistant"
       ? wrapAssistantMessage(applyToolPrefixToAssistant(cleaned, toolPrefix), model)
-      : { role: "user", content: crEncodeUserContent(cleaned) }
+      : { role: "user", content: normalizeUserContentForSdk(cleaned) }
 
     transcriptRows.push({
       parentUuid,
@@ -486,7 +534,7 @@ export function buildJsonlLines(
   //   1. SDK's n6A never sees a "last" user row in the JSONL (stable byte
   //      shape across requests — the same user is always "non-last" next
   //      time).
-  //   2. The caller's "Continue." prompt is a clean new turn on top of a
+  //   2. The caller's "Continue from where you left off." prompt is a clean new turn on top of a
   //      well-formed user→assistant chain.
   //   3. applyJsonlHistoryBreakpoints can place the cache breakpoint on the
   //      preceding user row, enabling first-call cache establishment.
@@ -647,7 +695,7 @@ export async function prepareFreshSession(
     continuePrompt = DEFAULT_CONTINUE_PROMPT
   }
   const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
-    ? crEncodeUserContent(stripCacheControl(lastMsg!.content))
+    ? normalizeUserContentForSdk(stripCacheControlDeep(lastMsg!.content))
     : continuePrompt
 
   if (lines.length === 0) {
@@ -695,6 +743,11 @@ export function normalizeToolResultForMcp(block: {
         const data = typeof src.data === "string" ? src.data : ""
         const mimeType = typeof src.media_type === "string" ? src.media_type : "image/png"
         if (data) content.push({ type: "image", data, mimeType })
+      } else if (rec.type === "tool_reference" && typeof rec.tool_name === "string") {
+        // Mirror crEncodeUserBlock: collapse tool_reference to a text block so
+        // the bytes the MCP handler sees match what a follow-up JSONL rebuild
+        // would produce (cache-prefix parity).
+        content.push({ type: "text", text: crEncode(`tool_reference: ${rec.tool_name}`) })
       } else if (typeof rec.text === "string") {
         content.push({ type: "text", text: crEncode(rec.text) })
       }

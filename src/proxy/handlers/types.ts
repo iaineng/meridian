@@ -1,6 +1,7 @@
 import type { LineageResult, SessionState, TokenUsage } from "../session/lineage"
 import type { BlockingSessionKey, BlockingSessionState } from "../session/blockingPool"
 import type { createBlockingPassthroughMcpServer } from "../passthroughTools"
+import type { QueryDirectMessage } from "../session/queryDirect"
 
 /** Log-line classification. `diverged` never reaches this field — classic
  *  handler rewrites it to `new`; ephemeral synthesises `ephemeral` directly. */
@@ -60,6 +61,25 @@ export interface HandlerContext {
    * and only consults `tool_use_id` as a hint.
    */
   pendingToolResults?: Array<{ tool_use_id?: string; content: unknown; is_error?: boolean }>
+
+  // --- Query-direct lone-user path (optional) ---
+  /**
+   * True when the request matches the lone-user query-direct shape and is
+   * being routed straight to SDK `query()` as an `AsyncIterable<SDKUserMessage>`.
+   * Mutually exclusive with `freshSessionId` / `useJsonlFresh` — meridian
+   * has not written a JSONL transcript and must not pass `resume` to the SDK.
+   */
+  isQueryDirect?: boolean
+  /**
+   * Pre-normalized SDKUserMessage records to yield through the AsyncIterable
+   * prompt. Each entry's `message.content` is shaped by the same primitives
+   * (`stripCacheControlDeep` + `normalizeUserContentForSdk`) that
+   * `buildJsonlLines` uses for non-last history rows, but carries NO
+   * cache_control: the SDK's `addCacheBreakpoints` pass overwrites the
+   * trailing message's last block unconditionally. Populated only when
+   * `isQueryDirect === true`.
+   */
+  directPromptMessages?: QueryDirectMessage[]
 }
 
 export interface ClassicRetryResult {
