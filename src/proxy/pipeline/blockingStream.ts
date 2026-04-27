@@ -45,6 +45,7 @@ import {
   type BlockingSessionState,
   type BufferedEvent,
 } from "../session/blockingPool"
+import { createBlockingJsonAggregator } from "./blockingNonStreamAggregator"
 import type { SharedRequestContext } from "./context"
 import type { HandlerContext } from "../handlers/types"
 import type { PromptBundle } from "./prompt"
@@ -91,6 +92,54 @@ function pushEvent(state: BlockingSessionState, evt: BufferedEvent): void {
   const sink = state.activeSink
   if (sink) sink(evt)
   else state.eventBuffer.push(evt)
+}
+
+/**
+ * Apply a continuation request to a live blocking session: route the
+ * incoming `tool_result`s to their suspended MCP handlers and refresh the
+ * `priorMessageHashes` baseline. Shared by `runBlockingStream` and
+ * `runBlockingNonStream` — the routing semantics are identical regardless
+ * of how the previous round's HTTP delivered the assistant turn.
+ *
+ * Routing strategy:
+ *   1. If the incoming `tool_use_id` happens to match a pending entry, use
+ *      it (cheap/correct path when the client preserves SDK ids).
+ *   2. Otherwise fall back to positional routing against
+ *      `state.currentRoundToolIds` (which records ids in SDK emission
+ *      order). Many clients rewrite or omit ids between rounds but
+ *      preserve order.
+ */
+export function applyContinuation(
+  state: BlockingSessionState,
+  handler: HandlerContext,
+  shared: SharedRequestContext,
+): void {
+  const orderedRoundIds = state.currentRoundToolIds.slice()
+  const results = handler.pendingToolResults ?? []
+  for (let i = 0; i < results.length; i++) {
+    const tr = results[i]!
+    let pending = (typeof tr.tool_use_id === "string")
+      ? state.pendingTools.get(tr.tool_use_id)
+      : undefined
+    if (!pending) {
+      const positionalId = orderedRoundIds[i]
+      if (positionalId) pending = state.pendingTools.get(positionalId)
+    }
+    if (!pending) continue
+    const mcpResult = normalizeToolResultForMcp(tr)
+    try { pending.resolve(mcpResult) } catch {}
+    state.pendingTools.delete(pending.toolUseId)
+  }
+  state.currentRoundToolIds = []
+  state.pendingRoundClose = null
+  state.status = "streaming"
+  // Refresh the stored prior-hash baseline to this round's prior prefix
+  // (everything except the trailing tool_result user). Subsequent rounds
+  // will validate against this extended prefix.
+  const allMessages = shared.body?.messages ?? []
+  if (allMessages.length >= 1) {
+    state.priorMessageHashes = computeMessageHashes(allMessages.slice(0, -1))
+  }
 }
 
 // --- SDK event translation ---
@@ -330,40 +379,7 @@ export function runBlockingStream(
       key: stringifyBlockingKey(key),
       resolving: handler.pendingToolResults?.length ?? 0,
     })
-    // Route incoming tool_results to suspended handlers. Strategy:
-    //   1. If the incoming `tool_use_id` happens to match a pending entry,
-    //      use it (this preserves the cheap/correct path when the client's
-    //      IDs are reliable).
-    //   2. Otherwise fall back to positional routing against
-    //      `state.currentRoundToolIds`, which records the tool_use IDs in
-    //      the order the SDK emitted them this turn. Many clients rewrite
-    //      or omit IDs between rounds, but they preserve order.
-    const orderedRoundIds = state.currentRoundToolIds.slice()
-    const results = handler.pendingToolResults ?? []
-    for (let i = 0; i < results.length; i++) {
-      const tr = results[i]!
-      let pending = (typeof tr.tool_use_id === "string")
-        ? state.pendingTools.get(tr.tool_use_id)
-        : undefined
-      if (!pending) {
-        const positionalId = orderedRoundIds[i]
-        if (positionalId) pending = state.pendingTools.get(positionalId)
-      }
-      if (!pending) continue
-      const mcpResult = normalizeToolResultForMcp(tr)
-      try { pending.resolve(mcpResult) } catch {}
-      state.pendingTools.delete(pending.toolUseId)
-    }
-    state.currentRoundToolIds = []
-    state.pendingRoundClose = null
-    state.status = "streaming"
-    // Refresh the stored prior-hash baseline to this round's prior prefix
-    // (everything except the trailing tool_result user). Subsequent rounds
-    // will validate against this extended prefix.
-    const allMessages = shared.body?.messages ?? []
-    if (allMessages.length >= 1) {
-      state.priorMessageHashes = computeMessageHashes(allMessages.slice(0, -1))
-    }
+    applyContinuation(state, handler, shared)
   } else {
     claudeLog("blocking.initial.start", {
       requestId: shared.requestMeta.requestId,
@@ -589,4 +605,146 @@ async function startSdkIterator(
   })
 
   return query({ prompt, options })
+}
+
+/**
+ * Non-streaming blocking entrypoint. Counterpart to `runBlockingStream`:
+ * shares the same pool, state machine, consumer task, and `BufferedEvent`
+ * stream — only the sink is different. Aggregates SSE frames into a single
+ * Anthropic-format JSON Message and resolves the HTTP with it at
+ * `close_round` (round end with `stop_reason:"tool_use"`) or `end` (SDK
+ * terminated). Errors return as a JSON error envelope (HTTP 200 +
+ * `{type:"error", error:{...}}`) — symmetrical with the streaming path's
+ * `event: error` frame, so clients on the same conversation may freely
+ * alternate `stream:true`/`stream:false` across rounds.
+ */
+export async function runBlockingNonStream(
+  shared: SharedRequestContext,
+  handler: HandlerContext,
+  promptBundle: PromptBundle,
+  hooks: HookBundle,
+  env: ExecutorEnv,
+): Promise<Response> {
+  const isContinuation = handler.isBlockingContinuation === true
+  const state = handler.blockingState!
+  const key = handler.blockingSessionKey!
+
+  if (isContinuation) {
+    claudeLog("blocking.continuation.start", {
+      requestId: shared.requestMeta.requestId,
+      key: stringifyBlockingKey(key),
+      resolving: handler.pendingToolResults?.length ?? 0,
+    })
+    applyContinuation(state, handler, shared)
+  } else {
+    claudeLog("blocking.initial.start", {
+      requestId: shared.requestMeta.requestId,
+      key: stringifyBlockingKey(key),
+    })
+  }
+  blockingPool.touch(state)
+
+  const upstreamStartAt = Date.now()
+  let firstChunkAt: number | undefined
+  let contentBlocksSeen = 0
+  let textEventsSeen = 0
+  let telemetryRecorded = false
+
+  const aggregator = createBlockingJsonAggregator()
+
+  return await new Promise<Response>((resolveResponse) => {
+    let closed = false
+
+    const recordTelemetry = (err?: Error): void => {
+      if (telemetryRecorded) return
+      telemetryRecorded = true
+      const telemetryCtx = {
+        requestMeta: shared.requestMeta,
+        requestStartAt: env.requestStartAt,
+        adapterName: shared.adapter.name,
+      }
+      if (err) {
+        recordRequestError(telemetryCtx, classifyError(err.message))
+        return
+      }
+      recordRequestSuccess(telemetryCtx, shared, handler, {
+        mode: "non-stream",
+        upstreamStartAt,
+        firstChunkAt,
+        sdkSessionId: state.ephemeralSessionId,
+        contentBlocks: contentBlocksSeen,
+        textEvents: textEventsSeen,
+        passthrough: true,
+      })
+    }
+
+    const finalize = (err?: Error): void => {
+      if (closed) return
+      closed = true
+      detachSink(state)
+      recordTelemetry(err)
+      const body = err
+        ? {
+            type: "error" as const,
+            error: {
+              type: classifyError(err.message).type,
+              message: err.message,
+            },
+          }
+        : aggregator.build(shared.body.model)
+      resolveResponse(new Response(JSON.stringify(body), {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Claude-Session-ID": stringifyBlockingKey(key),
+        },
+      }))
+    }
+
+    const deliver = (evt: BufferedEvent): void => {
+      // After finalize: keep replaying into the buffer so the next HTTP
+      // attaches to a fresh sink that picks up exactly where we left off.
+      if (closed) { state.eventBuffer.push(evt); return }
+      if (evt.kind === "sse") {
+        if (firstChunkAt === undefined) firstChunkAt = Date.now()
+        const head = evt.frame.length >= 40
+          ? new TextDecoder().decode(evt.frame.subarray(0, 40))
+          : new TextDecoder().decode(evt.frame)
+        if (head.startsWith("event: content_block_start")) contentBlocksSeen++
+        else if (head.startsWith("event: content_block_delta")) textEventsSeen++
+        aggregator.consumeSseFrame(evt.frame)
+        return
+      }
+      if (evt.kind === "close_round") {
+        finalize()
+        return
+      }
+      if (evt.kind === "end") {
+        aggregator.markEnd(evt.reason)
+        finalize()
+        void blockingPool.release(state, `sdk_ended:${evt.reason}`)
+        return
+      }
+      if (evt.kind === "error") {
+        finalize(evt.error)
+        void blockingPool.release(state, "sdk_error")
+        return
+      }
+    }
+
+    attachSink(state, deliver)
+
+    // Initial HTTP only: build and spawn the SDK consumer task.
+    if (!isContinuation) {
+      const abortController = new AbortController()
+      state.abort = () => {
+        try { abortController.abort() } catch {}
+      }
+      startSdkIterator(shared, handler, promptBundle, hooks, env, abortController)
+        .then((iterator) => { void spawnConsumer(state, iterator, new TextEncoder()) })
+        .catch((err) => {
+          const e = err instanceof Error ? err : new Error(String(err))
+          pushEvent(state, { kind: "error", error: e })
+        })
+    }
+  })
 }

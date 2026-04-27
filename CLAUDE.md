@@ -52,7 +52,7 @@ OpenCode-specific behavior is documented in `ARCHITECTURE.md` under "Agent-Speci
 - `MERIDIAN_EPHEMERAL_JSONL=1` — Per-request one-shot JSONL mode. Bypasses session cache; writes a fresh JSONL transcript, deletes after response.
 - `MERIDIAN_EPHEMERAL_JSONL_BACKUP=1` — With ephemeral enabled, rename the JSONL to `.<timestamp>.bak` instead of deleting.
 - `MERIDIAN_PASSTHROUGH=1` — Forward client tool calls through a dummy MCP server; the client executes tools and resends a `tool_result`.
-- `MERIDIAN_BLOCKING_MCP=1` — Blocking-MCP real-handler mode (requires `MERIDIAN_EPHEMERAL_JSONL=1` + passthrough + streaming + `body.tools`). Keeps one SDK query alive across HTTP rounds so interleaved-thinking signatures survive; avoids the synthetic filler / continue-prompt placeholders. Falls back silently to plain ephemeral when prerequisites are not met. See `ARCHITECTURE.md` for the state machine and wire protocol.
+- `MERIDIAN_BLOCKING_MCP=1` — Blocking-MCP real-handler mode (requires `MERIDIAN_EPHEMERAL_JSONL=1` + passthrough + `body.tools`; works for both streaming and non-streaming requests, including alternation across rounds in one conversation). Keeps one SDK query alive across HTTP rounds so interleaved-thinking signatures survive; avoids the synthetic filler / continue-prompt placeholders. Falls back silently to plain ephemeral when prerequisites are not met. See `ARCHITECTURE.md` for the state machine and wire protocol.
 
 ## Architecture Quick Reference
 

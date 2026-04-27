@@ -95,6 +95,7 @@ kill $(lsof -ti :3456)
 | P8 | [Profile: Settings Persistence](#p8-profile-settings-persistence) | `settings.json` updated on switch; CLI `meridian profile list` reflects state | - |
 | P9 | [Profile: Health Reflects Active](#p9-profile-health-reflects-active) | `/health` email changes when active profile changes | - |
 | P10 | [Profile: Telemetry Records After Switch](#p10-profile-telemetry-records-after-switch) | Requests on both profiles appear in `/telemetry/requests` | - |
+| BMC1 | [Blocking-MCP Non-Stream + Alternation](#bmc1-blocking-mcp-non-stream--alternation) | Non-streaming HTTP enters blocking mode, returns JSON with tool_use; same session continues via streaming HTTP — `ephemeralSessionId` constant | - |
 
 ---
 
@@ -2892,3 +2893,70 @@ print(f'Modes seen: {modes}  PASS')
 **Pass criteria:**
 - At least 2 new telemetry request records after the two requests
 - Both streaming and non-streaming modes recorded
+
+---
+
+## BMC1: Blocking-MCP Non-Stream + Alternation
+
+**Verifies:** A non-streaming `/v1/messages` request with tools enters blocking-MCP mode and returns a JSON Message with `stop_reason:"tool_use"`, then the same logical conversation can continue with `stream:true` — proving the SDK iterator stays alive across mode switches.
+
+**Setup:**
+
+```bash
+export MERIDIAN_EPHEMERAL_JSONL=1
+export MERIDIAN_BLOCKING_MCP=1
+export MERIDIAN_PASSTHROUGH=1
+# (Restart proxy with these env vars set.)
+```
+
+**Round 0: non-stream initial with tools.**
+
+```bash
+RESP=$(curl -s -i http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -H "x-opencode-session: bmc1-alt" \
+  -d '{
+    "model":"claude-haiku-4-5-20251001",
+    "max_tokens":256,
+    "stream":false,
+    "messages":[{"role":"user","content":"Use the listFiles tool with path \".\" to list files."}],
+    "tools":[{"name":"listFiles","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
+  }')
+echo "$RESP" | head -20
+TOOLU_ID=$(echo "$RESP" | tail -n +1 | python3 -c "
+import json, sys
+text = sys.stdin.read()
+body = text.split('\r\n\r\n', 1)[1]
+data = json.loads(body)
+for b in data.get('content', []):
+    if b.get('type') == 'tool_use':
+        print(b['id']); break
+")
+echo "Captured tool_use id: $TOOLU_ID"
+```
+
+**Round 1: stream continuation with the matching tool_result.**
+
+```bash
+curl -s -N http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" -H "x-api-key: dummy" \
+  -H "x-opencode-session: bmc1-alt" \
+  -d '{
+    "model":"claude-haiku-4-5-20251001",
+    "max_tokens":256,
+    "stream":true,
+    "messages":[
+      {"role":"user","content":"Use the listFiles tool with path \".\" to list files."},
+      {"role":"assistant","content":[{"type":"tool_use","id":"'"$TOOLU_ID"'","name":"listFiles","input":{"path":"."}}]},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"'"$TOOLU_ID"'","content":"a.txt\nb.txt"}]}
+    ],
+    "tools":[{"name":"listFiles","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
+  }' | head -40
+```
+
+**Pass criteria:**
+- Round 0 returns HTTP 200, `Content-Type: application/json`, body contains `"stop_reason":"tool_use"` and a `tool_use` block.
+- Both rounds emit `X-Claude-Session-ID: h:bmc1-alt`.
+- Proxy log shows `blocking.dispatch.accepted stream=false` for round 0 and `blocking.dispatch.accepted stream=true` for round 1.
+- Proxy log shows `blocking.continuation.start key=h:bmc1-alt resolving=1` on round 1 (proves the SDK iterator from round 0 survived and got the resolved tool_result).
+- Round 1 SSE stream ends with `event: message_delta { stop_reason:"end_turn" | "tool_use" }` followed by `event: message_stop`.

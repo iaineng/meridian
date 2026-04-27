@@ -190,10 +190,11 @@ Triggered when **all** of these hold:
 - `MERIDIAN_BLOCKING_MCP=1`
 - `shared.initialPassthrough === true` (adapter override or `MERIDIAN_PASSTHROUGH=1`)
 - `body.tools.length > 0`
-- `shared.stream === true`
 - `shared.outputFormat` is unset
 
 Any missing precondition → silent fallback to plain ephemeral passthrough (synthetic filler / continue).
+
+`shared.stream` is **not** a precondition: a single conversation may freely alternate `stream:true` and `stream:false` across rounds. Streaming HTTPs return Anthropic SSE; non-streaming HTTPs return a single Anthropic JSON Message reconstructed from the same internal `BufferedEvent` stream. See "Non-stream variant" below.
 
 ### Why
 
@@ -267,11 +268,21 @@ event: message_stop        ← ditto
 
 SDK's own `message_start` / `message_delta` / `message_stop` events are **suppressed** — blocking mode owns the framing. `X-Claude-Session-ID` carries `stringifyBlockingKey(key)` so clients can include it as an explicit session id on the next HTTP (optional — lineage-hash matching is the fallback).
 
+### Non-stream variant
+
+When the client requests with `stream:false`, the same SDK iterator and `BlockingSessionState` are used; only the sink is different. `runBlockingNonStream` (in `pipeline/blockingStream.ts`) attaches a sink that reverse-parses the same `BufferedEvent` SSE frames into a single Anthropic-format JSON Message via `createBlockingJsonAggregator` (in `pipeline/blockingNonStreamAggregator.ts`). Round-close semantics are identical:
+
+- `close_round` → HTTP returns JSON with `stop_reason:"tool_use"`; session stays alive.
+- `end` (`end_turn` / `max_tokens`) → HTTP returns JSON with the matching `stop_reason`; pool releases.
+- `error` → HTTP 200 + `{type:"error", error:{type, message}}` envelope (mirrors the streaming path's `event: error` SSE frame); pool releases.
+
+Because the aggregator consumes the exact frames the streaming path forwards, the assistant blocks delivered to the client are byte-equivalent across modes. `lastEmittedAssistantBlocks`, `priorMessageHashes`, and the drift check in `buildBlockingHandler` are therefore mode-agnostic — a conversation may freely alternate `stream:true` and `stream:false` across rounds.
+
 ### Failure Handling
 
 | Scenario | Handling |
 |----------|----------|
-| Preconditions not met (non-stream, outputFormat, no tools, …) | Dispatch goes through the plain ephemeral handler (no blocking). |
+| Preconditions not met (outputFormat, no tools, …) | Dispatch goes through the plain ephemeral handler (no blocking). |
 | Continuation hits pool but the stored `priorMessageHashes` is not a prefix of the incoming prior (tampering / undo / different branch) | `buildBlockingHandler` falls through to `buildEphemeralHandler` silently. |
 | Continuation hash matches but `tool_result` id set ≠ pending set | `BlockingProtocolMismatchError` → 400 `invalid_request_error`, session released. |
 | Continuation hash matches but pool has no entry (server restart, timeout) | Fall through to `buildEphemeralHandler`. |
@@ -290,7 +301,8 @@ SDK's own `message_start` / `message_delta` / `message_stop` events are **suppre
 
 - `src/proxy/session/blockingPool.ts` — registry, janitor, session state shape.
 - `src/proxy/handlers/blocking.ts` — initial vs continuation dispatch, `BlockingProtocolMismatchError`.
-- `src/proxy/pipeline/blockingStream.ts` — consumer task, sink attach/detach, per-HTTP meridian framing.
+- `src/proxy/pipeline/blockingStream.ts` — consumer task, sink attach/detach, per-HTTP meridian framing for both `runBlockingStream` (SSE) and `runBlockingNonStream` (aggregated JSON), plus the shared `applyContinuation` helper.
+- `src/proxy/pipeline/blockingNonStreamAggregator.ts` — reverse-parses SSE frames into a single Anthropic JSON Message for the non-stream sink.
 - `src/proxy/passthroughTools.ts` — `createBlockingPassthroughMcpServer` with `annotations: { readOnlyHint: true }` and FIFO `tool_use_id` rendezvous.
 - `src/proxy/query.ts` — `blockingMode` → `maxTurns: 10_000` + `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=1800000`.
 

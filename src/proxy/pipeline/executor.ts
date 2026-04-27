@@ -258,6 +258,13 @@ export async function runNonStream(
   callbacks: ExecutorCallbacks,
   env: ExecutorEnv,
 ): Promise<Response> {
+  // Blocking-MCP non-stream path: same pool/state machine as the streaming
+  // entrypoint, only the sink aggregates SSE frames into a JSON Message.
+  // Lazy import to mirror the streaming side and avoid load-time circularity.
+  if (handler.blockingMode) {
+    const { runBlockingNonStream } = require("./blockingStream") as typeof import("./blockingStream")
+    return runBlockingNonStream(shared, handler, promptBundle, hooks, env)
+  }
   const { body, adapter, outputFormat, requestMeta, allMessages } = shared
   const { resumeSessionId } = handler
   const {

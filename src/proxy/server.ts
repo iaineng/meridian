@@ -111,7 +111,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // Dispatch: blocking-MCP > ephemeral > classic.
         //  - blocking-MCP: keeps one SDK query alive across HTTP rounds by
         //    suspending MCP handlers; requires ephemeral + passthrough + tools
-        //    + streaming + no outputFormat.
+        //    + no outputFormat. Works with both streaming and non-streaming
+        //    requests, and a single conversation may freely alternate
+        //    `stream:true`/`stream:false` across rounds.
         //  - ephemeral: bypasses lineage/cache, one-shot JSONL transcript.
         //  - classic: LRU session cache with optional JSONL prewarm.
         const isEphemeral = envBool("EPHEMERAL_JSONL")
@@ -122,7 +124,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           && blockingEnvOn
           && shared.initialPassthrough
           && hasTools
-          && shared.stream
           && !shared.outputFormat
         if (blockingEnvOn && !isBlockingMcp) {
           // Surface the exact precondition that gated blocking out so deploy
@@ -131,8 +132,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             isEphemeral,
             initialPassthrough: shared.initialPassthrough,
             hasTools,
-            stream: shared.stream,
             outputFormat: !!shared.outputFormat,
+          })
+        } else if (isBlockingMcp) {
+          claudeLog("blocking.dispatch.accepted", {
+            requestId: requestMeta.requestId,
+            stream: shared.stream,
           })
         }
         const handler: HandlerContext = isBlockingMcp

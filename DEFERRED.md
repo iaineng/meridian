@@ -18,7 +18,7 @@ Items identified during architectural refactor planning that are intentionally d
 
 ## Blocking-MCP Mode (v1 limitations)
 
-The `MERIDIAN_BLOCKING_MCP=1` path (see ARCHITECTURE.md) intentionally does not yet cover the following. All of these currently trigger a silent fallback to the plain ephemeral+passthrough path (synthetic filler / continue).
+The `MERIDIAN_BLOCKING_MCP=1` path (see ARCHITECTURE.md) intentionally does not yet cover the following. All of these currently trigger a silent fallback to the plain ephemeral+passthrough path (synthetic filler / continue). Note: non-streaming requests are now supported by blocking-MCP and may freely alternate with streaming requests across rounds — this is no longer a fallback trigger.
 
 9. **`outputFormat` / StructuredOutput compatibility** — the synthetic-prompt contract (`STRUCTURED_OUTPUT_STRICT_PROMPT`, `STRUCTURED_OUTPUT_CONDITIONAL_PROMPT`) is not integrated with the blocking pipeline; blocking is disabled whenever `output_config.format` is set.
 10. **Sub-agent (`Task`) nested `stream_event`s** — the SDK emits `parent_tool_use_id` for sub-agent output; `state.sdkToClientIndex` is SDK-turn-scoped and has not been validated against sub-agent interleaving. Needs an experiment before enabling.
