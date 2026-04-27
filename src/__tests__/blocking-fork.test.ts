@@ -244,6 +244,51 @@ describe("blocking pool: multi-sibling forks", () => {
     expect(live.status).toBe("streaming")
   })
 
+  it("text + tool_use assistant turn with non-matching text content → still continuation", async () => {
+    // Regression: previously, if the SDK emitted [text, tool_use] and the
+    // client's echo of the assistant turn had any byte-level text difference
+    // (whitespace normalisation, content_block_start.text vs text_delta
+    // accumulation drift, etc.), drift was reported and the request got
+    // promoted to `blocking` instead of `blocking_continuation`. text and
+    // thinking blocks no longer participate in drift detection — only
+    // tool_use name + canonical input.
+    const messages = [
+      { role: "user", content: "look it up" },
+      { role: "assistant", content: [
+        { type: "thinking", thinking: "let me think...", signature: "sig" },
+        { type: "text", text: "Looking now.\n" },
+        { type: "tool_use", id: "tu_X", name: "Read", input: { path: "/etc/hosts" } },
+      ] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_X", content: "ok" }] },
+    ]
+    const priorHashes = computeMessageHashes(messages.slice(0, -1))
+    const key = { kind: "lineage", hash: priorHashes[0]! } as const
+
+    const live = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: "00000000-0000-0000-0000-000000000ddd",
+      workingDirectory: cwd,
+      priorMessageHashes: [priorHashes[0]!],
+      cleanup: async () => {},
+    })
+    live.pendingTools.set("tu_X", {
+      mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_X",
+      input: { path: "/etc/hosts" }, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
+    })
+    // Server snapshot captures only tool_use; the client echoes a different
+    // text body ("Looking now.\n" with a trailing newline) but the same tool_use.
+    live.lastEmittedAssistantBlocks = [
+      { type: "tool_use", name: "Read", input: { path: "/etc/hosts" } },
+    ]
+
+    const result = await buildBlockingHandler(makeShared({ messages }))
+
+    expect(result.isBlockingContinuation).toBe(true)
+    expect(result.lineageType).toBe("blocking_continuation")
+    expect(result.blockingState).toBe(live)
+    expect(live.status).toBe("streaming")
+  })
+
   it("count mismatch does NOT promote — still throws 400", async () => {
     const messages = [
       { role: "user", content: "list files" },

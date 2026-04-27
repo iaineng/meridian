@@ -439,11 +439,10 @@ describe("verifyLineage", () => {
 })
 
 describe("verifyEmittedAssistant", () => {
-  const txt = (text: string): EmittedAssistantBlock => ({ type: "text", text })
   const tu = (name: string, input: unknown): EmittedAssistantBlock => ({ type: "tool_use", name, input })
 
-  it("matches identical text + tool_use sequence", () => {
-    const emitted = [txt("Looking now."), tu("Read", { path: "/etc/hosts" })]
+  it("matches when client preserves the tool_use blocks", () => {
+    const emitted = [tu("Read", { path: "/etc/hosts" })]
     const client = [
       { type: "text", text: "Looking now." },
       { type: "tool_use", id: "tu_A", name: "Read", input: { path: "/etc/hosts" } },
@@ -461,22 +460,45 @@ describe("verifyEmittedAssistant", () => {
     expect(verifyEmittedAssistant(emitted, c)).toEqual({ match: true })
   })
 
-  it("filters thinking blocks out of client content before comparing", () => {
-    const emitted = [txt("Result"), tu("Read", { path: "x" })]
+  it("filters thinking and text blocks out of client content before comparing", () => {
+    const emitted = [tu("Read", { path: "x" })]
     const client = [
       { type: "thinking", thinking: "let me reason...", signature: "sig" },
-      { type: "text", text: "Result" },
+      { type: "text", text: "Looking now." },
       { type: "tool_use", id: "tu_A", name: "Read", input: { path: "x" } },
       { type: "thinking", thinking: "more thoughts", signature: "sig2" },
     ]
     expect(verifyEmittedAssistant(emitted, client)).toEqual({ match: true })
   })
 
-  it("treats client string content as a single text block", () => {
-    const emitted = [txt("Hello.")]
-    expect(verifyEmittedAssistant(emitted, "Hello.")).toEqual({ match: true })
-    const out = verifyEmittedAssistant(emitted, "Different.")
+  it("ignores text content drift (whitespace, normalisation, etc.)", () => {
+    // Server textAccum vs client SSE replay can disagree on a stray newline,
+    // tab, or trim; that must NOT trigger drift since text doesn't affect
+    // tool routing.
+    const emitted = [tu("Read", { path: "x" })]
+    const a = [
+      { type: "text", text: "Looking now.\n" },
+      { type: "tool_use", name: "Read", input: { path: "x" } },
+    ]
+    const b = [
+      { type: "text", text: "Looking now." },
+      { type: "tool_use", name: "Read", input: { path: "x" } },
+    ]
+    const c = [
+      { type: "text", text: "" },
+      { type: "tool_use", name: "Read", input: { path: "x" } },
+    ]
+    expect(verifyEmittedAssistant(emitted, a)).toEqual({ match: true })
+    expect(verifyEmittedAssistant(emitted, b)).toEqual({ match: true })
+    expect(verifyEmittedAssistant(emitted, c)).toEqual({ match: true })
+  })
+
+  it("treats a bare string as carrying no tool_use (matches only empty emitted)", () => {
+    expect(verifyEmittedAssistant([], "Hello.")).toEqual({ match: true })
+    expect(verifyEmittedAssistant([], "")).toEqual({ match: true })
+    const out = verifyEmittedAssistant([tu("Read", { path: "x" })], "Hello.")
     expect(out.match).toBe(false)
+    if (!out.match) expect(out.reason).toContain("tool_use count differs")
   })
 
   it("canonicalizes tool_use input — key reorder is OK", () => {
@@ -498,7 +520,7 @@ describe("verifyEmittedAssistant", () => {
     expect(out.match).toBe(false)
   })
 
-  it("count differs → mismatch", () => {
+  it("tool_use count differs → mismatch", () => {
     const emitted = [tu("Read", { path: "x" })]
     const client = [
       { type: "tool_use", name: "Read", input: { path: "x" } },
@@ -506,23 +528,15 @@ describe("verifyEmittedAssistant", () => {
     ]
     const out = verifyEmittedAssistant(emitted, client)
     expect(out.match).toBe(false)
-    if (!out.match) expect(out.reason).toContain("block count differs")
+    if (!out.match) expect(out.reason).toContain("tool_use count differs")
   })
 
-  it("block kind differs → mismatch", () => {
+  it("client without any tool_use → mismatch when emitted has one", () => {
     const emitted = [tu("Read", { path: "x" })]
     const client = [{ type: "text", text: "fake" }]
     const out = verifyEmittedAssistant(emitted, client)
     expect(out.match).toBe(false)
-    if (!out.match) expect(out.reason).toContain("type differs")
-  })
-
-  it("text content differs → mismatch", () => {
-    const emitted = [txt("hello")]
-    const client = [{ type: "text", text: "hello world" }]
-    const out = verifyEmittedAssistant(emitted, client)
-    expect(out.match).toBe(false)
-    if (!out.match) expect(out.reason).toContain("text content differs")
+    if (!out.match) expect(out.reason).toContain("tool_use count differs")
   })
 
   it("tool_use name differs → mismatch", () => {
@@ -542,15 +556,18 @@ describe("verifyEmittedAssistant", () => {
   })
 
   it("rejects malformed client content (neither string nor array)", () => {
-    const emitted = [txt("hello")]
+    const emitted = [tu("Read", { path: "x" })]
     const out = verifyEmittedAssistant(emitted, { not: "an array" })
     expect(out.match).toBe(false)
     if (!out.match) expect(out.reason).toContain("neither string nor array")
   })
 
-  it("empty emitted vs empty client (both filtered to []) → match", () => {
+  it("empty emitted vs filtered-empty client → match", () => {
     expect(verifyEmittedAssistant([], [])).toEqual({ match: true })
-    // Client has only thinking blocks → filtered to empty → matches empty emitted
-    expect(verifyEmittedAssistant([], [{ type: "thinking", thinking: "x" }])).toEqual({ match: true })
+    // Client has only thinking and text blocks → both filtered → matches empty emitted
+    expect(verifyEmittedAssistant([], [
+      { type: "thinking", thinking: "x" },
+      { type: "text", text: "narration" },
+    ])).toEqual({ match: true })
   })
 })

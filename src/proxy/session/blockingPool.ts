@@ -90,13 +90,15 @@ export type BufferedEvent =
   | { kind: "error"; error: Error }
 
 /**
- * Compact form of an assistant content block, used for verifying that the
+ * Compact form of an assistant tool_use block, used for verifying that the
  * client's reported assistant turn matches what the SDK actually emitted.
- * Thinking blocks are intentionally excluded — see
- * `lastEmittedAssistantBlocks` on `BlockingSessionState`.
+ * Only `tool_use` is tracked — `text` and `thinking` blocks do not affect
+ * tool routing or SDK in-memory state, and forcing exact text equality
+ * across server accumulation vs client SSE-replay is too brittle (whitespace
+ * normalization, content_block_start.text vs text_delta accumulation drift,
+ * etc.). See `lastEmittedAssistantBlocks` on `BlockingSessionState`.
  */
 export type EmittedAssistantBlock =
-  | { type: "text"; text: string }
   | { type: "tool_use"; name: string; input: unknown }
 
 /**
@@ -146,21 +148,16 @@ export interface BlockingSessionState {
 
   /** Input-json accumulator per SDK block index, for tool_use bindings. */
   inputJsonAccum: Map<number, string>
-  /** Text accumulator per SDK block index for text content blocks (used by
-   *  the emitted-assistant snapshot for drift detection). */
-  textAccum: Map<number, string>
-  /** Block kind per SDK block index (for the snapshot's ordering and
-   *  filtering — only text and tool_use are tracked). */
-  blockTypes: Map<number, "text" | "tool_use">
   /** tool_use info keyed by SDK block index, captured at content_block_start. */
   toolUseIdBySdkIdx: Map<number, { toolName: string; toolUseId: string }>
   /**
-   * Snapshot of the most recent assistant turn the SDK emitted (only text
-   * and tool_use blocks; thinking is intentionally ignored). Captured at
-   * `message_delta(stop_reason="tool_use")` and used by the next
-   * continuation request to verify the client's view of the assistant turn
-   * matches what we actually emitted. Mismatch = client desynced (forked
-   * locally, fabricated content, etc.) → release + promote to a fresh
+   * Snapshot of the most recent assistant turn's tool_use blocks the SDK
+   * emitted. Captured at `message_delta(stop_reason="tool_use")` and used by
+   * the next continuation request to verify the client's view of the
+   * assistant turn matches what we actually emitted. Only tool_use blocks
+   * are tracked — text and thinking are intentionally excluded (see the
+   * `EmittedAssistantBlock` type). Mismatch = client desynced (forked
+   * locally, fabricated tool_use, etc.) → release + promote to a fresh
    * sibling rather than feed bogus tool_results into the live handler.
    */
   lastEmittedAssistantBlocks: Array<EmittedAssistantBlock> | null
@@ -211,7 +208,7 @@ class BlockingPool {
       | "status" | "bindingsByToolName" | "pendingTools" | "currentRoundToolIds"
       | "pendingRoundClose" | "cumulativeUsage"
       | "eventBuffer" | "activeSink" | "sdkEnded" | "createdAt" | "expiresAt"
-      | "inputJsonAccum" | "textAccum" | "blockTypes" | "toolUseIdBySdkIdx"
+      | "inputJsonAccum" | "toolUseIdBySdkIdx"
       | "lastEmittedAssistantBlocks"
     >,
   ): BlockingSessionState {
@@ -234,8 +231,6 @@ class BlockingPool {
       currentRoundToolIds: [],
       pendingRoundClose: null,
       inputJsonAccum: new Map(),
-      textAccum: new Map(),
-      blockTypes: new Map(),
       toolUseIdBySdkIdx: new Map(),
       lastEmittedAssistantBlocks: null,
       cumulativeUsage: {},

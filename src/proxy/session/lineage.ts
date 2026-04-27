@@ -117,13 +117,16 @@ export function measurePrefixOverlap(storedHashes: string[], incomingHashes: str
 }
 
 /**
- * Compact form of an assistant content block, mirrored from
+ * Compact form of an assistant tool_use block, mirrored from
  * `BlockingSessionState.lastEmittedAssistantBlocks`. Defined here (rather
  * than imported from the pool) because lineage.ts is the pure-helper
  * module — keeping the type local avoids a downward dep into pool state.
+ *
+ * Only `tool_use` is tracked — text and thinking blocks do not affect
+ * tool routing and are too brittle to compare across server accumulation
+ * vs client SSE-replay.
  */
 export type EmittedAssistantBlock =
-  | { type: "text"; text: string }
   | { type: "tool_use"; name: string; input: unknown }
 
 /**
@@ -147,15 +150,23 @@ function canonicalizeValue(v: unknown): unknown {
 
 /**
  * Verify that the client's reported assistant turn matches what the SDK
- * actually emitted. Only `text` and `tool_use` blocks are compared
- * (thinking blocks are filtered out of the client's content first — they
- * carry signatures the model returns but we don't track them in the
- * server-side snapshot). For each remaining block:
+ * actually emitted, comparing only `tool_use` blocks. Text and thinking
+ * blocks are filtered out of the client's content first:
  *
- *   - block kind must match positionally
- *   - text blocks: exact string equality
- *   - tool_use blocks: name equality AND canonical-JSON input equality
- *     (key order does not matter; arrays preserve order)
+ *   - `tool_use` is the only thing that matters for routing the next
+ *     round's tool_results back to the suspended MCP handlers and for
+ *     the SDK's in-memory agent loop state.
+ *   - `text` is decorative narration; comparing it byte-for-byte breaks
+ *     when the client normalises whitespace, splits on `content_block_start`
+ *     vs `text_delta` differently, or otherwise round-trips the SSE stream
+ *     non-identically.
+ *   - `thinking` carries signatures the model returns but we don't track
+ *     them in the server-side snapshot.
+ *
+ * For each remaining `tool_use`:
+ *   - name equality
+ *   - canonical-JSON input equality (object key order doesn't matter;
+ *     arrays preserve order)
  *
  * `tool_use_id` is INTENTIONALLY ignored — many clients rewrite IDs
  * between rounds. Routing is positional via `state.currentRoundToolIds`.
@@ -170,51 +181,38 @@ export function verifyEmittedAssistant(
   clientAssistantContent: unknown,
 ): { match: true } | { match: false; reason: string } {
   // Anthropic's API permits assistant message content to be either a
-  // string or a block array. Normalise the string form to a single text
-  // block so the rest of the comparison is uniform.
-  let clientBlocks: Array<{ type: string; [k: string]: unknown }>
+  // string or a block array. A bare string carries no tool_use blocks, so
+  // it can only match an empty emitted snapshot.
+  let clientToolUses: Array<{ type: string; [k: string]: unknown }>
   if (typeof clientAssistantContent === "string") {
-    clientBlocks = [{ type: "text", text: clientAssistantContent }]
+    clientToolUses = []
   } else if (Array.isArray(clientAssistantContent)) {
-    clientBlocks = clientAssistantContent.filter(
-      (b: any) => b && typeof b === "object" && (b.type === "text" || b.type === "tool_use"),
+    clientToolUses = clientAssistantContent.filter(
+      (b: any) => b && typeof b === "object" && b.type === "tool_use",
     )
   } else {
     return { match: false, reason: "client assistant content is neither string nor array" }
   }
 
-  if (clientBlocks.length !== emitted.length) {
+  if (clientToolUses.length !== emitted.length) {
     return {
       match: false,
-      reason: `block count differs: emitted=${emitted.length}, client=${clientBlocks.length}`,
+      reason: `tool_use count differs: emitted=${emitted.length}, client=${clientToolUses.length}`,
     }
   }
 
   for (let i = 0; i < emitted.length; i++) {
     const e = emitted[i]!
-    const c = clientBlocks[i]!
-    if (c.type !== e.type) {
+    const c = clientToolUses[i]!
+    const cName = typeof c.name === "string" ? c.name : ""
+    if (e.name !== cName) {
       return {
         match: false,
-        reason: `block[${i}] type differs: emitted=${e.type}, client=${c.type}`,
+        reason: `block[${i}] tool_use name differs: emitted=${e.name}, client=${cName}`,
       }
     }
-    if (e.type === "text") {
-      const cText = typeof c.text === "string" ? c.text : ""
-      if (e.text !== cText) {
-        return { match: false, reason: `block[${i}] text content differs` }
-      }
-    } else {
-      const cName = typeof c.name === "string" ? c.name : ""
-      if (e.name !== cName) {
-        return {
-          match: false,
-          reason: `block[${i}] tool_use name differs: emitted=${e.name}, client=${cName}`,
-        }
-      }
-      if (canonicalJson(e.input) !== canonicalJson(c.input)) {
-        return { match: false, reason: `block[${i}] tool_use input differs` }
-      }
+    if (canonicalJson(e.input) !== canonicalJson(c.input)) {
+      return { match: false, reason: `block[${i}] tool_use input differs` }
     }
   }
 

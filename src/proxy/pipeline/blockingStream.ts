@@ -174,14 +174,12 @@ export function translateBlockingMessage(
 
   if (eventType === "message_start") {
     // New SDK turn → new HTTP round's message. Reset per-turn accumulators
-    // (input_json, text, SDK-index → tool_use_id map, block-kind map) so
-    // the next turn's bindings/snapshot don't see stale entries. Note we
-    // do NOT clear `lastEmittedAssistantBlocks` here — the next continuation
-    // request needs it for drift detection and it gets overwritten the next
-    // time the SDK reaches `message_delta(stop_reason=tool_use)`.
+    // (input_json, SDK-index → tool_use_id map) so the next turn's
+    // bindings/snapshot don't see stale entries. Note we do NOT clear
+    // `lastEmittedAssistantBlocks` here — the next continuation request
+    // needs it for drift detection and it gets overwritten the next time
+    // the SDK reaches `message_delta(stop_reason=tool_use)`.
     state.inputJsonAccum.clear()
-    state.textAccum.clear()
-    state.blockTypes.clear()
     state.toolUseIdBySdkIdx.clear()
     const startUsage = event.message?.usage as TokenUsage | undefined
     if (startUsage) state.cumulativeUsage = sumUsage(state.cumulativeUsage, startUsage)
@@ -210,22 +208,19 @@ export function translateBlockingMessage(
       const expectedIds = new Set<string>()
       for (const [, v] of state.toolUseIdBySdkIdx) expectedIds.add(v.toolUseId)
       if (expectedIds.size > 0) state.pendingRoundClose = { expectedIds }
-      // Snapshot the assistant turn for the next continuation's drift check.
-      // Only text and tool_use blocks are tracked (thinking is intentionally
-      // excluded — clients may or may not echo signature-bearing blocks
-      // verbatim and they don't affect tool routing). Sorted by SDK block
-      // index so the order matches what the client received via SSE.
-      state.lastEmittedAssistantBlocks = Array.from(state.blockTypes.entries())
+      // Snapshot the assistant turn's tool_use blocks for the next
+      // continuation's drift check. Only tool_use is tracked — text and
+      // thinking blocks don't affect tool routing or SDK in-memory state,
+      // and forcing exact text equality across server accumulation vs
+      // client SSE-replay is too brittle. Sorted by SDK block index so the
+      // order matches what the client received via SSE.
+      state.lastEmittedAssistantBlocks = Array.from(state.toolUseIdBySdkIdx.entries())
         .sort((a, b) => a[0] - b[0])
-        .map(([idx, kind]) => {
-          if (kind === "text") {
-            return { type: "text" as const, text: state.textAccum.get(idx) ?? "" }
-          }
-          const tu = state.toolUseIdBySdkIdx.get(idx)
+        .map(([idx, tu]) => {
           const raw = state.inputJsonAccum.get(idx) ?? ""
           let input: unknown = {}
           if (raw) { try { input = JSON.parse(raw) } catch {} }
-          return { type: "tool_use" as const, name: tu?.toolName ?? "", input }
+          return { type: "tool_use" as const, name: tu.toolName, input }
         })
     }
     frames.push(encoder.encode(`event: message_delta\ndata: ${JSON.stringify(event)}\n\n`))
@@ -246,7 +241,6 @@ export function translateBlockingMessage(
         if (eventIndex !== undefined) {
           state.toolUseIdBySdkIdx.set(eventIndex, { toolName: clientName, toolUseId: block.id })
           state.inputJsonAccum.set(eventIndex, "")
-          state.blockTypes.set(eventIndex, "tool_use")
         }
       }
       // Forward with the MCP prefix stripped; keep SDK's native block index.
@@ -255,14 +249,6 @@ export function translateBlockingMessage(
         content_block: { ...block, name: clientName, input: {} },
       })}\n\n`))
       return frames
-    }
-    if (block?.type === "text" && eventIndex !== undefined) {
-      // Track text blocks for the emitted-assistant snapshot. The block's
-      // initial text is usually empty (deltas carry the content) but seed
-      // it just in case.
-      const initial = typeof block.text === "string" ? block.text : ""
-      state.textAccum.set(eventIndex, initial)
-      state.blockTypes.set(eventIndex, "text")
     }
     frames.push(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify(event)}\n\n`))
     return frames
@@ -275,11 +261,6 @@ export function translateBlockingMessage(
           && state.inputJsonAccum.has(eventIndex)) {
         const prev = state.inputJsonAccum.get(eventIndex) ?? ""
         state.inputJsonAccum.set(eventIndex, prev + delta.partial_json)
-      }
-      if (delta?.type === "text_delta" && typeof delta.text === "string"
-          && state.textAccum.has(eventIndex)) {
-        const prev = state.textAccum.get(eventIndex) ?? ""
-        state.textAccum.set(eventIndex, prev + delta.text)
       }
     }
     frames.push(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify(event)}\n\n`))
