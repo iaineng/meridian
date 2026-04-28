@@ -54,13 +54,25 @@ export interface HandlerContext {
   /** Pre-built passthrough MCP server (blocking mode stashes it on the handler). */
   prebuiltPassthroughMcp?: ReturnType<typeof createBlockingPassthroughMcpServer>
   /**
-   * Continuation-only: tool_result content blocks extracted from the last
-   * user message, in the order the client sent them. `tool_use_id` is
+   * Continuation-only: tool_result content blocks flattened across the
+   * trailing region (every tool_result-only user message beyond
+   * `state.priorMessageHashes.length`), in history order. `tool_use_id` is
    * optional — clients may rewrite or omit the value, so the streaming
    * pipeline routes results positionally via `state.currentRoundToolIds`
-   * and only consults `tool_use_id` as a hint.
+   * and only consults `tool_use_id` as a hint. The trailing region may
+   * span multiple messages (split shape `a, u, a, u, …` or bundled shape
+   * `a, u, u, …`); both flatten into the same ordered array here.
    */
   pendingToolResults?: Array<{ tool_use_id?: string; content: unknown; is_error?: boolean }>
+  /**
+   * Continuation-only: precomputed per-message hashes of the full incoming
+   * `allMessages` array. Threaded so `applyContinuation` can refresh
+   * `state.priorMessageHashes` to the new "client-confirmed prior" baseline
+   * without recomputing. The new baseline is the FULL allMessages (not
+   * `slice(0, -1)`) — every message the client just delivered counts as
+   * confirmed prior for the next round, including the trailing region.
+   */
+  allMessageHashes?: string[]
 
   // --- Query-direct lone-user path (optional) ---
   /**

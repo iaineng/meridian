@@ -72,15 +72,19 @@ describe("blocking handler: stale continuation fall-through", () => {
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_X", content: "ok" }] },
     ]
-    const priorHashes = computeMessageHashes(messages.slice(0, -1))
-    const firstUserHash = priorHashes[0]!
+    const allHashes = computeMessageHashes(messages)
+    const firstUserHash = allHashes[0]!
     const key = { kind: "lineage", hash: firstUserHash } as const
 
+    // Stale state: the previous round (round 1) completed, applyContinuation
+    // refreshed priorMessageHashes to the FULL allMessages of that round.
+    // Client now retries the same round 1 messages — empty trailing →
+    // promote stale.
     const stale = blockingPool.acquire(key, {
       key,
       ephemeralSessionId: "00000000-0000-0000-0000-000000000001",
       workingDirectory: cwd,
-      priorMessageHashes: priorHashes,
+      priorMessageHashes: allHashes,
       cleanup: async () => {},
     })
     expect(stale.pendingTools.size).toBe(0)
@@ -93,7 +97,7 @@ describe("blocking handler: stale continuation fall-through", () => {
     expect(result.blockingMode).toBe(true)
     expect(result.lineageType).toBe("blocking")
     expect(blockingPool.totalSize()).toBe(1)
-    const fresh = blockingPool.lookup(key, priorHashes)
+    const fresh = blockingPool.lookup(key, allHashes)
     expect(fresh).toBeDefined()
     expect(fresh).not.toBe(stale)
   })
@@ -108,14 +112,17 @@ describe("blocking handler: stale continuation fall-through", () => {
     // Helper: populate a blocking state representing a multi-round conversation
     // already in progress, with pending tool_use Z outstanding.
     function seedLiveState(original: any[]) {
-      const priorHashes = computeMessageHashes(original.slice(0, -1))
-      const firstUserHash = priorHashes[0]!
+      // Live state's priorMessageHashes = full allMessages of the previous
+      // accepted round (new convention). Using `original` directly (not
+      // sliced) reflects "round 1 completed; awaiting next round".
+      const allHashes = computeMessageHashes(original)
+      const firstUserHash = allHashes[0]!
       const key = { kind: "lineage", hash: firstUserHash } as const
       const state = blockingPool.acquire(key, {
         key,
         ephemeralSessionId: "00000000-0000-0000-0000-000000000099",
         workingDirectory: cwd,
-        priorMessageHashes: priorHashes,
+        priorMessageHashes: allHashes,
         cleanup: async () => {},
       })
       state.pendingTools.set("toolu_Z", {
@@ -196,60 +203,70 @@ describe("blocking handler: stale continuation fall-through", () => {
   })
 
   it("count mismatch (incoming count != pending count) still throws 400", async () => {
-    const messages = [
-      { role: "user", content: "read README" },
-      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
-      // Two tool_results when the model only emitted one tool_use.
-      { role: "user", content: [
-        { type: "tool_result", tool_use_id: "toolu_X", content: "ok" },
-        { type: "tool_result", tool_use_id: "toolu_EXTRA", content: "ok" },
-      ] },
-    ]
-    const priorHashes = computeMessageHashes(messages.slice(0, -1))
-    const firstUserHash = priorHashes[0]!
+    const r0Messages = [{ role: "user", content: "read README" }]
+    const r0Hashes = computeMessageHashes(r0Messages)
+    const firstUserHash = r0Hashes[0]!
     const key = { kind: "lineage", hash: firstUserHash } as const
 
+    // Round 0 acquire view: priorMessageHashes = round 0 allMessages,
+    // lastEmittedAssistantBlocks captures what the SDK just emitted.
     const state = blockingPool.acquire(key, {
       key,
       ephemeralSessionId: "00000000-0000-0000-0000-000000000002",
       workingDirectory: cwd,
-      priorMessageHashes: priorHashes,
+      priorMessageHashes: r0Hashes,
       cleanup: async () => {},
     })
+    state.lastEmittedAssistantBlocks = [{ type: "tool_use", name: "Read", input: {} }]
     state.pendingTools.set("toolu_X", {
       mcpToolName: "Read", clientToolName: "Read", toolUseId: "toolu_X",
       input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
     })
 
+    // Two tool_results when the model only emitted one tool_use.
+    const messages = [
+      ...r0Messages,
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
+      { role: "user", content: [
+        { type: "tool_result", tool_use_id: "toolu_X", content: "ok" },
+        { type: "tool_result", tool_use_id: "toolu_EXTRA", content: "ok" },
+      ] },
+    ]
+
     await expect(buildBlockingHandler(makeShared({ messages }))).rejects.toThrow(
-      /tool_result count mismatch: expected 1, got 2/,
+      /tool_result count mismatch/,
     )
-    expect(blockingPool.lookup(key, priorHashes)).toBeUndefined()
+    expect(blockingPool.lookup(key, r0Hashes)).toBeUndefined()
     expect(state.status).toBe("terminated")
   })
 
   it("incoming tool_use_id differs from pending (count matches) → continuation accepted; resolve routes positionally", async () => {
-    const messages = [
-      { role: "user", content: "read README" },
-      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
-      // Client rewrote the tool_use_id to something else; count still matches.
-      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_REWRITTEN", content: "ok" }] },
-    ]
-    const priorHashes = computeMessageHashes(messages.slice(0, -1))
-    const firstUserHash = priorHashes[0]!
+    const r0Messages = [{ role: "user", content: "read README" }]
+    const r0Hashes = computeMessageHashes(r0Messages)
+    const firstUserHash = r0Hashes[0]!
     const key = { kind: "lineage", hash: firstUserHash } as const
 
     const state = blockingPool.acquire(key, {
       key,
       ephemeralSessionId: "00000000-0000-0000-0000-000000000003",
       workingDirectory: cwd,
-      priorMessageHashes: priorHashes,
+      priorMessageHashes: r0Hashes,
       cleanup: async () => {},
     })
+    // SDK emitted a tool_use Read with empty input; the client echoes the
+    // assistant turn faithfully but rewrites the tool_use_id on the result.
+    state.lastEmittedAssistantBlocks = [{ type: "tool_use", name: "mcp__tools__Read", input: {} }]
     state.pendingTools.set("toolu_X", {
       mcpToolName: "Read", clientToolName: "Read", toolUseId: "toolu_X",
       input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
     })
+
+    const messages = [
+      ...r0Messages,
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
+      // Client rewrote the tool_use_id to something else; count still matches.
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_REWRITTEN", content: "ok" }] },
+    ]
 
     const result = await buildBlockingHandler(makeShared({ messages }))
 
@@ -262,27 +279,30 @@ describe("blocking handler: stale continuation fall-through", () => {
   })
 
   it("incoming tool_result with no tool_use_id field is still recognized as continuation shape", async () => {
-    const messages = [
-      { role: "user", content: "read README" },
-      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
-      // No tool_use_id at all on the tool_result block.
-      { role: "user", content: [{ type: "tool_result", content: "ok" }] },
-    ]
-    const priorHashes = computeMessageHashes(messages.slice(0, -1))
-    const firstUserHash = priorHashes[0]!
+    const r0Messages = [{ role: "user", content: "read README" }]
+    const r0Hashes = computeMessageHashes(r0Messages)
+    const firstUserHash = r0Hashes[0]!
     const key = { kind: "lineage", hash: firstUserHash } as const
 
     const state = blockingPool.acquire(key, {
       key,
       ephemeralSessionId: "00000000-0000-0000-0000-000000000004",
       workingDirectory: cwd,
-      priorMessageHashes: priorHashes,
+      priorMessageHashes: r0Hashes,
       cleanup: async () => {},
     })
+    state.lastEmittedAssistantBlocks = [{ type: "tool_use", name: "mcp__tools__Read", input: {} }]
     state.pendingTools.set("toolu_X", {
       mcpToolName: "Read", clientToolName: "Read", toolUseId: "toolu_X",
       input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
     })
+
+    const messages = [
+      ...r0Messages,
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
+      // No tool_use_id at all on the tool_result block.
+      { role: "user", content: [{ type: "tool_result", content: "ok" }] },
+    ]
 
     const result = await buildBlockingHandler(makeShared({ messages }))
 

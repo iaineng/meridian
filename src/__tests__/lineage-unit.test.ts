@@ -11,6 +11,8 @@ import {
   measureSuffixOverlap,
   verifyLineage,
   verifyEmittedAssistant,
+  isToolResultOnlyUserMessage,
+  extractContinuationTrailing,
   MIN_SUFFIX_FOR_COMPACTION,
   type SessionState,
   type EmittedAssistantBlock,
@@ -569,5 +571,235 @@ describe("verifyEmittedAssistant", () => {
       { type: "thinking", thinking: "x" },
       { type: "text", text: "narration" },
     ])).toEqual({ match: true })
+  })
+})
+
+describe("isToolResultOnlyUserMessage", () => {
+  it("accepts user message with only tool_result blocks", () => {
+    expect(isToolResultOnlyUserMessage({
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tu_X", content: "ok" }],
+    })).toBe(true)
+  })
+
+  it("accepts multiple tool_result blocks in one message", () => {
+    expect(isToolResultOnlyUserMessage({
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "tu_A", content: "a" },
+        { type: "tool_result", tool_use_id: "tu_B", content: "b" },
+      ],
+    })).toBe(true)
+  })
+
+  it("accepts tool_result blocks without tool_use_id (id is optional)", () => {
+    expect(isToolResultOnlyUserMessage({
+      role: "user",
+      content: [{ type: "tool_result", content: "ok" }],
+    })).toBe(true)
+  })
+
+  it("rejects mixed content (text + tool_result)", () => {
+    expect(isToolResultOnlyUserMessage({
+      role: "user",
+      content: [
+        { type: "text", text: "before" },
+        { type: "tool_result", tool_use_id: "tu_X", content: "ok" },
+      ],
+    })).toBe(false)
+  })
+
+  it("rejects empty content array", () => {
+    expect(isToolResultOnlyUserMessage({ role: "user", content: [] })).toBe(false)
+  })
+
+  it("rejects assistant role", () => {
+    expect(isToolResultOnlyUserMessage({
+      role: "assistant",
+      content: [{ type: "tool_result", content: "ok" }],
+    })).toBe(false)
+  })
+
+  it("rejects string content", () => {
+    expect(isToolResultOnlyUserMessage({ role: "user", content: "hello" })).toBe(false)
+  })
+
+  it("rejects null/undefined", () => {
+    expect(isToolResultOnlyUserMessage(null)).toBe(false)
+    expect(isToolResultOnlyUserMessage(undefined)).toBe(false)
+  })
+})
+
+describe("extractContinuationTrailing", () => {
+  const tu = (id: string, name: string, input: unknown = {}) => ({ type: "tool_use", id, name, input })
+  const tr = (id: string, content: unknown = "ok") => ({ type: "tool_result", tool_use_id: id, content })
+
+  it("empty trailing → kind:empty", () => {
+    expect(extractContinuationTrailing([], 0)).toEqual({ kind: "empty" })
+    expect(extractContinuationTrailing([], 2)).toEqual({ kind: "empty" })
+  })
+
+  it("bundled shape: a(tu1, tu2) + u(tr1) + u(tr2) flattens correctly", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read"), tu("tu2", "Bash")] },
+      { role: "user", content: [tr("tu1", "r1")] },
+      { role: "user", content: [tr("tu2", "r2")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 2)
+    expect(out.kind).toBe("ok")
+    if (out.kind === "ok") {
+      expect(out.toolUses).toEqual([{ name: "Read", input: {} }, { name: "Bash", input: {} }])
+      expect(out.toolResults).toEqual([
+        { tool_use_id: "tu1", content: "r1", is_error: undefined },
+        { tool_use_id: "tu2", content: "r2", is_error: undefined },
+      ])
+    }
+  })
+
+  it("bundled with single user message holding all results: a(tu1,tu2) + u(tr1, tr2)", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read"), tu("tu2", "Bash")] },
+      { role: "user", content: [tr("tu1", "r1"), tr("tu2", "r2")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 2)
+    expect(out.kind).toBe("ok")
+    if (out.kind === "ok") {
+      expect(out.toolUses.map(t => t.name)).toEqual(["Read", "Bash"])
+      expect(out.toolResults.map(t => t.tool_use_id)).toEqual(["tu1", "tu2"])
+    }
+  })
+
+  it("split shape: a(tu1) + u(tr1) + a(tu2) + u(tr2) flattens to same flat arrays", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read")] },
+      { role: "user", content: [tr("tu1", "r1")] },
+      { role: "assistant", content: [tu("tu2", "Bash")] },
+      { role: "user", content: [tr("tu2", "r2")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 2)
+    expect(out.kind).toBe("ok")
+    if (out.kind === "ok") {
+      expect(out.toolUses.map(t => t.name)).toEqual(["Read", "Bash"])
+      expect(out.toolResults.map(t => t.tool_use_id)).toEqual(["tu1", "tu2"])
+    }
+  })
+
+  it("bundled with text + thinking before tool_use is accepted", () => {
+    const trailing = [
+      { role: "assistant", content: [
+        { type: "thinking", thinking: "...", signature: "s" },
+        { type: "text", text: "Looking now." },
+        tu("tu1", "Read"),
+        tu("tu2", "Bash"),
+      ] },
+      { role: "user", content: [tr("tu1"), tr("tu2")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 2)
+    expect(out.kind).toBe("ok")
+    if (out.kind === "ok") {
+      expect(out.toolUses).toHaveLength(2)
+      expect(out.toolUses.map(t => t.name)).toEqual(["Read", "Bash"])
+    }
+  })
+
+  it("split with text in second assistant is accepted", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read")] },
+      { role: "user", content: [tr("tu1")] },
+      { role: "assistant", content: [{ type: "text", text: "next:" }, tu("tu2", "Bash")] },
+      { role: "user", content: [tr("tu2")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 2)
+    expect(out.kind).toBe("ok")
+  })
+
+  it("malformed: trailing not ending with tool_result-only user", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read")] },
+      { role: "user", content: "plain text" },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("malformed")
+    if (out.kind === "malformed") expect(out.reason).toContain("tool_result-only user")
+  })
+
+  it("malformed: trailing assistant has no tool_use block", () => {
+    const trailing = [
+      { role: "assistant", content: [{ type: "text", text: "no tools here" }] },
+      { role: "user", content: [tr("tu1")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("malformed")
+    if (out.kind === "malformed") expect(out.reason).toContain("no tool_use")
+  })
+
+  it("malformed: user message has mixed text + tool_result", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read")] },
+      { role: "user", content: [
+        { type: "text", text: "extra" },
+        tr("tu1"),
+      ] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("malformed")
+  })
+
+  it("malformed: tool_use count exceeds expected", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read"), tu("tu2", "Bash")] },
+      { role: "user", content: [tr("tu1"), tr("tu2")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("malformed")
+    if (out.kind === "malformed") expect(out.reason).toContain("tool_result count mismatch")
+  })
+
+  it("malformed: tool_result count differs from tool_use count (extra tr)", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read")] },
+      { role: "user", content: [tr("tu1"), tr("tu_EXTRA")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("malformed")
+    if (out.kind === "malformed") expect(out.reason).toContain("tool_result count mismatch")
+  })
+
+  it("malformed: trailing message with unexpected role", () => {
+    const trailing = [
+      { role: "system", content: "wat" },
+      { role: "user", content: [tr("tu1")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("malformed")
+  })
+
+  it("preserves is_error on tool_result blocks", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read")] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu1", content: "err", is_error: true }] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("ok")
+    if (out.kind === "ok") expect(out.toolResults[0]!.is_error).toBe(true)
+  })
+
+  it("single-tool round (N=1) accepted in either bundled or split form (identical)", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Read")] },
+      { role: "user", content: [tr("tu1")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("ok")
+  })
+
+  it("preserves canonical-JSON-comparable input on tool_use", () => {
+    const trailing = [
+      { role: "assistant", content: [tu("tu1", "Bash", { cwd: "/tmp", cmd: "ls" })] },
+      { role: "user", content: [tr("tu1")] },
+    ]
+    const out = extractContinuationTrailing(trailing, 1)
+    expect(out.kind).toBe("ok")
+    if (out.kind === "ok") expect(out.toolUses[0]!.input).toEqual({ cwd: "/tmp", cmd: "ls" })
   })
 })

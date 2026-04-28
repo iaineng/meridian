@@ -159,6 +159,7 @@ describe("blocking pool: multi-sibling forks", () => {
       { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_A", content: "ok" }] },
     ]
     const priorHashes = computeMessageHashes(messages.slice(0, -1))
+    const allHashes = computeMessageHashes(messages)
     const key = { kind: "lineage", hash: priorHashes[0]! } as const
     expect(blockingPool.lookup(key, priorHashes)).toBeUndefined()
 
@@ -168,7 +169,9 @@ describe("blocking pool: multi-sibling forks", () => {
     expect(result.isBlockingContinuation).toBe(false)
     expect(result.lineageType).toBe("blocking")
     expect(blockingPool.totalSize()).toBe(1)
-    expect(blockingPool.lookup(key, priorHashes)).toBeDefined()
+    // New sibling stores priorMessageHashes = full allMessages (new convention),
+    // so lookup must use the full hash array as the prefix candidate.
+    expect(blockingPool.lookup(key, allHashes)).toBeDefined()
   })
 
   it("client fabricates an unrelated assistant turn → drift detected → release live + promote", async () => {
@@ -207,7 +210,9 @@ describe("blocking pool: multi-sibling forks", () => {
     expect(result.isBlockingContinuation).toBe(false)
     expect(result.lineageType).toBe("blocking")
     expect(blockingPool.totalSize()).toBe(1)
-    const fresh = blockingPool.lookup(key, priorHashes)
+    // New sibling's priorMessageHashes = full allMessages (3 hashes here),
+    // so use the full message hash array for lookup.
+    const fresh = blockingPool.lookup(key, computeMessageHashes(messages))
     expect(fresh).toBeDefined()
     expect(fresh).not.toBe(live)
   })

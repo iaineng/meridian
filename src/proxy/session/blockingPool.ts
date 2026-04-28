@@ -121,12 +121,15 @@ export interface BlockingSessionState {
   status: BlockingSessionStatus
 
   /**
-   * Per-message hashes of the "prior" messages from the most recent accepted
-   * request (initial: full incoming; continuation: messages minus the trailing
-   * tool_result user). Used with `measurePrefixOverlap` on the next
-   * continuation so that the verification survives the natural growth of the
-   * conversation (client appends an assistant turn + tool_result user between
-   * rounds, so an equality check on a single aggregate hash cannot work).
+   * Per-message hashes of every message the client delivered in the most
+   * recent accepted request (initial OR continuation). Acts as a stable
+   * "client-confirmed prior" boundary marker: the next round's handler
+   * slices its trailing region as `allMessages.slice(this.length)` and
+   * validates the prefix via `measurePrefixOverlap`. The boundary covers
+   * the assistant turn(s) and tool_result user(s) the client just sent,
+   * so concurrent-tool-call rounds work for either split (`a, u, a, u, …`)
+   * or bundled (`a, u, u, …`) shapes — `extractContinuationTrailing`
+   * flattens either after slicing.
    */
   priorMessageHashes: string[]
 

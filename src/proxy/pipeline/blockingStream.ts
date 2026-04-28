@@ -101,6 +101,10 @@ function pushEvent(state: BlockingSessionState, evt: BufferedEvent): void {
  * `runBlockingNonStream` — the routing semantics are identical regardless
  * of how the previous round's HTTP delivered the assistant turn.
  *
+ * `handler.pendingToolResults` is already flattened into history order by
+ * `extractContinuationTrailing`, so neither the split (`a, u, a, u, …`) nor
+ * the bundled (`a, u, u, …`) trailing shape needs special handling here.
+ *
  * Routing strategy:
  *   1. If the incoming `tool_use_id` happens to match a pending entry, use
  *      it (cheap/correct path when the client preserves SDK ids).
@@ -133,12 +137,17 @@ export function applyContinuation(
   state.currentRoundToolIds = []
   state.pendingRoundClose = null
   state.status = "streaming"
-  // Refresh the stored prior-hash baseline to this round's prior prefix
-  // (everything except the trailing tool_result user). Subsequent rounds
-  // will validate against this extended prefix.
+  // Refresh the stored prior-hash baseline to the FULL allMessages of this
+  // round — every message the client just delivered (including the trailing
+  // assistant echoes and tool_result user(s)) is now confirmed prior. The
+  // next round's `buildBlockingHandler` slices its trailing region as
+  // `allMessages.slice(state.priorMessageHashes.length)`, which works for
+  // both split (`a, u, a, u, …`) and bundled (`a, u, u, …`) shapes because
+  // `extractContinuationTrailing` flattens either. Prefer the precomputed
+  // hashes from the handler when available to avoid recomputing.
   const allMessages = shared.body?.messages ?? []
   if (allMessages.length >= 1) {
-    state.priorMessageHashes = computeMessageHashes(allMessages.slice(0, -1))
+    state.priorMessageHashes = handler.allMessageHashes ?? computeMessageHashes(allMessages)
   }
 }
 

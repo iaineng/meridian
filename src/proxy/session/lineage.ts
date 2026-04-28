@@ -149,6 +149,123 @@ function canonicalizeValue(v: unknown): unknown {
 }
 
 /**
+ * Type guard for the "tool_result-only user" message shape that marks
+ * a request as a blocking-MCP continuation. Every block in `content` must
+ * be `tool_result`; `tool_use_id` is intentionally NOT required (clients
+ * may rewrite or omit ids — routing is positional via
+ * `state.currentRoundToolIds`).
+ */
+export function isToolResultOnlyUserMessage(
+  msg: any,
+): msg is { role: "user"; content: Array<{ type: "tool_result"; tool_use_id?: string; content?: unknown; is_error?: boolean }> } {
+  if (!msg || msg.role !== "user" || !Array.isArray(msg.content) || msg.content.length === 0) return false
+  return msg.content.every((b: any) => b && b.type === "tool_result")
+}
+
+/** Result of `extractContinuationTrailing` — discriminates the three terminal states. */
+export type ContinuationTrailingResult =
+  | {
+      kind: "ok"
+      /** All tool_use blocks across trailing assistant messages, in history order. */
+      toolUses: Array<{ name: string; input: unknown }>
+      /** All tool_result blocks across trailing user messages, in history order. */
+      toolResults: Array<{ tool_use_id?: string; content: unknown; is_error?: boolean }>
+    }
+  | { kind: "empty" }
+  | { kind: "malformed"; reason: string }
+
+/**
+ * Validate and flatten the trailing region of a blocking-MCP continuation
+ * request. The trailing region is whatever sits beyond `state.priorMessageHashes`
+ * — i.e. the messages the client added to deliver the previous round's emit
+ * plus its tool_results.
+ *
+ * Two shapes both express "N concurrent tool_use → N tool_results":
+ *
+ *   - **Bundled**: `[a(tu1, tu2, …), u(tr1), u(tr2), …]` — single assistant
+ *     message echoing the SDK emit verbatim, results split into individual
+ *     tool_result-only user messages.
+ *   - **Split**:   `[a(tu1), u(tr1), a(tu2), u(tr2), …]` — assistant emit
+ *     pre-split into one message per tool_use, each immediately followed
+ *     by its tool_result.
+ *
+ * Both interleave with text/thinking on the assistant side (kept), and both
+ * must end with a tool_result-only user message. This validator accepts
+ * either shape (and any consistent mix) by enumerating every assistant's
+ * tool_use blocks in history order alongside every user's tool_result
+ * blocks, then enforcing equal counts against `expectedToolUseCount`
+ * (= `state.lastEmittedAssistantBlocks.length`).
+ *
+ * Validation rules:
+ *   1. Empty trailing → `kind: "empty"` (replay of the previous round; caller
+ *      treats as stale and promotes to a fresh sibling).
+ *   2. Last message must be tool_result-only user → else `malformed`.
+ *   3. Every message must be either (a) assistant whose `content` array
+ *      contains AT LEAST ONE `tool_use` block (text/thinking/server_tool_use
+ *      allowed alongside — `verifyEmittedAssistant` filters them later) or
+ *      (b) tool_result-only user. Otherwise `malformed`.
+ *   4. `toolUses.length === toolResults.length === expectedToolUseCount`,
+ *      else `malformed("tool_result count mismatch: …")`. The "tool_result"
+ *      prefix is preserved for log-grep and existing test compat.
+ *
+ * Pure — no I/O, no state mutation. The caller (`buildBlockingHandler`)
+ * decides how to react to each verdict.
+ */
+export function extractContinuationTrailing(
+  trailing: ReadonlyArray<{ role: string; content: any }>,
+  expectedToolUseCount: number,
+): ContinuationTrailingResult {
+  if (trailing.length === 0) return { kind: "empty" }
+
+  if (!isToolResultOnlyUserMessage(trailing[trailing.length - 1])) {
+    return { kind: "malformed", reason: "trailing must end with a tool_result-only user message" }
+  }
+
+  const toolUses: Array<{ name: string; input: unknown }> = []
+  const toolResults: Array<{ tool_use_id?: string; content: unknown; is_error?: boolean }> = []
+
+  for (let i = 0; i < trailing.length; i++) {
+    const msg = trailing[i]!
+    if (msg.role === "user") {
+      if (!isToolResultOnlyUserMessage(msg)) {
+        return { kind: "malformed", reason: `trailing[${i}] user message has non-tool_result content` }
+      }
+      for (const b of msg.content) {
+        toolResults.push({ tool_use_id: b.tool_use_id, content: b.content, is_error: b.is_error })
+      }
+      continue
+    }
+    if (msg.role === "assistant") {
+      if (!Array.isArray(msg.content)) {
+        return { kind: "malformed", reason: `trailing[${i}] assistant content is not an array` }
+      }
+      let sawToolUse = false
+      for (const b of msg.content) {
+        if (b && typeof b === "object" && (b as any).type === "tool_use") {
+          const name = typeof (b as any).name === "string" ? (b as any).name : ""
+          toolUses.push({ name, input: (b as any).input })
+          sawToolUse = true
+        }
+      }
+      if (!sawToolUse) {
+        return { kind: "malformed", reason: `trailing[${i}] assistant has no tool_use block` }
+      }
+      continue
+    }
+    return { kind: "malformed", reason: `trailing[${i}] has unexpected role "${msg.role}"` }
+  }
+
+  if (toolUses.length !== expectedToolUseCount || toolResults.length !== expectedToolUseCount) {
+    return {
+      kind: "malformed",
+      reason: `tool_result count mismatch: expected ${expectedToolUseCount}, trailing tool_uses=${toolUses.length}, trailing tool_results=${toolResults.length}`,
+    }
+  }
+
+  return { kind: "ok", toolUses, toolResults }
+}
+
+/**
  * Verify that the client's reported assistant turn matches what the SDK
  * actually emitted, comparing only `tool_use` blocks. Text and thinking
  * blocks are filtered out of the client's content first:

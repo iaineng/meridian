@@ -354,7 +354,8 @@ describe("runBlockingNonStream", () => {
     expect(resolvedB).not.toBeNull()
     // currentRoundToolIds should be cleared after applying continuation.
     expect(state.currentRoundToolIds).toEqual([])
-    // priorMessageHashes refreshed from messages.slice(0, -1).
-    expect(state.priorMessageHashes).toEqual(computeMessageHashes(messages.slice(0, -1)))
+    // priorMessageHashes refreshed from the FULL allMessages (new convention:
+    // every message just delivered is confirmed prior for the next round).
+    expect(state.priorMessageHashes).toEqual(computeMessageHashes(messages))
   })
 })

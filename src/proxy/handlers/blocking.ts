@@ -43,7 +43,12 @@ import {
   PASSTHROUGH_MCP_PREFIX,
   createBlockingPassthroughMcpServer,
 } from "../passthroughTools"
-import { computeMessageHashes, verifyEmittedAssistant } from "../session/lineage"
+import {
+  computeMessageHashes,
+  verifyEmittedAssistant,
+  isToolResultOnlyUserMessage,
+  extractContinuationTrailing,
+} from "../session/lineage"
 import {
   blockingPool,
   type BlockingSessionKey,
@@ -60,33 +65,28 @@ export class BlockingProtocolMismatchError extends Error {
   }
 }
 
-function isToolResultOnlyUserMessage(msg: any): msg is { role: "user"; content: Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> } {
-  if (!msg || msg.role !== "user" || !Array.isArray(msg.content) || msg.content.length === 0) return false
-  // Shape detection only requires every block to be a tool_result. The
-  // `tool_use_id` field on each block is intentionally NOT required: many
-  // clients rewrite or omit IDs between rounds. Routing back to the
-  // suspended handler is done positionally by `state.currentRoundToolIds`,
-  // not by ID equality (see blockingStream.ts continuation resolve loop).
-  return msg.content.every((b: any) => b && b.type === "tool_result")
-}
-
 export async function buildBlockingHandler(shared: SharedRequestContext): Promise<HandlerContext> {
   const { workingDirectory, allMessages, model, outputFormat, requestMeta, agentSessionId } = shared
 
   const lastMsg = allMessages[allMessages.length - 1]
   const isContinuationShape = isToolResultOnlyUserMessage(lastMsg)
 
-  // Per-message hashes of the "prior" (everything except the trailing
-  // tool_result user, if any). Used for prefix-overlap validation across
-  // rounds because the conversation grows by 2 messages (assistant + user)
-  // between each HTTP so an equality check on an aggregate hash is useless.
-  const priorMessages = isContinuationShape ? allMessages.slice(0, -1) : allMessages
-  const priorMessageHashes = computeMessageHashes(priorMessages)
+  // Per-message hashes of every incoming message. The new "client-confirmed
+  // prior" baseline stored on `state.priorMessageHashes` after each round
+  // covers the FULL allMessages of that round — so the next round's lookup
+  // matches state's stored hashes positionally against allMessageHashes
+  // here, and the trailing region is exactly `slice(state.length)`. This
+  // works regardless of whether the client uses split or bundled shape for
+  // concurrent tool calls (`extractContinuationTrailing` flattens either).
+  //
+  // For initial requests (non-continuation shape) the same array doubles as
+  // the round-0 `priorMessageHashes` we hand to `acquire`.
+  const allMessageHashes = computeMessageHashes(allMessages)
 
   // Session key: explicit header > fingerprint-style first-user hash.
   // We deliberately avoid hashing `priorMessages` here because that grows
   // every round; the first user-message hash is stable for the whole chat.
-  const firstUserHash = priorMessageHashes[0] ?? ""
+  const firstUserHash = allMessageHashes[0] ?? ""
   const key: BlockingSessionKey = agentSessionId
     ? { kind: "header", value: agentSessionId }
     : { kind: "lineage", hash: firstUserHash }
@@ -97,116 +97,8 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     // key, pick the one whose stored priors are the longest strict prefix of
     // the incoming. Siblings model forked branches — the longest-prefix
     // winner is the actively-advancing branch.
-    const state = blockingPool.lookup(key, priorMessageHashes)
-    if (state) {
-      // Drift check: the assistant turn the client reports in priorMessages
-      // must match what the SDK actually emitted on the prior round (text
-      // and tool_use blocks only — thinking is filtered). If the client
-      // fabricated or rewrote the assistant turn, routing the trailing
-      // tool_results into the live handler would feed the model garbage
-      // labelled as the wrong tool. On drift we release the live sibling
-      // and promote to a fresh blocking initial; the new sibling's JSONL
-      // is built from the client's view of history (synthetic-filler
-      // `prepareFreshSession` seeds the tool_result tail).
-      let drifted = false
-      const clientAssistant = priorMessages[priorMessages.length - 1] as any
-      if (state.lastEmittedAssistantBlocks && clientAssistant?.role === "assistant") {
-        const verdict = verifyEmittedAssistant(state.lastEmittedAssistantBlocks, clientAssistant.content)
-        if (!verdict.match) {
-          claudeLog("blocking.continuation.assistant_drift", {
-            requestId: requestMeta.requestId,
-            reason: verdict.reason,
-          })
-          await blockingPool.release(state, "assistant turn drifted from server emission")
-          claudeLog("blocking.continuation.promoted", {
-            requestId: requestMeta.requestId,
-            from: "assistant_drift",
-          })
-          drifted = true
-        }
-      }
-
-      if (!drifted) {
-        // Validate tool_result count matches pending handler count. We do
-        // NOT check that the incoming tool_use_id values match pending —
-        // many clients rewrite or omit IDs between rounds. The resolve loop
-        // in blockingStream.ts routes positionally via
-        // `state.currentRoundToolIds`, falling back to ID match when the
-        // incoming ID happens to be valid.
-        const incomingCount = lastMsg.content.length
-        const pendingCount = state.pendingTools.size
-
-        // When pendingTools is empty the round has already completed
-        // (handlers resolved, SDK emitted end_turn, or the session is
-        // mid-teardown) — any incoming tool_result is a client retry after
-        // a connection drop on the final round. Not a valid continuation
-        // against THIS sibling: release the stale state and fall through
-        // to the initial path, which `acquire`s a fresh sibling under the
-        // same key (synthetic-filler `prepareFreshSession` can seed a
-        // tool_result-tail conversation).
-        if (pendingCount === 0) {
-          claudeLog("blocking.continuation.stale", {
-            requestId: requestMeta.requestId,
-            got_count: incomingCount,
-          })
-          await blockingPool.release(state, "stale continuation: no pending tools")
-          claudeLog("blocking.continuation.promoted", {
-            requestId: requestMeta.requestId,
-            from: "stale",
-          })
-          // fall through to the initial path below
-        } else {
-          if (incomingCount !== pendingCount) {
-            claudeLog("blocking.continuation.mismatch", {
-              requestId: requestMeta.requestId,
-              expected_count: pendingCount,
-              got_count: incomingCount,
-            })
-            // Tear down the stale session so the client can retry cleanly.
-            // Count mismatch is a genuinely malformed conversation: the
-            // model emitted N tool_use blocks but the client returned M ≠
-            // N tool_result blocks. Promoting cannot recover — the JSONL
-            // would carry the same imbalance and Anthropic would reject
-            // it. 400 is the right signal.
-            await blockingPool.release(state, "tool_result count mismatch")
-            throw new BlockingProtocolMismatchError(
-              `tool_result count mismatch: expected ${pendingCount}, got ${incomingCount}`,
-            )
-          }
-
-          claudeLog("blocking.continuation.matched", {
-            requestId: requestMeta.requestId,
-            pending: pendingCount,
-          })
-
-          const lineageResult: LineageResult = { type: "ephemeral" }
-          return {
-            isEphemeral: true,
-            lineageResult,
-            isResume: false,
-            isUndo: false,
-            cachedSession: undefined,
-            resumeSessionId: undefined,
-            undoRollbackUuid: undefined,
-            lineageType: "blocking_continuation",
-            messagesToConvert: [],            // unused on continuation path
-            freshSessionId: undefined,
-            freshMessageUuids: undefined,
-            useJsonlFresh: false,
-            cleanup: async () => {},          // cleanup deferred to session terminate
-            blockingMode: true,
-            isBlockingContinuation: true,
-            blockingSessionKey: key,
-            blockingState: state,
-            pendingToolResults: lastMsg.content.map((b: any) => ({
-              tool_use_id: b.tool_use_id,
-              content: b.content,
-              is_error: b.is_error,
-            })),
-          }
-        }
-      }
-    } else {
+    const state = blockingPool.lookup(key, allMessageHashes)
+    if (!state) {
       // No sibling's priors are a prefix of the incoming — pool empty at
       // this key, session timed out, server restarted, or client forked
       // from an unseen point. NOT a 400: promote to the initial path so
@@ -222,6 +114,127 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
         from: "miss",
       })
       // fall through to the initial path below
+    } else {
+      // Slice the trailing region using the stored boundary. Everything
+      // beyond `state.priorMessageHashes.length` is the client's delivery
+      // of the previous round (echoed assistant turn(s) plus tool_results).
+      const priorLen = state.priorMessageHashes.length
+      const trailing = allMessages.slice(priorLen)
+      const expected = state.lastEmittedAssistantBlocks?.length ?? 0
+      const verdict = extractContinuationTrailing(trailing, expected)
+
+      if (verdict.kind === "empty") {
+        // priorLen === allMessages.length: client sent the same allMessages
+        // as the last accepted round — replay/retry of the previous HTTP.
+        // pendingTools is necessarily empty (the prior round resolved them);
+        // release the stale sibling and promote to initial under the same
+        // key, mirroring the "stale" path semantics.
+        claudeLog("blocking.continuation.stale", {
+          requestId: requestMeta.requestId,
+          reason: "empty_trailing",
+        })
+        await blockingPool.release(state, "stale continuation: empty trailing (replay)")
+        claudeLog("blocking.continuation.promoted", {
+          requestId: requestMeta.requestId,
+          from: "stale",
+        })
+        // fall through to the initial path below
+      } else if (verdict.kind === "malformed") {
+        // Structural problem with the trailing — count mismatch, missing
+        // assistant tool_use, or non-tool-only user content. Promoting
+        // can't recover; the JSONL would carry the same imbalance and
+        // Anthropic would reject it. 400 is the right signal.
+        claudeLog("blocking.continuation.mismatch", {
+          requestId: requestMeta.requestId,
+          expected_count: expected,
+          reason: verdict.reason,
+          trailing_count: trailing.length,
+        })
+        await blockingPool.release(state, verdict.reason)
+        throw new BlockingProtocolMismatchError(verdict.reason)
+      } else {
+        // Drift check: the tool_use blocks the client echoed across the
+        // trailing region must match what the SDK actually emitted (text
+        // and thinking blocks are filtered by `verifyEmittedAssistant`).
+        // If the client fabricated or rewrote the assistant turn, routing
+        // the trailing tool_results into the live handler would feed the
+        // model garbage labelled as the wrong tool. On drift we release
+        // the live sibling and promote to a fresh blocking initial.
+        let drifted = false
+        if (state.lastEmittedAssistantBlocks) {
+          const driftCheckContent = verdict.toolUses.map((tu) => ({
+            type: "tool_use" as const,
+            name: tu.name,
+            input: tu.input,
+          }))
+          const v = verifyEmittedAssistant(state.lastEmittedAssistantBlocks, driftCheckContent)
+          if (!v.match) {
+            claudeLog("blocking.continuation.assistant_drift", {
+              requestId: requestMeta.requestId,
+              reason: v.reason,
+            })
+            await blockingPool.release(state, "assistant turn drifted from server emission")
+            claudeLog("blocking.continuation.promoted", {
+              requestId: requestMeta.requestId,
+              from: "assistant_drift",
+            })
+            drifted = true
+          }
+        }
+
+        if (!drifted) {
+          // When pendingTools is empty the round has already completed
+          // (handlers resolved, SDK emitted end_turn, or the session is
+          // mid-teardown) — any incoming tool_result is a client retry
+          // after a connection drop on the final round. Not a valid
+          // continuation against THIS sibling: release the stale state
+          // and fall through to the initial path.
+          if (state.pendingTools.size === 0) {
+            claudeLog("blocking.continuation.stale", {
+              requestId: requestMeta.requestId,
+              reason: "no_pending_tools",
+              got_count: verdict.toolResults.length,
+            })
+            await blockingPool.release(state, "stale continuation: no pending tools")
+            claudeLog("blocking.continuation.promoted", {
+              requestId: requestMeta.requestId,
+              from: "stale",
+            })
+            // fall through to the initial path below
+          } else {
+            claudeLog("blocking.continuation.matched", {
+              requestId: requestMeta.requestId,
+              pending: state.pendingTools.size,
+              prior_len: priorLen,
+              trailing_count: trailing.length,
+              tool_results: verdict.toolResults.length,
+            })
+
+            const lineageResult: LineageResult = { type: "ephemeral" }
+            return {
+              isEphemeral: true,
+              lineageResult,
+              isResume: false,
+              isUndo: false,
+              cachedSession: undefined,
+              resumeSessionId: undefined,
+              undoRollbackUuid: undefined,
+              lineageType: "blocking_continuation",
+              messagesToConvert: [],            // unused on continuation path
+              freshSessionId: undefined,
+              freshMessageUuids: undefined,
+              useJsonlFresh: false,
+              cleanup: async () => {},          // cleanup deferred to session terminate
+              blockingMode: true,
+              isBlockingContinuation: true,
+              blockingSessionKey: key,
+              blockingState: state,
+              pendingToolResults: verdict.toolResults,
+              allMessageHashes,
+            }
+          }
+        }
+      }
     }
   }
 
@@ -263,7 +276,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
       key,
       ephemeralSessionId: capturedIdQd!,
       workingDirectory,
-      priorMessageHashes,
+      priorMessageHashes: allMessageHashes,
       cleanup: queryDirectCleanup,
     })
     const prebuiltPassthroughMcpQd = Array.isArray(shared.body?.tools) && shared.body.tools.length > 0
@@ -370,7 +383,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     key,
     ephemeralSessionId: ephemeralId!,
     workingDirectory,
-    priorMessageHashes,
+    priorMessageHashes: allMessageHashes,
     cleanup,
   })
 

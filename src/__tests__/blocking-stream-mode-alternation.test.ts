@@ -209,8 +209,8 @@ describe("blocking session: stream/non-stream alternation", () => {
 
     // Round 0 tool_result was routed to the pending handler.
     expect(round0Pending.getResolved()).not.toBeNull()
-    // priorMessageHashes was advanced from [r0[0]] → hashes(r1[0..-1]).
-    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r1Messages.slice(0, -1)))
+    // priorMessageHashes was advanced to the FULL r1Messages (new convention).
+    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r1Messages))
     // SDK end → pool released.
     expect(state.status).toBe("terminated")
   })
@@ -268,7 +268,7 @@ describe("blocking session: stream/non-stream alternation", () => {
     expect(r1Sse).toContain("text_delta")
     expect(r1Sse).toContain("end_turn")
     expect(pending.getResolved()).not.toBeNull()
-    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r1Messages.slice(0, -1)))
+    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r1Messages))
     expect(state.status).toBe("terminated")
   })
 
@@ -319,7 +319,7 @@ describe("blocking session: stream/non-stream alternation", () => {
     const r1Body: any = await r1Res.json()
     expect(r1Body.content[0]).toMatchObject({ type: "tool_use", id: "tu_R1" })
     expect(p0.getResolved()).not.toBeNull()
-    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r1Messages.slice(0, -1)))
+    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r1Messages))
 
     // Round 2 (stream continuation): tool_result for tu_R1, next tool_use tu_R2
     const r2Messages = [
@@ -338,7 +338,7 @@ describe("blocking session: stream/non-stream alternation", () => {
       {} as any, {} as any, env,
     ))
     expect(p1.getResolved()).not.toBeNull()
-    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r2Messages.slice(0, -1)))
+    expect(state.priorMessageHashes).toEqual(computeMessageHashes(r2Messages))
 
     // Round 3 (non-stream continuation): tool_result for tu_R2, then end_turn.
     const r3Messages = [
