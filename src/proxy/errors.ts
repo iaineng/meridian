@@ -51,6 +51,18 @@ export function classifyError(errMsg: string): ClassifiedError {
     }
   }
 
+  // Invalid request (upstream 400). The SDK surfaces upstream Anthropic API
+  // errors as `API Error: <status> <body>`, so we match the formatted prefix
+  // rather than the bare "400" digits to avoid false positives. The canonical
+  // error type ("invalid_request_error") is also a strong signal.
+  if (lower.includes("api error: 400") || lower.includes("invalid_request_error")) {
+    return {
+      status: 400,
+      type: "invalid_request_error",
+      message: errMsg,
+    }
+  }
+
   // SDK process crash
   if (lower.includes("exited with code") || lower.includes("process exited")) {
     const codeMatch = errMsg.match(/exited with code (\d+)/)
@@ -119,6 +131,91 @@ export function classifyError(errMsg: string): ClassifiedError {
     status: 500,
     type: "api_error",
     message: errMsg || "Unknown error"
+  }
+}
+
+/**
+ * Error envelope returned to the client. When `body` was extracted verbatim
+ * from an upstream Anthropic API error, every field (including `request_id`
+ * and the inner `error.type`/`error.message`) is preserved as-is. Otherwise
+ * `body` is synthesised from `classifyError`.
+ */
+export interface ErrorEnvelope {
+  status: number
+  body: Record<string, unknown>
+}
+
+/**
+ * Try to pull a verbatim upstream Anthropic API error JSON out of an SDK
+ * error message. The SDK surfaces upstream errors as
+ *   `Claude Code returned an error result: API Error: <STATUS> <JSON>`
+ * sometimes followed by `\nSubprocess stderr: ...`. We locate the first `{`
+ * after `API Error: <STATUS>`, walk the brace nesting (string-aware) to find
+ * the matching `}`, and JSON.parse only that slice — so trailing stderr or
+ * other text doesn't break extraction.
+ */
+function extractUpstreamErrorBody(errMsg: string): ErrorEnvelope | null {
+  const prefix = errMsg.match(/API Error:\s*(\d{3})\s+/)
+  if (!prefix || prefix.index === undefined) return null
+  const status = parseInt(prefix[1]!, 10)
+  const startIdx = prefix.index + prefix[0].length
+  if (errMsg[startIdx] !== "{") return null
+
+  let depth = 0
+  let inString = false
+  let escape = false
+  let endIdx = -1
+  for (let i = startIdx; i < errMsg.length; i++) {
+    const ch = errMsg[i]!
+    if (escape) { escape = false; continue }
+    if (inString) {
+      if (ch === "\\") { escape = true; continue }
+      if (ch === '"') { inString = false }
+      continue
+    }
+    if (ch === '"') { inString = true; continue }
+    if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) { endIdx = i + 1; break }
+    }
+  }
+  if (endIdx === -1) return null
+
+  try {
+    const parsed = JSON.parse(errMsg.slice(startIdx, endIdx))
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      (parsed as Record<string, unknown>).type === "error" &&
+      typeof (parsed as Record<string, unknown>).error === "object" &&
+      (parsed as Record<string, unknown>).error !== null
+    ) {
+      return { status, body: parsed as Record<string, unknown> }
+    }
+  } catch {
+    // fall through
+  }
+  return null
+}
+
+/**
+ * Build the error envelope returned to the client. Prefers an exact
+ * pass-through of the upstream Anthropic API error body (preserving
+ * `request_id`, the original `error.type`, and the original `error.message`)
+ * when the SDK message embeds one. Falls back to a synthesised envelope from
+ * `classifyError` for non-API errors (auth, timeouts, process crashes, etc.).
+ */
+export function buildErrorEnvelope(errMsg: string): ErrorEnvelope {
+  const upstream = extractUpstreamErrorBody(errMsg)
+  if (upstream) return upstream
+  const classified = classifyError(errMsg)
+  return {
+    status: classified.status,
+    body: {
+      type: "error",
+      error: { type: classified.type, message: classified.message },
+    },
   }
 }
 

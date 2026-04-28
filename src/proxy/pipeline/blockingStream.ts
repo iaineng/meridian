@@ -34,7 +34,7 @@ import {
   CLAUDE_OAUTH_ENV_KEYS,
 } from "../claudeOauthEnv"
 import { isClosedControllerError } from "../models"
-import { classifyError, isMaxTurnsError, isMaxOutputTokensError } from "../errors"
+import { classifyError, buildErrorEnvelope, isMaxTurnsError, isMaxOutputTokensError } from "../errors"
 import { PASSTHROUGH_MCP_PREFIX, stripMcpPrefix, registerToolUseBinding, maybeCloseRound } from "../passthroughTools"
 import { normalizeToolResultForMcp } from "../session/transcript"
 import { computeMessageHashes } from "../session/lineage"
@@ -468,10 +468,9 @@ export function runBlockingStream(
           return
         }
         if (evt.kind === "error") {
-          safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-            type: "error",
-            error: { type: classifyError(evt.error.message).type, message: evt.error.message },
-          })}\n\n`))
+          safeEnqueue(encoder.encode(
+            `event: error\ndata: ${JSON.stringify(buildErrorEnvelope(evt.error.message).body)}\n\n`,
+          ))
           recordTelemetry(evt.error)
           closeHttp()
           void blockingPool.release(state, "sdk_error")
@@ -597,10 +596,12 @@ async function startSdkIterator(
  * stream — only the sink is different. Aggregates SSE frames into a single
  * Anthropic-format JSON Message and resolves the HTTP with it at
  * `close_round` (round end with `stop_reason:"tool_use"`) or `end` (SDK
- * terminated). Errors return as a JSON error envelope (HTTP 200 +
- * `{type:"error", error:{...}}`) — symmetrical with the streaming path's
- * `event: error` frame, so clients on the same conversation may freely
- * alternate `stream:true`/`stream:false` across rounds.
+ * terminated). Errors return as a JSON error envelope using the HTTP status
+ * code from `classifyError` (e.g. 400 for `invalid_request_error`, 429 for
+ * rate limits) — clients can freely alternate `stream:true`/`stream:false`
+ * across rounds; the streaming counterpart still reports the same error via
+ * an `event: error` SSE frame because its HTTP status is locked at 200 once
+ * the response stream has started.
  */
 export async function runBlockingNonStream(
   shared: SharedRequestContext,
@@ -667,16 +668,10 @@ export async function runBlockingNonStream(
       closed = true
       detachSink(state)
       recordTelemetry(err)
-      const body = err
-        ? {
-            type: "error" as const,
-            error: {
-              type: classifyError(err.message).type,
-              message: err.message,
-            },
-          }
-        : aggregator.build(shared.body.model)
+      const envelope = err ? buildErrorEnvelope(err.message) : undefined
+      const body = envelope ? envelope.body : aggregator.build(shared.body.model)
       resolveResponse(new Response(JSON.stringify(body), {
+        status: envelope?.status ?? 200,
         headers: {
           "Content-Type": "application/json",
           "X-Claude-Session-ID": stringifyBlockingKey(key),

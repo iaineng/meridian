@@ -2,7 +2,7 @@
  * Unit tests for classifyError — pure function, no mocks needed.
  */
 import { describe, it, expect } from "bun:test"
-import { classifyError, isStaleSessionError, isExtraUsageRequiredError } from "../proxy/errors"
+import { classifyError, buildErrorEnvelope, isStaleSessionError, isExtraUsageRequiredError } from "../proxy/errors"
 
 describe("classifyError", () => {
   describe("authentication errors", () => {
@@ -87,6 +87,29 @@ describe("classifyError", () => {
     it("detects 'subscription' keyword", () => {
       const result = classifyError("subscription expired")
       expect(result.status).toBe(402)
+    })
+  })
+
+  describe("invalid request errors", () => {
+    it("detects 'API Error: 400' prefix from the SDK", () => {
+      const result = classifyError(
+        'Claude Code returned an error result: API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.24.content.0.image.source.base64.data: At least one of the image dimensions exceed max allowed size: 8000 pixels"},"request_id":"req_011CaVb1QAN35qty4rbccC8M"}'
+      )
+      expect(result.status).toBe(400)
+      expect(result.type).toBe("invalid_request_error")
+      expect(result.message).toContain("image dimensions exceed")
+    })
+
+    it("detects the 'invalid_request_error' canonical type", () => {
+      const result = classifyError("invalid_request_error: missing required field")
+      expect(result.status).toBe(400)
+      expect(result.type).toBe("invalid_request_error")
+    })
+
+    it("does NOT match a bare '400' that is not an API Error prefix", () => {
+      const result = classifyError("processed 400 events successfully but then failed")
+      expect(result.status).toBe(500)
+      expect(result.type).toBe("api_error")
     })
   })
 
@@ -191,6 +214,64 @@ describe("classifyError", () => {
 
     it("returns false when only '1m' but no 'extra usage'", () => {
       expect(isExtraUsageRequiredError("using 1m context window")).toBe(false)
+    })
+  })
+
+  describe("buildErrorEnvelope (upstream pass-through)", () => {
+    it("preserves every upstream field verbatim — type, error.type, error.message, request_id", () => {
+      const sdkErr =
+        'Claude Code returned an error result: API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content: thinking blocks may only be in `assistant` messages"},"request_id":"req_011CaVcBf1yJrn4zwNo22znW"}'
+      const env = buildErrorEnvelope(sdkErr)
+      expect(env.status).toBe(400)
+      expect(env.body).toEqual({
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "messages.0.content: thinking blocks may only be in `assistant` messages",
+        },
+        request_id: "req_011CaVcBf1yJrn4zwNo22znW",
+      })
+    })
+
+    it("uses the upstream HTTP status (e.g. 429) when present", () => {
+      const sdkErr =
+        'Claude Code returned an error result: API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"too many requests"},"request_id":"req_X"}'
+      const env = buildErrorEnvelope(sdkErr)
+      expect(env.status).toBe(429)
+      expect((env.body.error as any).type).toBe("rate_limit_error")
+      expect(env.body.request_id).toBe("req_X")
+    })
+
+    it("ignores trailing stderr appended after the JSON body", () => {
+      const sdkErr =
+        'Claude Code returned an error result: API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"bad"},"request_id":"req_Y"}\nSubprocess stderr: noise that is not JSON'
+      const env = buildErrorEnvelope(sdkErr)
+      expect(env.status).toBe(400)
+      expect(env.body).toEqual({
+        type: "error",
+        error: { type: "invalid_request_error", message: "bad" },
+        request_id: "req_Y",
+      })
+    })
+
+    it("falls back to classifyError envelope for non-API SDK errors", () => {
+      const env = buildErrorEnvelope("Request timed out")
+      expect(env.status).toBe(504)
+      expect((env.body.error as any).type).toBe("timeout_error")
+      expect(env.body.request_id).toBeUndefined()
+    })
+
+    it("falls back when the upstream JSON body is malformed", () => {
+      const env = buildErrorEnvelope('API Error: 400 {not real json}')
+      expect(env.status).toBe(400) // still classified as 400 by classifyError's API Error branch
+      expect((env.body.error as any).type).toBe("invalid_request_error")
+      expect(env.body.request_id).toBeUndefined()
+    })
+
+    it("falls back when JSON parses but has wrong shape", () => {
+      const env = buildErrorEnvelope('API Error: 400 {"foo":"bar"}')
+      // No top-level type:"error" → not an upstream envelope.
+      expect(env.body.request_id).toBeUndefined()
     })
   })
 

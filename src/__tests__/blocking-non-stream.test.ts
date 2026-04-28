@@ -231,15 +231,77 @@ describe("runBlockingNonStream", () => {
 
     expect(res.headers.get("Content-Type")).toBe("application/json")
     expect(res.headers.get("X-Claude-Session-ID")).toBe(`l:${priorHashes[0]}`)
+    expect(res.status).toBe(503)
     const body: any = await res.json()
     expect(body.type).toBe("error")
-    expect(body.error.type).toBeTruthy()
-    expect(body.error.message).toContain("overloaded_error")
+    expect(body.error.type).toBe("overloaded_error")
+    expect(body.error.message).toContain("overloaded")
 
     expect(state.status).toBe("terminated")
     const [metric] = telemetryStore.getRecent({ limit: 1 })
     expect(metric).toBeDefined()
     expect(metric!.error).not.toBeNull()
+  })
+
+  it("E5: upstream invalid_request_error → HTTP 400 and upstream JSON preserved verbatim (incl. request_id)", async () => {
+    const messages = [{ role: "user", content: "hi" }]
+    const priorHashes = computeMessageHashes(messages)
+    const key = { kind: "lineage", hash: priorHashes[0]! } as const
+    const state = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: "00000000-0000-0000-0000-0000000000e5",
+      workingDirectory: "/tmp",
+      priorMessageHashes: priorHashes,
+      cleanup: async () => {},
+    })
+
+    const upstreamMsg =
+      'Claude Code returned an error result: API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content: thinking blocks may only be in `assistant` messages"},"request_id":"req_011CaVcBf1yJrn4zwNo22znW"}'
+    state.eventBuffer.push({ kind: "error", error: new Error(upstreamMsg) })
+
+    const shared = makeShared(messages)
+    const handler = makeHandler(state, key, [])
+    const env = { claudeExecutable: "/usr/bin/claude", requestStartAt: shared.requestMeta.queueStartedAt }
+    const res = await runBlockingNonStream(shared, handler, {} as any, {} as any, env as any)
+
+    expect(res.status).toBe(400)
+    const body: any = await res.json()
+    // Every upstream field preserved exactly, including request_id and the
+    // original error.message (NOT the wrapped SDK string).
+    expect(body).toEqual({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "messages.0.content: thinking blocks may only be in `assistant` messages",
+      },
+      request_id: "req_011CaVcBf1yJrn4zwNo22znW",
+    })
+  })
+
+  it("E6: non-API SDK error (timeout) → synthesised envelope from classifyError", async () => {
+    const messages = [{ role: "user", content: "hi" }]
+    const priorHashes = computeMessageHashes(messages)
+    const key = { kind: "lineage", hash: priorHashes[0]! } as const
+    const state = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: "00000000-0000-0000-0000-0000000000e6",
+      workingDirectory: "/tmp",
+      priorMessageHashes: priorHashes,
+      cleanup: async () => {},
+    })
+
+    state.eventBuffer.push({ kind: "error", error: new Error("Request timed out after 120s") })
+
+    const shared = makeShared(messages)
+    const handler = makeHandler(state, key, [])
+    const env = { claudeExecutable: "/usr/bin/claude", requestStartAt: shared.requestMeta.queueStartedAt }
+    const res = await runBlockingNonStream(shared, handler, {} as any, {} as any, env as any)
+
+    expect(res.status).toBe(504)
+    const body: any = await res.json()
+    expect(body.type).toBe("error")
+    expect(body.error.type).toBe("timeout_error")
+    expect(body.request_id).toBeUndefined()
   })
 
   it("continuation routes pendingToolResults by id, then by position fallback", async () => {

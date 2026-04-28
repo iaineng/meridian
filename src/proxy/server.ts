@@ -15,7 +15,7 @@ import { randomUUID } from "crypto"
 
 import { diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import { createConcurrencyGate } from "./concurrency"
-import { classifyError } from "./errors"
+import { classifyError, buildErrorEnvelope } from "./errors"
 import { refreshOAuthToken } from "./tokenRefresh"
 import { checkPluginConfigured } from "./setup"
 import { resolveClaudeExecutableAsync, getClaudeAuthStatusAsync, getAuthCacheInfo } from "./models"
@@ -241,6 +241,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         })
 
         const classified = classifyError(errMsg)
+        const envelope = buildErrorEnvelope(errMsg)
         claudeLog("proxy.error", { error: errMsg, classified: classified.type })
 
         recordRequestError(
@@ -249,8 +250,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         )
 
         return new Response(
-          JSON.stringify({ type: "error", error: { type: classified.type, message: classified.message } }),
-          { status: classified.status, headers: { "Content-Type": "application/json" } },
+          JSON.stringify(envelope.body),
+          { status: envelope.status, headers: { "Content-Type": "application/json" } },
         )
       } finally {
         // Skip cleanup when we deferred it to the streaming finally — the

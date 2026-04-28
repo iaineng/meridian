@@ -4,6 +4,7 @@ import { claudeLog } from "../../logger"
 import { buildQueryOptions } from "../query"
 import {
   classifyError,
+  buildErrorEnvelope,
   isStaleSessionError,
   isRateLimitError,
   isMaxTurnsError,
@@ -1091,6 +1092,7 @@ export function runStream(
           ...(stderrOutput ? { stderr: stderrOutput } : {}),
         })
         const streamErr = classifyError(errMsg)
+        const envelope = buildErrorEnvelope(errMsg)
         claudeLog("proxy.anthropic.error", { error: errMsg, classified: streamErr.type })
 
         if (messageStartEmitted) {
@@ -1106,10 +1108,9 @@ export function runStream(
           ), "error_message_stop")
         }
 
-        safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-          type: "error",
-          error: { type: streamErr.type, message: streamErr.message },
-        })}\n\n`), "error_event")
+        safeEnqueue(encoder.encode(
+          `event: error\ndata: ${JSON.stringify(envelope.body)}\n\n`,
+        ), "error_event")
         if (!streamClosed) {
           try { controller.close() } catch {}
           streamClosed = true
