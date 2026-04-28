@@ -133,6 +133,18 @@ export interface BlockingSessionState {
    */
   priorMessageHashes: string[]
 
+  /**
+   * Fingerprint of the `body.tools` array supplied at session acquisition.
+   * Compared against the incoming request's tools fingerprint at
+   * continuation time — a mismatch means the live SDK iterator's in-process
+   * MCP server has the OLD tool definitions baked in (the SDK does not
+   * re-enumerate `tools/list` across resumes within one query()), so the
+   * sibling cannot serve the new tool set. The handler releases the live
+   * sibling and promotes to a fresh blocking initial under the same key.
+   * Empty string when no tools were supplied; see `computeToolsFingerprint`.
+   */
+  toolsFingerprint: string
+
   /** FIFO rendezvous per tool name for binding stream_event tool_use_id → handler. */
   bindingsByToolName: Map<string, BindingSlot>
 
@@ -213,7 +225,8 @@ class BlockingPool {
       | "eventBuffer" | "activeSink" | "sdkEnded" | "createdAt" | "expiresAt"
       | "inputJsonAccum" | "toolUseIdBySdkIdx"
       | "lastEmittedAssistantBlocks"
-    >,
+      | "toolsFingerprint"
+    > & { toolsFingerprint?: string },
   ): BlockingSessionState {
     const id = stringifyBlockingKey(key)
     const arr = this.siblings.get(id) ?? []
@@ -226,6 +239,7 @@ class BlockingPool {
     const now = Date.now()
     const state: BlockingSessionState = {
       ...init,
+      toolsFingerprint: init.toolsFingerprint ?? "",
       createdAt: now,
       expiresAt: now + this.timeoutMs,
       status: "streaming",

@@ -149,6 +149,53 @@ function canonicalizeValue(v: unknown): unknown {
 }
 
 /**
+ * Compute a fingerprint hash over a request's `tools` array.
+ *
+ * Order-INSENSITIVE: each tool is canonicalised independently, then the
+ * per-tool canonical strings are sorted alphabetically before joining. Two
+ * requests that declare the same set of tools in different positions
+ * therefore produce the same fingerprint. (Order doesn't affect the model's
+ * view of which tools exist; clients may shuffle the array between rounds
+ * for unrelated reasons — registry enumeration order, dedup passes, etc. —
+ * and we don't want that to invalidate the live blocking session.)
+ *
+ * Per-tool canonical-JSON (deeply key-sorted) so property-insertion-order
+ * differences don't trigger spurious changes. Only the fields that actually
+ * shape the model's view of a tool are considered: `name`, `description`,
+ * `input_schema`, `type`. Anything else (transport annotations,
+ * client-internal metadata) is ignored.
+ *
+ * Used by the blocking-MCP continuation path to detect tool-set changes
+ * mid-conversation: the live SDK iterator has the OLD tool definitions
+ * baked into its in-process MCP server (the SDK does not re-read tools
+ * across resumes within one query()), so a fingerprint mismatch means the
+ * sibling cannot serve the new request truthfully — promote to a fresh
+ * blocking initial instead.
+ *
+ * Returns "" for empty / non-array input so callers can compare without
+ * branching on shape.
+ */
+export function computeToolsFingerprint(tools: unknown): string {
+  if (!Array.isArray(tools) || tools.length === 0) return ""
+  const parts: string[] = []
+  for (const t of tools) {
+    if (!t || typeof t !== "object") {
+      parts.push("null")
+      continue
+    }
+    const tt = t as Record<string, unknown>
+    parts.push(canonicalJson({
+      name: tt.name,
+      description: tt.description,
+      input_schema: tt.input_schema,
+      type: tt.type,
+    }))
+  }
+  parts.sort()
+  return xxh64(parts.join("\n"))
+}
+
+/**
  * Type guard for the "tool_result-only user" message shape that marks
  * a request as a blocking-MCP continuation. Every block in `content` must
  * be `tool_result`; `tool_use_id` is intentionally NOT required (clients

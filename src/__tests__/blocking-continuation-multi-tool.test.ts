@@ -32,7 +32,10 @@ import {
   type BlockingSessionKey,
   type PendingTool,
 } from "../proxy/session/blockingPool"
-import { computeMessageHashes } from "../proxy/session/lineage"
+import { computeMessageHashes, computeToolsFingerprint } from "../proxy/session/lineage"
+
+const DEFAULT_TOOLS = [{ name: "Read" }, { name: "Bash" }]
+const DEFAULT_TOOLS_FP = computeToolsFingerprint(DEFAULT_TOOLS)
 
 async function tmpDir(): Promise<string> {
   const dir = path.join(tmpdir(), `meridian-multitool-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -65,7 +68,7 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
       requestMeta: { requestId: "req-multitool", endpoint: "/v1/messages", queueEnteredAt: 0, queueStartedAt: 0 },
       agentSessionId: undefined,
       initialPassthrough: true,
-      body: { tools: [{ name: "Read" }, { name: "Bash" }], messages, model: "claude-sonnet-4-5-20250929" },
+      body: { tools: DEFAULT_TOOLS, messages, model: "claude-sonnet-4-5-20250929" },
     } as any
   }
 
@@ -97,6 +100,7 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
       ephemeralSessionId: `00000000-0000-0000-0000-${Math.random().toString(16).slice(2, 14).padStart(12, "0")}`,
       workingDirectory: cwd,
       priorMessageHashes: r0Hashes,
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     state.lastEmittedAssistantBlocks = opts.emittedToolUses.map((tu) => ({

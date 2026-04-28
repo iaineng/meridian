@@ -19,7 +19,7 @@ import {
   type BlockingSessionKey,
   type PendingTool,
 } from "../proxy/session/blockingPool"
-import { computeMessageHashes } from "../proxy/session/lineage"
+import { computeMessageHashes, computeToolsFingerprint } from "../proxy/session/lineage"
 
 async function tmpDir(): Promise<string> {
   const dir = path.join(tmpdir(), `meridian-fork-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -27,12 +27,16 @@ async function tmpDir(): Promise<string> {
   return dir
 }
 
+const DEFAULT_TOOLS = [{ name: "Read" }]
+const DEFAULT_TOOLS_FP = computeToolsFingerprint(DEFAULT_TOOLS)
+
 function seedState(key: BlockingSessionKey, priorMessageHashes: string[], cwd: string, tag: string) {
   return blockingPool.acquire(key, {
     key,
     ephemeralSessionId: `00000000-0000-0000-0000-0000000000${tag}`,
     workingDirectory: cwd,
     priorMessageHashes,
+    toolsFingerprint: DEFAULT_TOOLS_FP,
     cleanup: async () => {},
   })
 }
@@ -65,7 +69,8 @@ describe("blocking pool: multi-sibling forks", () => {
     else process.env.CLAUDE_CONFIG_DIR = prevClaudeConfig
   })
 
-  function makeShared(opts: { messages: any[]; agentSessionId?: string }) {
+  function makeShared(opts: { messages: any[]; agentSessionId?: string; tools?: any[] }) {
+    const tools = opts.tools ?? DEFAULT_TOOLS
     return {
       workingDirectory: cwd,
       allMessages: opts.messages,
@@ -74,7 +79,7 @@ describe("blocking pool: multi-sibling forks", () => {
       requestMeta: { requestId: "req-fork", endpoint: "/v1/messages", queueEnteredAt: 0, queueStartedAt: 0 },
       agentSessionId: opts.agentSessionId,
       initialPassthrough: true,
-      body: { tools: [{ name: "Read" }], messages: opts.messages, model: "claude-sonnet-4-5-20250929" },
+      body: { tools, messages: opts.messages, model: "claude-sonnet-4-5-20250929" },
     } as any
   }
 
@@ -192,6 +197,7 @@ describe("blocking pool: multi-sibling forks", () => {
       ephemeralSessionId: "00000000-0000-0000-0000-000000000aaa",
       workingDirectory: cwd,
       priorMessageHashes: [priorHashes[0]!],
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     live.pendingTools.set("tu_REAL", {
@@ -231,6 +237,7 @@ describe("blocking pool: multi-sibling forks", () => {
       ephemeralSessionId: "00000000-0000-0000-0000-000000000bbb",
       workingDirectory: cwd,
       priorMessageHashes: [priorHashes[0]!],
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     live.pendingTools.set("tu_X", {
@@ -274,6 +281,7 @@ describe("blocking pool: multi-sibling forks", () => {
       ephemeralSessionId: "00000000-0000-0000-0000-000000000ddd",
       workingDirectory: cwd,
       priorMessageHashes: [priorHashes[0]!],
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     live.pendingTools.set("tu_X", {
@@ -285,6 +293,88 @@ describe("blocking pool: multi-sibling forks", () => {
     live.lastEmittedAssistantBlocks = [
       { type: "tool_use", name: "Read", input: { path: "/etc/hosts" } },
     ]
+
+    const result = await buildBlockingHandler(makeShared({ messages }))
+
+    expect(result.isBlockingContinuation).toBe(true)
+    expect(result.lineageType).toBe("blocking_continuation")
+    expect(result.blockingState).toBe(live)
+    expect(live.status).toBe("streaming")
+  })
+
+  it("tools definition changed mid-conversation → release live + promote to fresh sibling", async () => {
+    // Round 0: client opened the session with `[{name:"Read"}]`. Live sibling
+    // recorded that fingerprint; SDK iterator's MCP server has Read baked in.
+    const messages = [
+      { role: "user", content: "list files" },
+      { role: "assistant", content: [{ type: "tool_use", id: "tu_X", name: "Read", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_X", content: "ok" }] },
+    ]
+    const priorHashes = computeMessageHashes(messages.slice(0, -1))
+    const key = { kind: "lineage", hash: priorHashes[0]! } as const
+
+    const live = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: "00000000-0000-0000-0000-000000000eee",
+      workingDirectory: cwd,
+      priorMessageHashes: [priorHashes[0]!],
+      // Match the round-0 tools that makeShared() default ([{name:"Read"}]).
+      toolsFingerprint: DEFAULT_TOOLS_FP,
+      cleanup: async () => {},
+    })
+    live.pendingTools.set("tu_X", {
+      mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_X",
+      input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
+    })
+    live.lastEmittedAssistantBlocks = [{ type: "tool_use", name: "Read", input: {} }]
+
+    // Round 1: client sends the matching tool_result BUT changes the tools
+    // declaration — adds a Bash tool. Even though prefix + drift would both
+    // pass, the tools-fingerprint mismatch must release the live sibling and
+    // promote to a fresh blocking initial under the same key.
+    const result = await buildBlockingHandler(makeShared({
+      messages,
+      tools: [{ name: "Read" }, { name: "Bash" }],
+    }))
+
+    expect(live.status).toBe("terminated")
+    expect(result.blockingMode).toBe(true)
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(result.lineageType).toBe("blocking")
+    expect(blockingPool.totalSize()).toBe(1)
+    const fresh = blockingPool.lookup(key, computeMessageHashes(messages))
+    expect(fresh).toBeDefined()
+    expect(fresh).not.toBe(live)
+    // The fresh sibling carries the NEW tools fingerprint, so a subsequent
+    // continuation with the same new tool set will match instead of promoting.
+    expect(fresh!.toolsFingerprint).not.toBe(DEFAULT_TOOLS_FP)
+  })
+
+  it("tools definition unchanged → continuation accepted (regression guard)", async () => {
+    // Sanity check: same shape as the tools-changed test above, but the round
+    // 1 tools list is byte-equal to round 0's. Fingerprint match → continuation
+    // matched, live sibling reused.
+    const messages = [
+      { role: "user", content: "list files" },
+      { role: "assistant", content: [{ type: "tool_use", id: "tu_Y", name: "Read", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_Y", content: "ok" }] },
+    ]
+    const priorHashes = computeMessageHashes(messages.slice(0, -1))
+    const key = { kind: "lineage", hash: priorHashes[0]! } as const
+
+    const live = blockingPool.acquire(key, {
+      key,
+      ephemeralSessionId: "00000000-0000-0000-0000-000000000fff",
+      workingDirectory: cwd,
+      priorMessageHashes: [priorHashes[0]!],
+      toolsFingerprint: DEFAULT_TOOLS_FP,
+      cleanup: async () => {},
+    })
+    live.pendingTools.set("tu_Y", {
+      mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_Y",
+      input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
+    })
+    live.lastEmittedAssistantBlocks = [{ type: "tool_use", name: "Read", input: {} }]
 
     const result = await buildBlockingHandler(makeShared({ messages }))
 

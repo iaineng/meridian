@@ -284,6 +284,7 @@ Because the aggregator consumes the exact frames the streaming path forwards, th
 |----------|----------|
 | Preconditions not met (outputFormat, no tools, …) | Dispatch goes through the plain ephemeral handler (no blocking). |
 | Continuation hits pool but the stored `priorMessageHashes` is not a prefix of the incoming prior (tampering / undo / different branch) | `buildBlockingHandler` falls through to `buildEphemeralHandler` silently. |
+| Continuation hash matches but `body.tools` fingerprint differs from the live sibling's stored `toolsFingerprint` | Live sibling released; promoted to a fresh blocking initial. The SDK iterator's in-process MCP server has the OLD tool definitions baked in (no re-enumeration across resumes within one `query()`), so feeding tool_results into stale handlers would let the model continue thinking against an outdated schema. Logged as `blocking.continuation.tools_changed` + `blocking.continuation.promoted{from:"tools_changed"}`. |
 | Continuation hash matches but `tool_result` id set ≠ pending set | `BlockingProtocolMismatchError` → 400 `invalid_request_error`, session released. |
 | Continuation hash matches but pool has no entry (server restart, timeout) | Fall through to `buildEphemeralHandler`. |
 | SDK query errors mid-flight | `error` SSE event + `message_delta(end_turn)` + `message_stop`; session released. |

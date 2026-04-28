@@ -45,6 +45,7 @@ import {
 } from "../passthroughTools"
 import {
   computeMessageHashes,
+  computeToolsFingerprint,
   verifyEmittedAssistant,
   isToolResultOnlyUserMessage,
   extractContinuationTrailing,
@@ -90,6 +91,15 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   const key: BlockingSessionKey = agentSessionId
     ? { kind: "header", value: agentSessionId }
     : { kind: "lineage", hash: firstUserHash }
+
+  // Fingerprint of the incoming request's tools array. Compared against the
+  // matched sibling's stored fingerprint at continuation time — a change in
+  // tool definitions (name/description/input_schema/type added, removed, or
+  // modified, or order changed) invalidates the live SDK iterator's
+  // in-process MCP server (tool list is baked in at query() start and not
+  // re-enumerated mid-iterator), so we promote to a fresh blocking initial
+  // rather than feed the model a stale tool set.
+  const incomingToolsFingerprint = computeToolsFingerprint(shared.body?.tools)
 
   // --- Continuation path ---
   if (isContinuationShape) {
@@ -152,6 +162,26 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
         })
         await blockingPool.release(state, verdict.reason)
         throw new BlockingProtocolMismatchError(verdict.reason)
+      } else if (state.toolsFingerprint !== incomingToolsFingerprint) {
+        // Tools-set change: the incoming request declares a different tool
+        // list than the one baked into the live SDK iterator's MCP server.
+        // We cannot patch the live server's registry from here (the SDK
+        // does not re-enumerate `tools/list` across resumes within one
+        // query()), so feeding tool_results into the suspended handlers
+        // would let the model continue thinking against a stale schema.
+        // Release the live sibling and promote to a fresh blocking initial,
+        // mirroring the drift / miss / stale promotion paths.
+        claudeLog("blocking.continuation.tools_changed", {
+          requestId: requestMeta.requestId,
+          stored: state.toolsFingerprint,
+          incoming: incomingToolsFingerprint,
+        })
+        await blockingPool.release(state, "tools definition changed mid-conversation")
+        claudeLog("blocking.continuation.promoted", {
+          requestId: requestMeta.requestId,
+          from: "tools_changed",
+        })
+        // fall through to the initial path below
       } else {
         // Drift check: the tool_use blocks the client echoed across the
         // trailing region must match what the SDK actually emitted (text
@@ -277,6 +307,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
       ephemeralSessionId: capturedIdQd!,
       workingDirectory,
       priorMessageHashes: allMessageHashes,
+      toolsFingerprint: incomingToolsFingerprint,
       cleanup: queryDirectCleanup,
     })
     const prebuiltPassthroughMcpQd = Array.isArray(shared.body?.tools) && shared.body.tools.length > 0
@@ -384,6 +415,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     ephemeralSessionId: ephemeralId!,
     workingDirectory,
     priorMessageHashes: allMessageHashes,
+    toolsFingerprint: incomingToolsFingerprint,
     cleanup,
   })
 

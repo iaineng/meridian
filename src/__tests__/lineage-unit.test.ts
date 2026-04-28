@@ -7,6 +7,7 @@ import {
   computeLineageHash,
   hashMessage,
   computeMessageHashes,
+  computeToolsFingerprint,
   measurePrefixOverlap,
   measureSuffixOverlap,
   verifyLineage,
@@ -801,5 +802,69 @@ describe("extractContinuationTrailing", () => {
     const out = extractContinuationTrailing(trailing, 1)
     expect(out.kind).toBe("ok")
     if (out.kind === "ok") expect(out.toolUses[0]!.input).toEqual({ cwd: "/tmp", cmd: "ls" })
+  })
+})
+
+describe("computeToolsFingerprint", () => {
+  it("returns empty string for empty / non-array input", () => {
+    expect(computeToolsFingerprint(undefined)).toBe("")
+    expect(computeToolsFingerprint(null)).toBe("")
+    expect(computeToolsFingerprint([])).toBe("")
+    expect(computeToolsFingerprint({} as any)).toBe("")
+  })
+
+  it("is stable across irrelevant property-insertion-order differences", () => {
+    const a = [{ name: "Read", description: "read a file", input_schema: { type: "object", properties: { path: { type: "string" } } } }]
+    const b = [{ description: "read a file", input_schema: { properties: { path: { type: "string" } }, type: "object" }, name: "Read" }]
+    expect(computeToolsFingerprint(a)).toBe(computeToolsFingerprint(b))
+  })
+
+  it("changes when a tool's name changes", () => {
+    const a = [{ name: "Read", description: "x" }]
+    const b = [{ name: "Reed", description: "x" }]
+    expect(computeToolsFingerprint(a)).not.toBe(computeToolsFingerprint(b))
+  })
+
+  it("changes when a tool's description changes", () => {
+    const a = [{ name: "Read", description: "v1" }]
+    const b = [{ name: "Read", description: "v2" }]
+    expect(computeToolsFingerprint(a)).not.toBe(computeToolsFingerprint(b))
+  })
+
+  it("changes when input_schema changes", () => {
+    const a = [{ name: "Read", input_schema: { type: "object", properties: { path: { type: "string" } } } }]
+    const b = [{ name: "Read", input_schema: { type: "object", properties: { path: { type: "string" }, mode: { type: "string" } } } }]
+    expect(computeToolsFingerprint(a)).not.toBe(computeToolsFingerprint(b))
+  })
+
+  it("changes when a tool is added or removed", () => {
+    const a = [{ name: "Read" }]
+    const ab = [{ name: "Read" }, { name: "Bash" }]
+    expect(computeToolsFingerprint(a)).not.toBe(computeToolsFingerprint(ab))
+  })
+
+  it("is order-INSENSITIVE (same tool set in different positions → same fingerprint)", () => {
+    // Clients may shuffle the array between rounds (registry enumeration
+    // order, dedup passes, etc.); reordering must NOT invalidate the live
+    // blocking session.
+    const ab = [{ name: "Read" }, { name: "Bash" }]
+    const ba = [{ name: "Bash" }, { name: "Read" }]
+    expect(computeToolsFingerprint(ab)).toBe(computeToolsFingerprint(ba))
+  })
+
+  it("order-insensitive across larger sets including schemas + descriptions", () => {
+    const a = [
+      { name: "Read", description: "read", input_schema: { type: "object", properties: { p: { type: "string" } } } },
+      { name: "Bash", description: "shell", input_schema: { type: "object" } },
+      { name: "Edit", description: "edit", input_schema: { type: "object" } },
+    ]
+    const b = [a[2], a[0], a[1]]
+    expect(computeToolsFingerprint(a)).toBe(computeToolsFingerprint(b))
+  })
+
+  it("ignores non-shaping properties (annotations, _meta, …)", () => {
+    const a = [{ name: "Read", description: "d", input_schema: {} }]
+    const b = [{ name: "Read", description: "d", input_schema: {}, annotations: { readOnlyHint: true }, _meta: { x: 1 } }]
+    expect(computeToolsFingerprint(a)).toBe(computeToolsFingerprint(b))
   })
 })

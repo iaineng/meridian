@@ -29,7 +29,10 @@ import path from "node:path"
 
 import { buildBlockingHandler } from "../proxy/handlers/blocking"
 import { blockingPool } from "../proxy/session/blockingPool"
-import { computeMessageHashes } from "../proxy/session/lineage"
+import { computeMessageHashes, computeToolsFingerprint } from "../proxy/session/lineage"
+
+const DEFAULT_TOOLS = [{ name: "Read" }]
+const DEFAULT_TOOLS_FP = computeToolsFingerprint(DEFAULT_TOOLS)
 
 async function tmpDir(): Promise<string> {
   const dir = path.join(tmpdir(), `meridian-stale-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -62,7 +65,7 @@ describe("blocking handler: stale continuation fall-through", () => {
       requestMeta: { requestId: "req-test", endpoint: "/v1/messages", queueEnteredAt: 0, queueStartedAt: 0 },
       agentSessionId: opts.agentSessionId,
       initialPassthrough: true,
-      body: { tools: [{ name: "Read" }], messages: opts.messages, model: "claude-sonnet-4-5-20250929" },
+      body: { tools: DEFAULT_TOOLS, messages: opts.messages, model: "claude-sonnet-4-5-20250929" },
     } as any
   }
 
@@ -85,6 +88,7 @@ describe("blocking handler: stale continuation fall-through", () => {
       ephemeralSessionId: "00000000-0000-0000-0000-000000000001",
       workingDirectory: cwd,
       priorMessageHashes: allHashes,
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     expect(stale.pendingTools.size).toBe(0)
@@ -123,6 +127,7 @@ describe("blocking handler: stale continuation fall-through", () => {
         ephemeralSessionId: "00000000-0000-0000-0000-000000000099",
         workingDirectory: cwd,
         priorMessageHashes: allHashes,
+        toolsFingerprint: DEFAULT_TOOLS_FP,
         cleanup: async () => {},
       })
       state.pendingTools.set("toolu_Z", {
@@ -215,6 +220,7 @@ describe("blocking handler: stale continuation fall-through", () => {
       ephemeralSessionId: "00000000-0000-0000-0000-000000000002",
       workingDirectory: cwd,
       priorMessageHashes: r0Hashes,
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     state.lastEmittedAssistantBlocks = [{ type: "tool_use", name: "Read", input: {} }]
@@ -251,6 +257,7 @@ describe("blocking handler: stale continuation fall-through", () => {
       ephemeralSessionId: "00000000-0000-0000-0000-000000000003",
       workingDirectory: cwd,
       priorMessageHashes: r0Hashes,
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     // SDK emitted a tool_use Read with empty input; the client echoes the
@@ -289,6 +296,7 @@ describe("blocking handler: stale continuation fall-through", () => {
       ephemeralSessionId: "00000000-0000-0000-0000-000000000004",
       workingDirectory: cwd,
       priorMessageHashes: r0Hashes,
+      toolsFingerprint: DEFAULT_TOOLS_FP,
       cleanup: async () => {},
     })
     state.lastEmittedAssistantBlocks = [{ type: "tool_use", name: "mcp__tools__Read", input: {} }]
