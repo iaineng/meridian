@@ -32,6 +32,7 @@ export type QueryDirectVerdict =
         | "ineligible_last_not_user"
         | "ineligible_trailing_tool_use"
         | "ineligible_has_assistant_tail"
+        | "ineligible_assistant_in_history"
         | "ineligible_cache_breakpoint_not_last"
     }
 
@@ -76,8 +77,10 @@ export function cacheBreakpointOnTrailingOnly(
  *
  * Eligible shapes:
  *  - `[u1]` (strict lone-user)
- *  - `[u1, u2, ...]` where last is user and the message before it is NOT
- *    assistant (consecutive user turns with no anchoring assistant).
+ *  - `[u1, u2, ...]` where every message is a user turn — no assistant
+ *    anywhere in the history (the AsyncIterable prompt is user-only;
+ *    buildQueryDirectMessages would otherwise flatten an interleaved
+ *    assistant into role:"user" and leak its thinking/tool_use blocks).
  *
  * Ineligible cases are marked with explicit reasons for telemetry.
  */
@@ -102,6 +105,19 @@ export function classifyQueryDirect(
   // the trailing user and avoids filler, no need to take it over here.
   if (!cls.includesLastUser) {
     return { eligible: false, reason: "ineligible_has_assistant_tail" }
+  }
+  // Full-history scan: classifyContinuation only inspects messages[n-2].
+  // For shapes like [u1, a1, u2, u3] the trailing-user check passes (u2 is
+  // user) even though a1 sits in the middle — buildQueryDirectMessages would
+  // then flatten a1 to role:"user", carrying its thinking/tool_use blocks
+  // into a non-assistant message. Anthropic rejects with
+  // `thinking blocks may only be in 'assistant' messages`. Reject any
+  // assistant in the prior history to keep query-direct strictly
+  // user-only.
+  for (let i = 0; i < n - 1; i++) {
+    if (messages[i]?.role === "assistant") {
+      return { eligible: false, reason: "ineligible_assistant_in_history" }
+    }
   }
 
   // Multimodal blocks (image/document/file) are passed through unchanged by

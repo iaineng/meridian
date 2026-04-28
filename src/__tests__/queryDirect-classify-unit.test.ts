@@ -126,6 +126,37 @@ describe("classifyQueryDirect", () => {
     expect(v).toEqual({ eligible: true, reason: "trailing_user_no_assistant" })
   })
 
+  it("[u1, a1, u2, u3] (assistant in middle, trailing two are users) → ineligible / assistant_in_history", () => {
+    // Regression: classifyContinuation only inspects messages[n-2], so the
+    // anchoring check used to pass when an assistant sat earlier in the
+    // history. buildQueryDirectMessages would then flatten a1 to role:"user"
+    // and carry its thinking/tool_use blocks into a non-assistant message,
+    // which Anthropic rejects with `thinking blocks may only be in 'assistant'
+    // messages`.
+    const v = classifyQueryDirect([u("a"), aText("ok"), u("b"), u("c")])
+    expect(v).toEqual({
+      eligible: false,
+      reason: "ineligible_assistant_in_history",
+    })
+  })
+
+  it("[u1, a1(tool_use), u2(tool_result), u3] → ineligible / assistant_in_history", () => {
+    // Same shape as above but with a real tool_use → tool_result pair sitting
+    // before a follow-up user turn. classifyContinuation's hasTrailingToolUse
+    // looks at messages[n-2] (the tool_result user), so it returns false; the
+    // assistant_in_history guard is what catches this case.
+    const v = classifyQueryDirect([
+      u("a"),
+      aToolUse("t1", "Read"),
+      uToolResult("t1"),
+      u("c"),
+    ])
+    expect(v).toEqual({
+      eligible: false,
+      reason: "ineligible_assistant_in_history",
+    })
+  })
+
   it("tool_result.content.cache_control nested is NOT a top-level breakpoint", () => {
     // The trailing user is u_last; an earlier user has a tool_result whose
     // INNER content carries cache_control. findClientUserBreakpoint ignores
