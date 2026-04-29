@@ -145,6 +145,17 @@ export interface BlockingSessionState {
    */
   toolsFingerprint: string
 
+  /**
+   * Fingerprint of the `body.system` field supplied at session acquisition.
+   * Compared against the incoming request's system fingerprint at
+   * continuation time — a mismatch means the live SDK iterator was started
+   * with the OLD system prompt and the model has been operating under it.
+   * Switching mid-stream requires a fresh `query()`; the handler releases
+   * the live sibling and promotes to a fresh blocking initial. Empty string
+   * when no system prompt was supplied; see `computeSystemFingerprint`.
+   */
+  systemFingerprint: string
+
   /** FIFO rendezvous per tool name for binding stream_event tool_use_id → handler. */
   bindingsByToolName: Map<string, BindingSlot>
 
@@ -225,8 +236,8 @@ class BlockingPool {
       | "eventBuffer" | "activeSink" | "sdkEnded" | "createdAt" | "expiresAt"
       | "inputJsonAccum" | "toolUseIdBySdkIdx"
       | "lastEmittedAssistantBlocks"
-      | "toolsFingerprint"
-    > & { toolsFingerprint?: string },
+      | "toolsFingerprint" | "systemFingerprint"
+    > & { toolsFingerprint?: string; systemFingerprint?: string },
   ): BlockingSessionState {
     const id = stringifyBlockingKey(key)
     const arr = this.siblings.get(id) ?? []
@@ -240,6 +251,7 @@ class BlockingPool {
     const state: BlockingSessionState = {
       ...init,
       toolsFingerprint: init.toolsFingerprint ?? "",
+      systemFingerprint: init.systemFingerprint ?? "",
       createdAt: now,
       expiresAt: now + this.timeoutMs,
       status: "streaming",

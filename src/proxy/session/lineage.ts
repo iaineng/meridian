@@ -196,6 +196,62 @@ export function computeToolsFingerprint(tools: unknown): string {
 }
 
 /**
+ * Compute a fingerprint hash over a request's `system` field.
+ *
+ * Anthropic's API allows `system` as a string OR an ordered array of text
+ * blocks (other block types are ignored by the API). The model only sees
+ * the rendered text, so the fingerprint hashes the rendered text — two
+ * representations that flatten to the same prompt produce the same
+ * fingerprint, while any prompt content change is detected.
+ *
+ * Order-SENSITIVE within an array: position changes the rendered prompt,
+ * so two arrays with the same blocks in different orders have distinct
+ * fingerprints. `cache_control` and other transport-only metadata are
+ * stripped — they don't change what the model reads.
+ *
+ * Used by the blocking-MCP continuation path to detect system-prompt
+ * changes mid-conversation: the live SDK iterator was started with the
+ * OLD system prompt and the model has been operating under it; switching
+ * mid-stream requires a fresh `query()`. Mismatch → release sibling and
+ * promote to a fresh blocking initial, mirroring the tools-changed path.
+ *
+ * Returns "" for missing / empty system so callers can compare without
+ * branching on shape.
+ */
+export function computeSystemFingerprint(system: unknown): string {
+  if (system == null) return ""
+  // Render to the same flattened text the model would see, then hash.
+  // String and single-text-block array with identical content collapse
+  // to the same fingerprint (they produce the same prompt) — switching
+  // representation between rounds must not invalidate the live session.
+  //
+  // Mirrors `extractSystemText({skipBillingHeader: true})`: array-form
+  // text blocks whose content starts with "x-anthropic-billing-header"
+  // are filtered out. The billing sentinel is transient client-injected
+  // metadata that may be added/removed/rotated between rounds; treating
+  // it as a prompt change would force spurious `system_changed`
+  // promotions of an otherwise-identical conversation.
+  let rendered: string
+  if (typeof system === "string") {
+    rendered = system
+  } else if (Array.isArray(system)) {
+    const parts: string[] = []
+    for (const b of system) {
+      if (!b || typeof b !== "object") continue
+      const bb = b as Record<string, unknown>
+      if (bb.type !== "text" || typeof bb.text !== "string") continue
+      if (bb.text.startsWith("x-anthropic-billing-header")) continue
+      parts.push(bb.text)
+    }
+    rendered = parts.join("\n")
+  } else {
+    return ""
+  }
+  if (rendered.length === 0) return ""
+  return xxh64(rendered)
+}
+
+/**
  * Type guard for the "tool_result-only user" message shape that marks
  * a request as a blocking-MCP continuation. Every block in `content` must
  * be `tool_result`; `tool_use_id` is intentionally NOT required (clients

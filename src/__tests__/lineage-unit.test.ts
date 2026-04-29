@@ -8,6 +8,7 @@ import {
   hashMessage,
   computeMessageHashes,
   computeToolsFingerprint,
+  computeSystemFingerprint,
   measurePrefixOverlap,
   measureSuffixOverlap,
   verifyLineage,
@@ -572,6 +573,87 @@ describe("verifyEmittedAssistant", () => {
       { type: "thinking", thinking: "x" },
       { type: "text", text: "narration" },
     ])).toEqual({ match: true })
+  })
+})
+
+describe("computeSystemFingerprint", () => {
+  it("empty / undefined / null all map to ''", () => {
+    expect(computeSystemFingerprint(undefined)).toBe("")
+    expect(computeSystemFingerprint(null)).toBe("")
+    expect(computeSystemFingerprint("")).toBe("")
+    expect(computeSystemFingerprint([])).toBe("")
+    expect(computeSystemFingerprint([{ type: "image" }])).toBe("")    // no text blocks → empty
+  })
+
+  it("string vs single-text-block array with same text produce the same fingerprint", () => {
+    const fpString = computeSystemFingerprint("You are a helpful assistant.")
+    const fpArray = computeSystemFingerprint([{ type: "text", text: "You are a helpful assistant." }])
+    expect(fpString).toBe(fpArray)
+    expect(fpString).not.toBe("")
+  })
+
+  it("different system text → different fingerprints", () => {
+    const a = computeSystemFingerprint("be terse")
+    const b = computeSystemFingerprint("be verbose")
+    expect(a).not.toBe(b)
+  })
+
+  it("array order is significant (order changes prompt → fingerprint differs)", () => {
+    const a = computeSystemFingerprint([
+      { type: "text", text: "rule 1" },
+      { type: "text", text: "rule 2" },
+    ])
+    const b = computeSystemFingerprint([
+      { type: "text", text: "rule 2" },
+      { type: "text", text: "rule 1" },
+    ])
+    expect(a).not.toBe(b)
+  })
+
+  it("non-text blocks ignored; cache_control on text blocks ignored", () => {
+    const plain = computeSystemFingerprint([{ type: "text", text: "hi" }])
+    const withCacheControl = computeSystemFingerprint([
+      { type: "text", text: "hi", cache_control: { type: "ephemeral" } },
+    ])
+    const withExtraNonText = computeSystemFingerprint([
+      { type: "text", text: "hi" },
+      { type: "image" },
+      { type: "tool_use", name: "X" },
+    ])
+    expect(plain).toBe(withCacheControl)
+    expect(plain).toBe(withExtraNonText)
+  })
+
+  it("x-anthropic-billing-header text blocks are stripped (array form)", () => {
+    const plain = computeSystemFingerprint([{ type: "text", text: "be helpful" }])
+    const withBilling = computeSystemFingerprint([
+      { type: "text", text: "x-anthropic-billing-header: workspace=foo" },
+      { type: "text", text: "be helpful" },
+    ])
+    const withRotatedBilling = computeSystemFingerprint([
+      { type: "text", text: "x-anthropic-billing-header: workspace=bar" },   // different value
+      { type: "text", text: "be helpful" },
+    ])
+    expect(plain).toBe(withBilling)
+    expect(plain).toBe(withRotatedBilling)   // billing header rotation must not change the fp
+  })
+
+  it("billing header at any position is stripped, surviving blocks keep their order", () => {
+    const a = computeSystemFingerprint([
+      { type: "text", text: "rule 1" },
+      { type: "text", text: "x-anthropic-billing-header: w=foo" },
+      { type: "text", text: "rule 2" },
+    ])
+    const b = computeSystemFingerprint([
+      { type: "text", text: "rule 1" },
+      { type: "text", text: "rule 2" },
+    ])
+    expect(a).toBe(b)
+  })
+
+  it("malformed top-level (number / object) → ''", () => {
+    expect(computeSystemFingerprint(42)).toBe("")
+    expect(computeSystemFingerprint({ not: "valid" })).toBe("")
   })
 })
 

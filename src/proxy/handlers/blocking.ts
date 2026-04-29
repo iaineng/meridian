@@ -46,6 +46,7 @@ import {
 import {
   computeMessageHashes,
   computeToolsFingerprint,
+  computeSystemFingerprint,
   verifyEmittedAssistant,
   isToolResultOnlyUserMessage,
   extractContinuationTrailing,
@@ -100,6 +101,14 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   // re-enumerated mid-iterator), so we promote to a fresh blocking initial
   // rather than feed the model a stale tool set.
   const incomingToolsFingerprint = computeToolsFingerprint(shared.body?.tools)
+
+  // Fingerprint of the incoming request's system prompt. Compared against
+  // the matched sibling's stored fingerprint at continuation time — the
+  // live SDK iterator was started with the OLD system prompt and the model
+  // has been operating under it. A changed system prompt cannot be
+  // retroactively applied to an in-flight query(); mismatch promotes to a
+  // fresh blocking initial so the new prompt takes effect.
+  const incomingSystemFingerprint = computeSystemFingerprint(shared.body?.system)
 
   // --- Continuation path ---
   if (isContinuationShape) {
@@ -180,6 +189,24 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
         claudeLog("blocking.continuation.promoted", {
           requestId: requestMeta.requestId,
           from: "tools_changed",
+        })
+        // fall through to the initial path below
+      } else if (state.systemFingerprint !== incomingSystemFingerprint) {
+        // System-prompt change: the incoming request declares a different
+        // system prompt than the one the live SDK iterator's query() was
+        // started with. The model has been operating under the OLD prompt
+        // and cannot retroactively pick up the new one mid-stream. Release
+        // the live sibling and promote to a fresh blocking initial so the
+        // new prompt drives a fresh query().
+        claudeLog("blocking.continuation.system_changed", {
+          requestId: requestMeta.requestId,
+          stored: state.systemFingerprint,
+          incoming: incomingSystemFingerprint,
+        })
+        await blockingPool.release(state, "system prompt changed mid-conversation")
+        claudeLog("blocking.continuation.promoted", {
+          requestId: requestMeta.requestId,
+          from: "system_changed",
         })
         // fall through to the initial path below
       } else {
@@ -308,6 +335,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
       workingDirectory,
       priorMessageHashes: allMessageHashes,
       toolsFingerprint: incomingToolsFingerprint,
+      systemFingerprint: incomingSystemFingerprint,
       cleanup: queryDirectCleanup,
     })
     const prebuiltPassthroughMcpQd = Array.isArray(shared.body?.tools) && shared.body.tools.length > 0
