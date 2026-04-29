@@ -383,6 +383,7 @@ start_quiet() {
     export MERIDIAN_BETA_POLICY=strip-all
     export MERIDIAN_EPHEMERAL_JSONL=1
     export MERIDIAN_BLOCKING_MCP=1
+    export MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1
     export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
     cd /app
     nohup ./bin/claude-proxy-supervisor.sh > /tmp/meridian.log 2>&1 &

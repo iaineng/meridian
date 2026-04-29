@@ -22,13 +22,26 @@ function stripCacheControlForHashing(obj: any): any {
  * NOTE: OpenCode sends content as a string on the first request but as
  * an array on subsequent ones. This normalizer handles both formats.
  * Other agents may behave differently — this will move to the adapter pattern.
+ *
+ * `options.relaxedToolUseInput` (default false) drops the `id` and `input`
+ * portions of `tool_use` blocks from the hash, leaving only the tool name.
+ * Mirrors the relaxation in `verifyEmittedAssistant({skipInputCheck:true})`
+ * so the blocking-pool prefix lookup tolerates the same client-side
+ * rewrites the drift check tolerates. Used only by the blocking handler;
+ * other lineage paths use the strict default.
  */
-export function normalizeContent(content: any): string {
+export function normalizeContent(
+  content: any,
+  options?: { relaxedToolUseInput?: boolean },
+): string {
   if (typeof content === "string") return content
   if (Array.isArray(content)) {
     return content.map((block: any) => {
       if (block.type === "text" && block.text) return block.text
-      if (block.type === "tool_use") return `tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`
+      if (block.type === "tool_use") {
+        if (options?.relaxedToolUseInput) return `tool_use:${block.name}`
+        return `tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`
+      }
       if (block.type === "tool_result") {
         const inner = block.content
         if (typeof inner === "string") return `tool_result:${block.tool_use_id}:${inner}`

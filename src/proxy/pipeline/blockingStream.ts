@@ -28,6 +28,7 @@
 import { homedir } from "node:os"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { claudeLog } from "../../logger"
+import { envBool } from "../../env"
 import { buildQueryOptions } from "../query"
 import {
   resolveClaudeOauthEnv,
@@ -144,10 +145,14 @@ export function applyContinuation(
   // `allMessages.slice(state.priorMessageHashes.length)`, which works for
   // both split (`a, u, a, u, …`) and bundled (`a, u, u, …`) shapes because
   // `extractContinuationTrailing` flattens either. Prefer the precomputed
-  // hashes from the handler when available to avoid recomputing.
+  // hashes from the handler when available to avoid recomputing; the
+  // fallback recompute must use the same `relaxedToolUseInput` flag the
+  // handler used so the prefix shape stays consistent across rounds.
   const allMessages = shared.body?.messages ?? []
   if (allMessages.length >= 1) {
-    state.priorMessageHashes = handler.allMessageHashes ?? computeMessageHashes(allMessages)
+    const relaxed = envBool("BLOCKING_DRIFT_NAME_ONLY")
+    state.priorMessageHashes = handler.allMessageHashes
+      ?? computeMessageHashes(allMessages, relaxed ? { relaxedToolUseInput: true } : undefined)
   }
 }
 

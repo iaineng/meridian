@@ -73,6 +73,16 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   const lastMsg = allMessages[allMessages.length - 1]
   const isContinuationShape = isToolResultOnlyUserMessage(lastMsg)
 
+  // `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1` relaxes both the drift check
+  // (`verifyEmittedAssistant({skipInputCheck:true})`) AND the prefix-hash
+  // lookup (drop tool_use id+input from the per-message hash). They have
+  // to move together — relaxing only the drift check would let the first
+  // round transition through, but the next round's prefix lookup would
+  // then re-fail on the same input mismatch the drift check just ignored.
+  // Read once and use as a stable per-request flag.
+  const skipInputCheck = envBool("BLOCKING_DRIFT_NAME_ONLY")
+  const hashOptions = skipInputCheck ? { relaxedToolUseInput: true } : undefined
+
   // Per-message hashes of every incoming message. The new "client-confirmed
   // prior" baseline stored on `state.priorMessageHashes` after each round
   // covers the FULL allMessages of that round — so the next round's lookup
@@ -83,7 +93,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   //
   // For initial requests (non-continuation shape) the same array doubles as
   // the round-0 `priorMessageHashes` we hand to `acquire`.
-  const allMessageHashes = computeMessageHashes(allMessages)
+  const allMessageHashes = computeMessageHashes(allMessages, hashOptions)
 
   // Session key: explicit header > fingerprint-style first-user hash.
   // We deliberately avoid hashing `priorMessages` here because that grows
@@ -217,6 +227,12 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
         // the trailing tool_results into the live handler would feed the
         // model garbage labelled as the wrong tool. On drift we release
         // the live sibling and promote to a fresh blocking initial.
+        //
+        // `skipInputCheck` (= `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1`) opts
+        // out of the canonical-JSON input comparison — only count + name
+        // equality are checked. The same flag also drove
+        // `computeMessageHashes` above so the prefix lookup that brought
+        // us here used the relaxed hash shape.
         let drifted = false
         if (state.lastEmittedAssistantBlocks) {
           const driftCheckContent = verdict.toolUses.map((tu) => ({
@@ -224,7 +240,11 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
             name: tu.name,
             input: tu.input,
           }))
-          const v = verifyEmittedAssistant(state.lastEmittedAssistantBlocks, driftCheckContent)
+          const v = verifyEmittedAssistant(
+            state.lastEmittedAssistantBlocks,
+            driftCheckContent,
+            { skipInputCheck },
+          )
           if (!v.match) {
             claudeLog("blocking.continuation.assistant_drift", {
               requestId: requestMeta.requestId,
@@ -363,6 +383,9 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
       prebuiltPassthroughMcp: prebuiltPassthroughMcpQd,
       isQueryDirect: true,
       directPromptMessages: buildQueryDirectMessages(allMessages),
+      // Hand the relaxed-aware hashes to close_round so its priorMessageHashes
+      // refresh stays consistent with the round-0 baseline above.
+      allMessageHashes,
     }
   }
 
@@ -474,5 +497,8 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     blockingSessionKey: key,
     blockingState: state,
     prebuiltPassthroughMcp,
+    // Hand the relaxed-aware hashes to close_round so its priorMessageHashes
+    // refresh stays consistent with the round-0 baseline above.
+    allMessageHashes,
   }
 }

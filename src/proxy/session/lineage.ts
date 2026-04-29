@@ -78,17 +78,30 @@ export function computeLineageHash(messages: Array<{ role: string; content: any 
 /**
  * Compute a content hash for a single message (role + normalised content).
  * Used to build per-message hash arrays for precise diff-based verification.
+ *
+ * `options.relaxedToolUseInput` is forwarded to `normalizeContent`; see its
+ * docstring for the relaxed-mode hash shape.
  */
-export function hashMessage(message: { role: string; content: any }): string {
-  return xxh64(`${message.role}:${normalizeContent(message.content)}`)
+export function hashMessage(
+  message: { role: string; content: any },
+  options?: { relaxedToolUseInput?: boolean },
+): string {
+  return xxh64(`${message.role}:${normalizeContent(message.content, options)}`)
 }
 
 /**
  * Compute per-message hashes for an entire message array.
+ *
+ * `options.relaxedToolUseInput` is forwarded to `hashMessage`. The blocking
+ * handler passes `true` when `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1` so prefix
+ * lookups tolerate the same client-side rewrites the drift check tolerates.
  */
-export function computeMessageHashes(messages: Array<{ role: string; content: any }>): string[] {
+export function computeMessageHashes(
+  messages: Array<{ role: string; content: any }>,
+  options?: { relaxedToolUseInput?: boolean },
+): string[] {
   if (!messages || messages.length === 0) return []
-  return messages.map(hashMessage)
+  return messages.map((m) => hashMessage(m, options))
 }
 
 // --- Overlap measurement ---
@@ -391,6 +404,14 @@ export function extractContinuationTrailing(
  * `tool_use_id` is INTENTIONALLY ignored — many clients rewrite IDs
  * between rounds. Routing is positional via `state.currentRoundToolIds`.
  *
+ * `options.skipInputCheck` (default false) drops the canonical-JSON input
+ * comparison so only count + per-position name equality are enforced.
+ * Escape hatch for clients that semantically rewrite tool inputs between
+ * rounds (array reordering, Unicode normalisation, dropping null fields,
+ * etc.) — at the cost of letting the model see slightly-different inputs
+ * fed into the same handler slot. Off by default; toggled via the
+ * `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY` env var in the blocking handler.
+ *
  * Returns a discriminated result so callers can log the precise mismatch
  * reason. A drift detection should release the live sibling and promote
  * the request to a fresh blocking initial (the client has effectively
@@ -399,6 +420,7 @@ export function extractContinuationTrailing(
 export function verifyEmittedAssistant(
   emitted: ReadonlyArray<EmittedAssistantBlock>,
   clientAssistantContent: unknown,
+  options?: { skipInputCheck?: boolean },
 ): { match: true } | { match: false; reason: string } {
   // Anthropic's API permits assistant message content to be either a
   // string or a block array. A bare string carries no tool_use blocks, so
@@ -431,7 +453,7 @@ export function verifyEmittedAssistant(
         reason: `block[${i}] tool_use name differs: emitted=${e.name}, client=${cName}`,
       }
     }
-    if (canonicalJson(e.input) !== canonicalJson(c.input)) {
+    if (!options?.skipInputCheck && canonicalJson(e.input) !== canonicalJson(c.input)) {
       return { match: false, reason: `block[${i}] tool_use input differs` }
     }
   }

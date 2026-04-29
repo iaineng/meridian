@@ -574,6 +574,119 @@ describe("verifyEmittedAssistant", () => {
       { type: "text", text: "narration" },
     ])).toEqual({ match: true })
   })
+
+  describe("with skipInputCheck", () => {
+    it("matches when only input differs (count + name unchanged)", () => {
+      const emitted = [tu("Read", { path: "/etc/hosts" })]
+      const client = [{ type: "tool_use", name: "Read", input: { path: "/etc/passwd" } }]
+      expect(verifyEmittedAssistant(emitted, client))
+        .toEqual({ match: false, reason: "block[0] tool_use input differs" })
+      expect(verifyEmittedAssistant(emitted, client, { skipInputCheck: true }))
+        .toEqual({ match: true })
+    })
+
+    it("matches when array order in input changes", () => {
+      const emitted = [tu("X", { items: ["a", "b", "c"] })]
+      const reordered = [{ type: "tool_use", name: "X", input: { items: ["b", "a", "c"] } }]
+      expect(verifyEmittedAssistant(emitted, reordered).match).toBe(false)
+      expect(verifyEmittedAssistant(emitted, reordered, { skipInputCheck: true }))
+        .toEqual({ match: true })
+    })
+
+    it("still rejects name mismatch even with skipInputCheck", () => {
+      const emitted = [tu("Read", { path: "x" })]
+      const client = [{ type: "tool_use", name: "Bash", input: { path: "x" } }]
+      const out = verifyEmittedAssistant(emitted, client, { skipInputCheck: true })
+      expect(out.match).toBe(false)
+      if (!out.match) expect(out.reason).toContain("tool_use name differs")
+    })
+
+    it("still rejects count mismatch even with skipInputCheck", () => {
+      const emitted = [tu("Read", { path: "x" })]
+      const client = [
+        { type: "tool_use", name: "Read", input: { path: "x" } },
+        { type: "tool_use", name: "Bash", input: { cmd: "ls" } },
+      ]
+      const out = verifyEmittedAssistant(emitted, client, { skipInputCheck: true })
+      expect(out.match).toBe(false)
+      if (!out.match) expect(out.reason).toContain("tool_use count differs")
+    })
+  })
+})
+
+describe("computeMessageHashes with relaxedToolUseInput", () => {
+  const assistantWithToolUse = (id: string, name: string, input: unknown) => ({
+    role: "assistant",
+    content: [
+      { type: "text", text: "doing work" },
+      { type: "tool_use", id, name, input },
+    ],
+  })
+
+  it("strict mode: differing input or id changes the hash", () => {
+    const a = hashMessage(assistantWithToolUse("tu_01", "Bash", { cmd: "ls /tmp" }))
+    const b = hashMessage(assistantWithToolUse("tu_01", "Bash", { cmd: "ls -la /tmp" }))
+    const c = hashMessage(assistantWithToolUse("tu_REWRITTEN", "Bash", { cmd: "ls /tmp" }))
+    expect(a).not.toBe(b)
+    expect(a).not.toBe(c)
+  })
+
+  it("relaxed mode: differing input or id no longer changes the hash", () => {
+    const opts = { relaxedToolUseInput: true } as const
+    const a = hashMessage(assistantWithToolUse("tu_01", "Bash", { cmd: "ls /tmp" }), opts)
+    const b = hashMessage(assistantWithToolUse("tu_01", "Bash", { cmd: "ls -la /tmp" }), opts)
+    const c = hashMessage(assistantWithToolUse("tu_REWRITTEN", "Bash", { cmd: "ls /tmp" }), opts)
+    expect(a).toBe(b)
+    expect(a).toBe(c)
+  })
+
+  it("relaxed mode: differing tool name still changes the hash", () => {
+    const opts = { relaxedToolUseInput: true } as const
+    const a = hashMessage(assistantWithToolUse("tu_01", "Bash", {}), opts)
+    const b = hashMessage(assistantWithToolUse("tu_01", "Read", {}), opts)
+    expect(a).not.toBe(b)
+  })
+
+  it("relaxed mode: text and tool_result blocks are unaffected", () => {
+    const opts = { relaxedToolUseInput: true } as const
+    const userText = { role: "user", content: "hello" }
+    expect(hashMessage(userText)).toBe(hashMessage(userText, opts))
+
+    const userToolResult = {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tu_01", content: "out" }],
+    }
+    expect(hashMessage(userToolResult)).toBe(hashMessage(userToolResult, opts))
+  })
+
+  it("relaxed mode: prefix lookup tolerates a rewritten assistant input across rounds", () => {
+    // Round-2 acceptance recorded prior with client's rewritten input X1.
+    // Round-3 client sends a *different* rewrite X2 of the same logical
+    // assistant turn; under relaxed hashing both reduce to the same hash,
+    // so prefix overlap stays whole and the sibling lookup still matches.
+    const r2 = [
+      { role: "user", content: "go" },
+      assistantWithToolUse("tu_01", "Bash", { cmd: "ls /tmp" }),
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_01", content: "ok" }] },
+    ]
+    const r3 = [
+      r2[0]!,
+      assistantWithToolUse("tu_01", "Bash", { cmd: "LS /TMP" }),  // client's drift
+      r2[2]!,
+      { role: "assistant", content: [{ type: "tool_use", id: "tu_02", name: "Read", input: { path: "x" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_02", content: "data" }] },
+    ]
+
+    const opts = { relaxedToolUseInput: true } as const
+    const stored = computeMessageHashes(r2, opts)
+    const incoming = computeMessageHashes(r3, opts)
+    expect(measurePrefixOverlap(stored, incoming)).toBe(stored.length)
+
+    // Strict mode would have failed because position 1 differs.
+    const strictStored = computeMessageHashes(r2)
+    const strictIncoming = computeMessageHashes(r3)
+    expect(measurePrefixOverlap(strictStored, strictIncoming)).toBe(1)
+  })
 })
 
 describe("computeSystemFingerprint", () => {
