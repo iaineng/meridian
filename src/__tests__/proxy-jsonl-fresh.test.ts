@@ -271,11 +271,13 @@ describe("JSONL-backed fresh session", () => {
 
     const uuid = resumedUuid()
     expect(uuid).toBeDefined()
-    // Last message is assistant → prefill path: prompt instructs the model to
-    // resume from the exact character after the previous assistant turn.
+    // Last message is assistant → prefill path: prompt is a system-reminder
+    // directive anchored to the prefill tail. See `buildPrefillContinuePrompt`.
     expect(typeof capturedQueryParams.prompt).not.toBe("string")
     const promptText = await promptToText(capturedQueryParams.prompt)
-    expect(promptText).toContain("Resume output starting at the exact character")
+    expect(promptText).toContain("Directive (this turn only)")
+    expect(promptText).toContain("<previous_tail>\nhello\n</previous_tail>")
+    expect(promptText).toContain("Begin with the very next character")
 
     const lines = await readJsonlLines(uuid!)
     // permission-mode + user + assistant (all N written since trailing is assistant)

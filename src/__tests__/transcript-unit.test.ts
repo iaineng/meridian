@@ -893,7 +893,7 @@ describe("prepareFreshSession", () => {
     expect(r.lastUserPrompt).toEqual([{ type: "text", text: "latest" }])
   })
 
-  it("uses the prefill directive when history ends with assistant", async () => {
+  it("uses the prefill directive when history ends with assistant, anchored to the prefill tail", async () => {
     const r = await prepareFreshSession(
       [
         { role: "user", content: "q" },
@@ -902,9 +902,59 @@ describe("prepareFreshSession", () => {
       "/p"
     )
     expect(r.wroteTranscript).toBe(true)
-    expect(r.lastUserPrompt).toBe("<system-reminder>Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.</system-reminder>")
+    const prompt = r.lastUserPrompt as string
+    // Wrapped in <system-reminder> for downstream summarizer skip-pattern.
+    expect(prompt.startsWith("<system-reminder>")).toBe(true)
+    expect(prompt.endsWith("</system-reminder>")).toBe(true)
+    // Sharpened framing: leads with a "Directive (this turn only)" header.
+    expect(prompt).toContain("Directive (this turn only)")
+    // Inlined tail anchor — model has a concrete reference for "next character".
+    expect(prompt).toContain("<previous_tail>\na\n</previous_tail>")
+    expect(prompt).toContain("Begin with the very next character")
     // All N messages written: messageUuids has no trailing null
     expect(r.messageUuids.every(u => u !== null)).toBe(true)
+  })
+
+  it("falls back to anchorless prefill directive when assistant content has no recoverable text", async () => {
+    // Prefill is thinking/tool_use only — no text to anchor against.
+    const r = await prepareFreshSession(
+      [
+        { role: "user", content: "q" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "internal", signature: "sig" } as any,
+            { type: "tool_use", id: "t1", name: "Read", input: {} },
+          ],
+        },
+      ],
+      "/p"
+    )
+    const prompt = r.lastUserPrompt as string
+    expect(prompt.startsWith("<system-reminder>")).toBe(true)
+    expect(prompt).toContain("Directive (this turn only)")
+    // No tail to inline.
+    expect(prompt).not.toContain("<previous_tail>")
+    expect(prompt).toContain("Begin with the very next character")
+  })
+
+  it("inlines only the trailing window of a long prefill (capped at PREFILL_TAIL_MAX_CHARS)", async () => {
+    const long = "x".repeat(500) + "TAIL_MARKER"
+    const r = await prepareFreshSession(
+      [
+        { role: "user", content: "q" },
+        { role: "assistant", content: long },
+      ],
+      "/p"
+    )
+    const prompt = r.lastUserPrompt as string
+    // Tail end must be present.
+    expect(prompt).toContain("TAIL_MARKER\n</previous_tail>")
+    // Head ('xxx...' from the start of the 500-char run) must NOT be present
+    // beyond the cap. Conservatively: the prefill string itself (500+ x's)
+    // is far longer than the 200-char cap, so the full "x".repeat(500) cannot
+    // appear inside the prompt.
+    expect(prompt).not.toContain("x".repeat(500))
   })
 
   it("replaces the continue prompt with a StructuredOutput directive when outputFormat is set", async () => {

@@ -158,7 +158,72 @@ function wrapSystemReminder(text: string): string {
 // to send a new user turn as the prompt, so we instruct the model to resume
 // from the exact character where its previous turn ended, suppressing any
 // preamble that would corrupt the stitched output.
-const PREFILL_CONTINUE_PROMPT = wrapSystemReminder("Resume output starting at the exact character after your previous assistant turn ended. Do not repeat any already-emitted characters. Do not add preamble, commentary, apology, or markdown fences. Emit only the raw continuation.")
+//
+// Compliance is fragile because the model treats this as a fresh assistant
+// turn, not a true API prefill. Three reinforcements raise the hit rate:
+//   1. Anchor — the prefill content's text tail is inlined inside
+//      <previous_tail> so the model has a concrete reference for "the next
+//      character", instead of having to guess at the cut point.
+//   2. Tight imperative — one positive instruction (continuation only) plus
+//      one short negation (no preamble/fences); long lists of "Do not..."
+//      diffuse attention.
+//   3. Directive framing — the inner text leads with `Directive (this turn
+//      only):` so it reads as a system-level constraint while the outer
+//      <system-reminder> wrap keeps the downstream summarizer skip-pattern
+//      intact.
+//
+// Anchorless fallback when the prefill carries only thinking/tool_use blocks
+// (no recoverable text) — directive still fires, just without the anchor.
+
+/** Maximum number of characters of the prefill tail to inline as anchor. */
+const PREFILL_TAIL_MAX_CHARS = 200
+
+/**
+ * Walk a content value backwards collecting trailing text, skipping
+ * thinking/tool_use blocks (which never contribute to the visible
+ * output stream the model is "continuing"). Returns at most `maxChars`
+ * trailing characters, or `""` when no recoverable text is found.
+ */
+function extractAssistantTextTail(content: any, maxChars: number): string {
+  if (typeof content === "string") return content.slice(-maxChars)
+  if (!Array.isArray(content)) return ""
+  let buf = ""
+  for (let i = content.length - 1; i >= 0; i--) {
+    const block = content[i]
+    if (!block || typeof block !== "object") continue
+    if (block.type === "text" && typeof block.text === "string") {
+      buf = block.text + buf
+      if (buf.length >= maxChars) break
+    }
+  }
+  return buf.slice(-maxChars)
+}
+
+/**
+ * Construct the prefill continuation prompt for a given assistant prefill.
+ * Inlines the recoverable text tail as `<previous_tail>` when available.
+ *
+ * Exported for tests and for callers that want to preview the prompt; the
+ * production caller is `prepareFreshSession`'s prefill branch.
+ */
+export function buildPrefillContinuePrompt(prefillContent: any): string {
+  const tail = extractAssistantTextTail(prefillContent, PREFILL_TAIL_MAX_CHARS)
+  if (tail.length > 0) {
+    return wrapSystemReminder(
+      "Directive (this turn only): your previous assistant turn was truncated. " +
+      "The exact characters you had emitted are below; this turn's response is " +
+      "the immediate continuation — output only the next characters.\n" +
+      "<previous_tail>\n" + tail + "\n</previous_tail>\n" +
+      "Begin with the very next character. Do not repeat any byte from " +
+      "<previous_tail>. No preamble, no markdown fences."
+    )
+  }
+  return wrapSystemReminder(
+    "Directive (this turn only): your previous assistant turn was truncated. " +
+    "Output only the next characters of that response. Begin with the very " +
+    "next character. No preamble, no markdown fences."
+  )
+}
 
 // Synthetic-tail user prompts (the "user" half of each filler pair).
 // Sent as the SDK prompt on the turn that emits a synthetic assistant
@@ -682,7 +747,7 @@ export async function prepareFreshSession(
   // the final result is ready.
   let continuePrompt: string
   if (n > 0 && !lastIsUser) {
-    continuePrompt = PREFILL_CONTINUE_PROMPT
+    continuePrompt = buildPrefillContinuePrompt(lastMsg!.content)
   } else if (opts?.outputFormat) {
     continuePrompt = opts.hasOtherTools
       ? STRUCTURED_OUTPUT_CONDITIONAL_PROMPT
