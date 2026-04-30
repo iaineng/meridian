@@ -101,14 +101,20 @@ export function hasMultimodalContent(messages: Array<{ role: string; content: an
  * Replaces image/document/file blocks with indexed labels instead of
  * dumping raw base64 via JSON.stringify.
  */
-export function serializeToolResultContentToText(content: any, counter: MultimodalCounter, toolPrefix?: string): string {
+export function serializeToolResultContentToText(
+  content: any,
+  counter: MultimodalCounter,
+  toolPrefix?: string,
+  formatToolName?: (toolName: string) => string,
+): string {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return content == null ? "" : JSON.stringify(content)
   const prefix = toolPrefix ?? ""
+  const renderToolName = formatToolName ?? ((toolName: string) => `${prefix}${toolName}`)
   return content.map((block: any) => {
     if (block.type === "text" && block.text) return block.text
     if (MULTIMODAL_TYPES.has(block.type)) return `${nextMultimodalLabel(block.type, counter)}: attached`
-    if (block.type === "tool_reference" && block.tool_name) return `tool_reference: ${prefix}${block.tool_name}`
+    if (block.type === "tool_reference" && block.tool_name) return `tool_reference: ${renderToolName(block.tool_name)}`
     return JSON.stringify(block)
   }).filter(Boolean).join("\n")
 }

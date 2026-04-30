@@ -409,7 +409,7 @@ describe("JSONL-backed fresh session", () => {
       const toolUseLine = lines[2]!
       expect(toolUseLine.type).toBe("assistant")
       expect(toolUseLine.message.content[0].type).toBe("tool_use")
-      expect(toolUseLine.message.content[0].name).toBe("mcp__tools__Read")
+      expect(toolUseLine.message.content[0].name).toBe("mcp__tools__read")
       expect(toolUseLine.message.content[0].id).toBe("toolu_1")
       const syntheticAssistantLine = lines[4]!
       expect(syntheticAssistantLine.type).toBe("assistant")

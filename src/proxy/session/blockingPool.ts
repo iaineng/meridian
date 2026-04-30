@@ -44,9 +44,9 @@ export interface CallToolResult {
 }
 
 export interface PendingTool {
-  /** SDK-visible name `mcp__tools__<name>` */
+  /** Local MCP tool name registered on the passthrough server (kebab-case). */
   mcpToolName: string
-  /** Client-visible name (prefix stripped) */
+  /** Client-visible name from the original request tool definition. */
   clientToolName: string
   /** Anthropic tool_use id (source: stream_event.content_block_start) */
   toolUseId: string
@@ -176,6 +176,10 @@ export interface BlockingSessionState {
   inputJsonAccum: Map<number, string>
   /** tool_use info keyed by SDK block index, captured at content_block_start. */
   toolUseIdBySdkIdx: Map<number, { toolName: string; toolUseId: string }>
+  /** Request-local mapping from normalised MCP local tool name back to client name. */
+  clientNameByMcpToolName: Map<string, string>
+  /** Request-local mapping from full `mcp__tools__...` name back to client name. */
+  clientNameByFullToolName: Map<string, string>
   /**
    * Snapshot of the most recent assistant turn's tool_use blocks the SDK
    * emitted. Captured at `message_delta(stop_reason="tool_use")` and used by
@@ -333,6 +337,7 @@ class BlockingPool {
       | "pendingRoundClose" | "cumulativeUsage"
       | "eventBuffer" | "activeSink" | "sdkEnded" | "createdAt" | "expiresAt"
       | "inputJsonAccum" | "toolUseIdBySdkIdx"
+      | "clientNameByMcpToolName" | "clientNameByFullToolName"
       | "lastEmittedAssistantBlocks"
       | "toolsFingerprint" | "systemFingerprint"
       | "useBuiltinWebSearch" | "pendingWebSearchResults"
@@ -382,6 +387,8 @@ class BlockingPool {
       pendingRoundClose: null,
       inputJsonAccum: new Map(),
       toolUseIdBySdkIdx: new Map(),
+      clientNameByMcpToolName: new Map(),
+      clientNameByFullToolName: new Map(),
       lastEmittedAssistantBlocks: null,
       cumulativeUsage: {},
       eventBuffer: [],

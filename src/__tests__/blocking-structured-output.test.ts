@@ -153,7 +153,7 @@ describe("translateBlockingMessage StructuredOutput handling", () => {
       streamEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "tu_real", name: "mcp__tools__my_tool", input: {} },
+        content_block: { type: "tool_use", id: "tu_real", name: "mcp__tools__my-tool", input: {} },
       }),
       state, enc,
     )
@@ -587,4 +587,3 @@ describe("translateBlockingMessage outputFormat SDK-retry handling", () => {
     expect(state.outputFormatLastDelta).toBeDefined()
   })
 })
-

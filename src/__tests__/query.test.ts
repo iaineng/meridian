@@ -119,6 +119,8 @@ describe("buildQueryOptions", () => {
     const mockPassthroughMcp = {
       toolNames: ["mcp__passthrough__custom_tool"],
       server: {} as any,
+      clientNameByMcpToolName: new Map<string, string>(),
+      clientNameByFullToolName: new Map<string, string>(),
     }
     const result = buildQueryOptions(makeContext({
       passthrough: true,
@@ -180,6 +182,8 @@ describe("buildQueryOptions", () => {
     const mockPassthroughMcp = {
       toolNames: ["mcp__passthrough__custom_tool"],
       server: {} as any,
+      clientNameByMcpToolName: new Map<string, string>(),
+      clientNameByFullToolName: new Map<string, string>(),
     }
     const result = buildQueryOptions(makeContext({
       passthrough: true,

@@ -669,7 +669,7 @@ describe("buildJsonlLines", () => {
     expect(assistantRow.message.content[0]).toEqual({
       type: "tool_use",
       id: "toolu_1",
-      name: "mcp__tools__Read",
+      name: "mcp__tools__read",
       input: { path: "/a" },
     })
     // tool_result.tool_use_id stays unchanged — it references the id, not the name
@@ -677,7 +677,7 @@ describe("buildJsonlLines", () => {
     expect(userRow.message.content[0].tool_use_id).toBe("toolu_1")
   })
 
-  it("does not double-prefix tool_use.name already carrying the prefix", () => {
+  it("normalises tool_use.name already carrying the prefix without double-prefixing", () => {
     const { lines } = buildJsonlLines(
       [
         { role: "user", content: "a" },
@@ -694,7 +694,29 @@ describe("buildJsonlLines", () => {
       { toolPrefix: "mcp__tools__" }
     )
     const row = JSON.parse(lines[2]!)
-    expect(row.message.content[0].name).toBe("mcp__tools__Read")
+    expect(row.message.content[0].name).toBe("mcp__tools__read")
+  })
+
+  it("normalises passthrough tool_use names to kebab-case MCP names", () => {
+    const { lines } = buildJsonlLines(
+      [
+        { role: "user", content: "a" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_1", name: "DoSomething", input: {} },
+            { type: "tool_use", id: "toolu_2", name: "mcp__plugin_context7_context7__query-docs", input: {} },
+          ],
+        },
+        { role: "user", content: "k" },
+      ],
+      sessionId,
+      cwd,
+      { toolPrefix: "mcp__tools__" }
+    )
+    const row = JSON.parse(lines[2]!)
+    expect(row.message.content[0].name).toBe("mcp__tools__do-something")
+    expect(row.message.content[1].name).toBe("mcp__tools__plugin-context7-context7-query-docs")
   })
 
   it("leaves tool_use.name unchanged when toolPrefix is empty/undefined", () => {

@@ -36,7 +36,13 @@ import {
 } from "../claudeOauthEnv"
 import { isClosedControllerError } from "../models"
 import { classifyError, buildErrorEnvelope, isMaxTurnsError, isMaxOutputTokensError } from "../errors"
-import { PASSTHROUGH_MCP_PREFIX, stripMcpPrefix, registerToolUseBinding, maybeCloseRound } from "../passthroughTools"
+import { PASSTHROUGH_MCP_PREFIX } from "../passthroughToolNames"
+import {
+  stripMcpPrefix,
+  resolvePassthroughClientToolName,
+  registerToolUseBinding,
+  maybeCloseRound,
+} from "../passthroughTools"
 import { normalizeToolResultForMcp } from "../session/transcript"
 import { computeMessageHashes } from "../session/lineage"
 import { recordRequestSuccess, recordRequestError } from "./telemetry"
@@ -89,6 +95,8 @@ function bindTranslatorState(
   state.useBuiltinWebSearch = hooks.useBuiltinWebSearch
   state.pendingWebSearchResults = hooks.pendingWebSearchResults
   state.outputFormatActive = !!outputFormat
+  state.clientNameByMcpToolName = hooks.passthroughMcp?.clientNameByMcpToolName ?? new Map()
+  state.clientNameByFullToolName = hooks.passthroughMcp?.clientNameByFullToolName ?? new Map()
 }
 
 function attachSink(
@@ -456,14 +464,13 @@ export function translateBlockingMessage(
     const clientIndex = state.nextClientBlockIndex++
     if (eventIndex !== undefined) state.sdkToClientIndex.set(eventIndex, clientIndex)
     if (block?.type === "tool_use" && typeof block.name === "string" && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
-      const clientName = stripMcpPrefix(block.name)
+      const mcpToolName = stripMcpPrefix(block.name)
+      const clientName = resolvePassthroughClientToolName(block.name, state)
       if (block.id && typeof block.id === "string") {
-        // Bind by the un-prefixed name to match the handler's lookup key in
-        // createBlockingPassthroughMcpServer (which uses the raw OpenCode
-        // tool name). Mismatch here strands the handler in consumeBinding,
-        // which prevents the round closer from firing and leaves the HTTP
-        // hung after the tool_use's content_block_stop.
-        registerToolUseBinding(state, clientName, { toolUseId: block.id, input: {} })
+        // Bind by the normalised local MCP name to match the handler's lookup
+        // key in createBlockingPassthroughMcpServer. Using the client-visible
+        // name here would strand the handler in consumeBinding.
+        registerToolUseBinding(state, mcpToolName, { toolUseId: block.id, input: {} })
         if (eventIndex !== undefined) {
           state.toolUseIdBySdkIdx.set(eventIndex, { toolName: clientName, toolUseId: block.id })
           state.inputJsonAccum.set(eventIndex, "")

@@ -23,7 +23,8 @@ import {
   stripExtendedContext,
   isClosedControllerError,
 } from "../models"
-import { stripMcpPrefix, PASSTHROUGH_MCP_PREFIX } from "../passthroughTools"
+import { PASSTHROUGH_MCP_PREFIX } from "../passthroughToolNames"
+import { resolvePassthroughClientToolName } from "../passthroughTools"
 import {
   extractFileChangesFromMessages,
   formatFileChangeSummary,
@@ -370,13 +371,15 @@ export async function runNonStream(
 
         if (block.type === "tool_use" && typeof block.name === "string") {
           if (passthrough && (block.name as string).startsWith(PASSTHROUGH_MCP_PREFIX)) {
-            block.name = stripMcpPrefix(block.name as string)
+            block.name = resolvePassthroughClientToolName(block.name as string, hooks.passthroughMcp)
           } else if ((block.name as string).startsWith("mcp__")) {
             if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
             continue
           } else if (useBuiltinWebSearch) {
             if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
             continue
+          } else if (passthrough) {
+            block.name = resolvePassthroughClientToolName(block.name as string, hooks.passthroughMcp)
           }
         }
 
@@ -829,7 +832,7 @@ export function runStream(
 
                 if (block?.type === "tool_use" && typeof block.name === "string") {
                   if (passthrough && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
-                    block.name = stripMcpPrefix(block.name)
+                    block.name = resolvePassthroughClientToolName(block.name, hooks.passthroughMcp)
                     if (block.id) streamedToolUseIds.add(block.id)
                   } else if (block.name.startsWith("mcp__")) {
                     if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
@@ -839,8 +842,10 @@ export function runStream(
                     continue
                   } else if (passthrough && block.id) {
                     // Passthrough mode: SDK already stripped the prefix
-                    // before emitting the stream_event. Track the id so
-                    // the early-break condition fires correctly.
+                    // before emitting the stream_event. Recover the original
+                    // client name and track the id so the early-break
+                    // condition fires correctly.
+                    block.name = resolvePassthroughClientToolName(block.name, hooks.passthroughMcp)
                     streamedToolUseIds.add(block.id)
                   }
                 }

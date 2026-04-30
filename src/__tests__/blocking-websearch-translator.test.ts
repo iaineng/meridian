@@ -203,7 +203,7 @@ describe("translateBlockingMessage WebSearch handling", () => {
       streamEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "tu_real", name: "mcp__tools__my_tool", input: {} },
+        content_block: { type: "tool_use", id: "tu_real", name: "mcp__tools__my-tool", input: {} },
       }),
       state, enc,
     )
@@ -284,13 +284,13 @@ describe("translateBlockingMessage WebSearch handling", () => {
       streamEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "tu_1", name: "mcp__tools__my_tool", input: {} },
+        content_block: { type: "tool_use", id: "tu_1", name: "mcp__tools__my-tool", input: {} },
       }),
       state, enc,
     )
     const decoded = decodeFrames(out)
     expect(decoded.length).toBe(1)
-    expect(decoded[0]!.data.content_block.name).toBe("my_tool")
+    expect(decoded[0]!.data.content_block.name).toBe("my-tool")
   })
 
   it("when useBuiltinWebSearch=false, the translator does not touch any tool_use blocks", () => {

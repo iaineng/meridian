@@ -215,7 +215,7 @@ describe("blocking usage propagation", () => {
     // mapping already in place (from an earlier content_block_start).
     state.toolUseIdBySdkIdx.set(0, { toolName: "Read", toolUseId: "tu_X" })
     state.pendingTools.set("tu_X", {
-      mcpToolName: "mcp__tools__Read",
+      mcpToolName: "read",
       clientToolName: "Read",
       toolUseId: "tu_X",
       input: {},

@@ -3,8 +3,9 @@
  *
  * In passthrough mode, OpenCode's tools need to be real callable tools
  * (not just text descriptions in the prompt). We create an MCP server
- * that registers each tool from OpenCode's request with the exact
- * name and schema, so Claude generates proper tool_use blocks.
+ * that registers each tool from OpenCode's request with a normalised
+ * kebab-case MCP name and the original schema, so Claude generates proper
+ * tool_use blocks while the client still receives its original tool names.
  *
  * Tool handlers are no-ops — the PreToolUse hook blocks execution.
  * We just need the definitions so Claude can call them.
@@ -12,6 +13,14 @@
 
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod"
+import {
+  PASSTHROUGH_MCP_NAME,
+  PASSTHROUGH_MCP_PREFIX,
+  normalizePassthroughMcpToolName,
+  resolvePassthroughClientToolName,
+  stripPassthroughMcpPrefix,
+  toPassthroughMcpFullToolName,
+} from "./passthroughToolNames"
 import type {
   BlockingSessionState,
   CallToolResult,
@@ -23,8 +32,13 @@ import type {
 import { defer } from "./session/blockingPool"
 import { claudeLog } from "../logger"
 
-export const PASSTHROUGH_MCP_NAME = "tools"
-export const PASSTHROUGH_MCP_PREFIX = `mcp__${PASSTHROUGH_MCP_NAME}__`
+export {
+  PASSTHROUGH_MCP_NAME,
+  PASSTHROUGH_MCP_PREFIX,
+  normalizePassthroughMcpToolName,
+  resolvePassthroughClientToolName,
+  toPassthroughMcpFullToolName,
+}
 
 /**
  * Convert a JSON Schema object to a Zod schema (simplified).
@@ -70,8 +84,15 @@ export function createPassthroughMcpServer(
 ) {
   const server = createSdkMcpServer({ name: PASSTHROUGH_MCP_NAME })
   const toolNames: string[] = []
+  const clientNameByMcpToolName = new Map<string, string>()
+  const clientNameByFullToolName = new Map<string, string>()
 
   for (const tool of tools) {
+    const mcpToolName = normalizePassthroughMcpToolName(tool.name)
+    const fullToolName = toPassthroughMcpFullToolName(tool.name)
+    clientNameByMcpToolName.set(mcpToolName, tool.name)
+    clientNameByFullToolName.set(fullToolName, tool.name)
+
     try {
       // Convert OpenCode's JSON Schema to Zod for MCP registration
       const zodSchema = tool.input_schema?.properties
@@ -85,25 +106,25 @@ export function createPassthroughMcpServer(
           : { input: z.any() }
 
       server.instance.tool(
-        tool.name,
+        mcpToolName,
         tool.description || tool.name,
         shape,
         async () => ({ content: [{ type: "text" as const, text: "passthrough" }] })
       )
-      toolNames.push(`${PASSTHROUGH_MCP_PREFIX}${tool.name}`)
+      toolNames.push(fullToolName)
     } catch {
       // If schema conversion fails, register with permissive schema
       server.instance.tool(
-        tool.name,
+        mcpToolName,
         tool.description || tool.name,
         { input: z.string().optional() },
         async () => ({ content: [{ type: "text" as const, text: "passthrough" }] })
       )
-      toolNames.push(`${PASSTHROUGH_MCP_PREFIX}${tool.name}`)
+      toolNames.push(fullToolName)
     }
   }
 
-  return { server, toolNames }
+  return { server, toolNames, clientNameByMcpToolName, clientNameByFullToolName }
 }
 
 /**
@@ -111,10 +132,7 @@ export function createPassthroughMcpServer(
  * e.g., "mcp__oc__todowrite" → "todowrite"
  */
 export function stripMcpPrefix(toolName: string): string {
-  if (toolName.startsWith(PASSTHROUGH_MCP_PREFIX)) {
-    return toolName.slice(PASSTHROUGH_MCP_PREFIX.length)
-  }
-  return toolName
+  return stripPassthroughMcpPrefix(toolName)
 }
 
 /**
@@ -220,10 +238,15 @@ export function createBlockingPassthroughMcpServer(
   const makeTool = sdk.tool
   const toolNames: string[] = []
   const defs: any[] = []
+  const clientNameByMcpToolName = new Map<string, string>()
+  const clientNameByFullToolName = new Map<string, string>()
 
   for (const t of tools) {
-    const mcpToolName = t.name
+    const mcpToolName = normalizePassthroughMcpToolName(t.name)
     const clientToolName = t.name
+    const fullToolName = toPassthroughMcpFullToolName(t.name)
+    clientNameByMcpToolName.set(mcpToolName, clientToolName)
+    clientNameByFullToolName.set(fullToolName, clientToolName)
     let shape: Record<string, z.ZodTypeAny>
     try {
       const zodSchema = t.input_schema?.properties
@@ -284,12 +307,15 @@ export function createBlockingPassthroughMcpServer(
       handler,
       { annotations: { readOnlyHint: true } },
     ))
-    toolNames.push(`${PASSTHROUGH_MCP_PREFIX}${mcpToolName}`)
+    toolNames.push(fullToolName)
   }
+
+  state.clientNameByMcpToolName = clientNameByMcpToolName
+  state.clientNameByFullToolName = clientNameByFullToolName
 
   const server = createSdkMcpServer({
     name: PASSTHROUGH_MCP_NAME,
     tools: defs,
   })
-  return { server, toolNames }
+  return { server, toolNames, clientNameByMcpToolName, clientNameByFullToolName }
 }

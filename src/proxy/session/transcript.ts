@@ -18,6 +18,10 @@ import { promises as fs } from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { crEncode } from "../obfuscate"
+import {
+  PASSTHROUGH_MCP_PREFIX,
+  toPassthroughMcpFullToolName,
+} from "../passthroughToolNames"
 
 /**
  * Version string emitted in every JSONL message row. Mirrors real Claude Code
@@ -57,7 +61,8 @@ export interface TranscriptOptions {
   /**
    * Prefix to prepend to `tool_use.name` in assistant messages. Used in
    * passthrough mode where client-visible names are unprefixed (e.g., "Read")
-   * but the SDK's registered MCP tools carry a prefix (e.g., "mcp__tools__Read").
+   * but the SDK's registered MCP tools carry a normalised MCP name
+   * (e.g., "mcp__tools__read").
    * Without this, SDK resume sees tool_use names that don't match any
    * registered tool. Empty or undefined → no rewrite.
    */
@@ -441,8 +446,11 @@ function applyToolPrefixToAssistant(content: any, prefix: string | undefined): a
   if (!prefix) return content
   if (!Array.isArray(content)) return content
   return content.map((block: any) => {
-    if (block && block.type === "tool_use" && typeof block.name === "string" && !block.name.startsWith(prefix)) {
-      return { ...block, name: prefix + block.name }
+    if (block && block.type === "tool_use" && typeof block.name === "string") {
+      if (prefix === PASSTHROUGH_MCP_PREFIX) {
+        return { ...block, name: toPassthroughMcpFullToolName(block.name) }
+      }
+      if (!block.name.startsWith(prefix)) return { ...block, name: prefix + block.name }
     }
     return block
   })

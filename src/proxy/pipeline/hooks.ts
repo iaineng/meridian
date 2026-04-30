@@ -1,5 +1,5 @@
 import type { AgentAdapter } from "../adapter"
-import { createPassthroughMcpServer, createBlockingPassthroughMcpServer, stripMcpPrefix } from "../passthroughTools"
+import { createPassthroughMcpServer, createBlockingPassthroughMcpServer, resolvePassthroughClientToolName } from "../passthroughTools"
 import { createFileChangeHook, type FileChange } from "../fileChanges"
 import { claudeLog } from "../../logger"
 import type { BlockingSessionState } from "../session/blockingPool"
@@ -135,7 +135,7 @@ export function buildHookBundle(input: BuildHookBundleInput): HookBundle {
               hooks: [async (hookInput: any) => {
                 capturedToolUses.push({
                   id: hookInput.tool_use_id,
-                  name: stripMcpPrefix(hookInput.tool_name),
+                  name: resolvePassthroughClientToolName(hookInput.tool_name, passthroughMcp),
                   input: hookInput.tool_input,
                 })
                 return {

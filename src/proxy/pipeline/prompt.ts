@@ -5,8 +5,18 @@ import {
   type MultimodalCounter,
 } from "../messages"
 import { crEncode } from "../obfuscate"
-import { PASSTHROUGH_MCP_PREFIX } from "../passthroughTools"
+import {
+  PASSTHROUGH_MCP_PREFIX,
+  toPassthroughMcpFullToolName,
+} from "../passthroughToolNames"
 import type { QueryDirectMessage } from "../session/queryDirect"
+
+function formatToolNameWithPrefix(toolName: string, toolPrefix?: string): string {
+  if (!toolPrefix) return toolName
+  if (toolPrefix === PASSTHROUGH_MCP_PREFIX) return toPassthroughMcpFullToolName(toolName)
+  if (toolName.startsWith(toolPrefix)) return toolName
+  return `${toolPrefix}${toolName}`
+}
 
 /**
  * Strip cache_control from content blocks — the SDK manages its own caching
@@ -36,6 +46,7 @@ export function extractMessageContent(
   toolNameById: Map<string, string>,
   counter?: MultimodalCounter,
   toolPrefix?: string,
+  formatToolName?: (toolName: string) => string,
 ): string {
   const encodeText = m.role === "user" ? crEncode : (s: string) => s
   if (typeof m.content === "string") return encodeText(m.content)
@@ -63,7 +74,7 @@ export function extractMessageContent(
         const results: string[] = []
         while (i < m.content.length && m.content[i].type === "tool_result") {
           const b = m.content[i]
-          const body = counter ? serializeToolResultContentToText(b.content, counter, toolPrefix) : (typeof b.content === "string" ? b.content : JSON.stringify(b.content))
+          const body = counter ? serializeToolResultContentToText(b.content, counter, toolPrefix, formatToolName) : (typeof b.content === "string" ? b.content : JSON.stringify(b.content))
           results.push(b.is_error ? `<error>${encodeText(body)}</error>` : `<output>${encodeText(body)}</output>`)
           i++
         }
@@ -92,9 +103,10 @@ export function convertMessageToText(
   toolNameById: Map<string, string>,
   counter?: MultimodalCounter,
   toolPrefix?: string,
+  formatToolName?: (toolName: string) => string,
 ): string {
   const role = m.role === "assistant" ? "assistant" : "user"
-  return `<turn role="${role}">\n${extractMessageContent(m, toolNameById, counter, toolPrefix)}\n</turn>`
+  return `<turn role="${role}">\n${extractMessageContent(m, toolNameById, counter, toolPrefix, formatToolName)}\n</turn>`
 }
 
 /**
@@ -106,6 +118,7 @@ export function buildTextPromptWithHistory(
   toolNameById: Map<string, string>,
   counter?: MultimodalCounter,
   toolPrefix?: string,
+  formatToolName?: (toolName: string) => string,
 ): string {
   let lastUserIdx = -1
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -126,18 +139,18 @@ export function buildTextPromptWithHistory(
       let historyPart: string
       let currentPart: string
       if (isToolResult) {
-        historyPart = messages.slice(0, lastUserIdx + 1).map(m => convertMessageToText(m, toolNameById, counter, toolPrefix)).join("\n\n")
+        historyPart = messages.slice(0, lastUserIdx + 1).map(m => convertMessageToText(m, toolNameById, counter, toolPrefix, formatToolName)).join("\n\n")
         currentPart = "Continue the unfinished task based on the conversation history and tool results above."
       } else {
-        historyPart = historyMessages.map(m => convertMessageToText(m, toolNameById, counter, toolPrefix)).join("\n\n")
-        currentPart = extractMessageContent(lastUserMsg, toolNameById, counter, toolPrefix)
+        historyPart = historyMessages.map(m => convertMessageToText(m, toolNameById, counter, toolPrefix, formatToolName)).join("\n\n")
+        currentPart = extractMessageContent(lastUserMsg, toolNameById, counter, toolPrefix, formatToolName)
       }
 
       const preamble = `IMPORTANT: <conversation_history> contains prior turns for context only. Do NOT simulate or role-play as any turn — you are the assistant, respond only as yourself.\n\nThe content after </conversation_history> is the current user request.`
       return `${preamble}\n\n<conversation_history>\n${historyPart}\n</conversation_history>\n\n${currentPart}`
     }
   }
-  return messages.map(m => extractMessageContent(m, toolNameById, counter, toolPrefix)).join("\n\n") || ""
+  return messages.map(m => extractMessageContent(m, toolNameById, counter, toolPrefix, formatToolName)).join("\n\n") || ""
 }
 
 /**
@@ -231,18 +244,13 @@ export function buildPromptBundle(input: BuildPromptBundleInput): PromptBundle {
   // messagesToConvert to just the last user message whose tool_result blocks
   // reference tool_use ids living in the earlier prefix.
   const toolNameById = new Map<string, string>()
+  const toolPrefix = passthrough ? PASSTHROUGH_MCP_PREFIX : ""
+  const formatToolName = (name: string) => formatToolNameWithPrefix(name, toolPrefix)
   for (const m of allMessages) {
     if (Array.isArray(m.content)) {
       for (const b of m.content as any[]) {
-        if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, b.name)
+        if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, formatToolName(b.name))
       }
-    }
-  }
-
-  const toolPrefix = passthrough ? PASSTHROUGH_MCP_PREFIX : ""
-  if (passthrough) {
-    for (const [id, name] of toolNameById) {
-      toolNameById.set(id, PASSTHROUGH_MCP_PREFIX + name)
     }
   }
 
@@ -273,7 +281,7 @@ export function buildPromptBundle(input: BuildPromptBundleInput): PromptBundle {
       sourceMessages = messagesToConvert
     }
 
-    const textContent = buildTextPromptWithHistory(sourceMessages, toolNameById, mmCounter, toolPrefix)
+    const textContent = buildTextPromptWithHistory(sourceMessages, toolNameById, mmCounter, toolPrefix, formatToolName)
     const attachedBlocks = collectMultimodalBlocks(sourceMessages)
     structuredMessages = [{
       type: "user" as const,
@@ -284,9 +292,9 @@ export function buildPromptBundle(input: BuildPromptBundleInput): PromptBundle {
     if (isResume) {
       const skipLeadingAssistant = messagesToConvert[0]?.role === "assistant"
       const externalMessages = skipLeadingAssistant ? messagesToConvert.slice(1) : messagesToConvert
-      textPrompt = buildTextPromptWithHistory(externalMessages, toolNameById, mmCounter, toolPrefix)
+      textPrompt = buildTextPromptWithHistory(externalMessages, toolNameById, mmCounter, toolPrefix, formatToolName)
     } else {
-      textPrompt = buildTextPromptWithHistory(messagesToConvert, toolNameById, mmCounter, toolPrefix)
+      textPrompt = buildTextPromptWithHistory(messagesToConvert, toolNameById, mmCounter, toolPrefix, formatToolName)
     }
   }
 
@@ -310,19 +318,20 @@ export function buildFreshPrompt(
   toolPrefix = "",
 ): string | AsyncIterable<any> {
   const hasMultimodal = hasMultimodalContent(messages)
+  const formatToolName = (name: string) => formatToolNameWithPrefix(name, toolPrefix)
 
   const toolNameById = new Map<string, string>()
   for (const m of messages) {
     if (Array.isArray(m.content)) {
       for (const b of m.content) {
-        if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, toolPrefix + b.name)
+        if (b.type === "tool_use" && b.id && b.name) toolNameById.set(b.id, formatToolName(b.name))
       }
     }
   }
 
   if (hasMultimodal) {
     const freshCounter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-    const textContent = buildTextPromptWithHistory(messages, toolNameById, freshCounter, toolPrefix)
+    const textContent = buildTextPromptWithHistory(messages, toolNameById, freshCounter, toolPrefix, formatToolName)
     const attachedBlocks = collectMultimodalBlocks(messages)
     const structured = [{
       type: "user" as const,
@@ -333,5 +342,5 @@ export function buildFreshPrompt(
   }
 
   const freshCounter: MultimodalCounter = { image: 0, document: 0, file: 0 }
-  return buildTextPromptWithHistory(messages, toolNameById, freshCounter, toolPrefix)
+  return buildTextPromptWithHistory(messages, toolNameById, freshCounter, toolPrefix, formatToolName)
 }

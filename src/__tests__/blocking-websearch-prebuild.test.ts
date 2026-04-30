@@ -72,12 +72,12 @@ describe("blocking web_search prebuild filtering", () => {
       { type: "web_search_20260209", name: "web_search", max_uses: 5 },
     ]))
 
-    expect(toolCalls.map((c) => c.name)).toEqual(["my_tool"])
+    expect(toolCalls.map((c) => c.name)).toEqual(["my-tool"])
     expect(handler.prebuiltPassthroughMcp?.toolNames).toEqual([
-      `${PASSTHROUGH_MCP_PREFIX}my_tool`,
+      `${PASSTHROUGH_MCP_PREFIX}my-tool`,
     ])
     expect(handler.prebuiltPassthroughMcp?.toolNames).not.toContain(
-      `${PASSTHROUGH_MCP_PREFIX}web_search`,
+      `${PASSTHROUGH_MCP_PREFIX}web-search`,
     )
   })
 

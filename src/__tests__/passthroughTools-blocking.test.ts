@@ -32,6 +32,9 @@ const {
   registerToolUseBinding,
   maybeCloseRound,
   PASSTHROUGH_MCP_PREFIX,
+  normalizePassthroughMcpToolName,
+  toPassthroughMcpFullToolName,
+  resolvePassthroughClientToolName,
 } = await import("../proxy/passthroughTools")
 const { blockingPool } = await import("../proxy/session/blockingPool")
 const { translateBlockingMessage } = await import("../proxy/pipeline/blockingStream")
@@ -59,6 +62,24 @@ describe("createBlockingPassthroughMcpServer", () => {
     return state
   }
 
+  it("normalises arbitrary client tool names to kebab-case MCP names", () => {
+    expect(normalizePassthroughMcpToolName("Read")).toBe("read")
+    expect(normalizePassthroughMcpToolName("DoSomething")).toBe("do-something")
+    expect(normalizePassthroughMcpToolName("mcp__plugin_context7_context7__query-docs")).toBe(
+      "plugin-context7-context7-query-docs",
+    )
+    expect(toPassthroughMcpFullToolName("mcp__plugin_context7_context7__query-docs")).toBe(
+      "mcp__tools__plugin-context7-context7-query-docs",
+    )
+  })
+
+  it("maps normalised MCP names back to original client names", () => {
+    const state = makeState()
+    const result = createBlockingPassthroughMcpServer([{ name: "DoSomething" }], state)
+    expect(resolvePassthroughClientToolName("mcp__tools__do-something", result)).toBe("DoSomething")
+    expect(resolvePassthroughClientToolName("do-something", result)).toBe("DoSomething")
+  })
+
   it("registers every tool with annotations.readOnlyHint=true", () => {
     const state = makeState()
     const tools = [
@@ -78,7 +99,7 @@ describe("createBlockingPassthroughMcpServer", () => {
     const handler = toolCalls[0]!.handler
 
     // Producer registers a binding first.
-    registerToolUseBinding(state, "Read", { toolUseId: "tu_A", input: { path: "/etc/hosts" } })
+    registerToolUseBinding(state, "read", { toolUseId: "tu_A", input: { path: "/etc/hosts" } })
 
     // Handler is then called; wait a tick so it suspends on the outer Promise.
     const resultPromise = handler({}, {})
@@ -108,7 +129,7 @@ describe("createBlockingPassthroughMcpServer", () => {
     expect(state.pendingTools.size).toBe(0)
 
     // Producer now arrives with the id.
-    registerToolUseBinding(state, "Read", { toolUseId: "tu_B", input: {} })
+    registerToolUseBinding(state, "read", { toolUseId: "tu_B", input: {} })
     await new Promise(r => setTimeout(r, 5))
 
     // PendingTool should now exist.
@@ -129,13 +150,14 @@ describe("createBlockingPassthroughMcpServer", () => {
     expect((res as any).isError).toBe(true)
   })
 
-  it("toolNames are returned with the mcp__tools__ prefix", () => {
+  it("toolNames are returned with the mcp__tools__ prefix and kebab-case names", () => {
     const state = makeState()
-    const result = createBlockingPassthroughMcpServer([{ name: "Read" }, { name: "Edit" }], state)
+    const result = createBlockingPassthroughMcpServer([{ name: "Read" }, { name: "DoSomething" }], state)
     expect(result.toolNames).toEqual([
-      `${PASSTHROUGH_MCP_PREFIX}Read`,
-      `${PASSTHROUGH_MCP_PREFIX}Edit`,
+      `${PASSTHROUGH_MCP_PREFIX}read`,
+      `${PASSTHROUGH_MCP_PREFIX}do-something`,
     ])
+    expect(toolCalls.map((c) => c.name)).toEqual(["read", "do-something"])
   })
 
   // Regression: translateBlockingMessage must strip the PASSTHROUGH_MCP_PREFIX
@@ -153,14 +175,14 @@ describe("createBlockingPassthroughMcpServer", () => {
         event: {
           type: "content_block_start",
           index: 0,
-          content_block: { type: "tool_use", id: "tu_1", name: `${PASSTHROUGH_MCP_PREFIX}Read`, input: {} },
+          content_block: { type: "tool_use", id: "tu_1", name: `${PASSTHROUGH_MCP_PREFIX}read`, input: {} },
         },
       },
       state,
       encoder,
     )
-    expect(state.bindingsByToolName.has("Read")).toBe(true)
-    expect(state.bindingsByToolName.has(`${PASSTHROUGH_MCP_PREFIX}Read`)).toBe(false)
+    expect(state.bindingsByToolName.has("read")).toBe(true)
+    expect(state.bindingsByToolName.has(`${PASSTHROUGH_MCP_PREFIX}read`)).toBe(false)
   })
 
   it("translateBlockingMessage + handler: prefixed stream event resolves handler", async () => {
@@ -176,7 +198,7 @@ describe("createBlockingPassthroughMcpServer", () => {
         event: {
           type: "content_block_start",
           index: 0,
-          content_block: { type: "tool_use", id: "tu_X", name: `${PASSTHROUGH_MCP_PREFIX}Read`, input: {} },
+          content_block: { type: "tool_use", id: "tu_X", name: `${PASSTHROUGH_MCP_PREFIX}read`, input: {} },
         },
       },
       state,
@@ -201,7 +223,7 @@ describe("createBlockingPassthroughMcpServer", () => {
     it("no-op when pendingRoundClose is unset (API hasn't signalled tool_use yet)", () => {
       const state = makeState()
       state.pendingTools.set("tu_1", {
-        mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_1",
+        mcpToolName: "read", clientToolName: "Read", toolUseId: "tu_1",
         input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
       })
       const seen: any[] = []
@@ -215,7 +237,7 @@ describe("createBlockingPassthroughMcpServer", () => {
       const state = makeState()
       state.pendingRoundClose = { expectedIds: new Set(["tu_1", "tu_2"]) }
       state.pendingTools.set("tu_1", {
-        mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_1",
+        mcpToolName: "read", clientToolName: "Read", toolUseId: "tu_1",
         input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
       })
       // tu_2 handler hasn't entered yet.
@@ -230,11 +252,11 @@ describe("createBlockingPassthroughMcpServer", () => {
       const state = makeState()
       state.pendingRoundClose = { expectedIds: new Set(["tu_1", "tu_2"]) }
       state.pendingTools.set("tu_1", {
-        mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_1",
+        mcpToolName: "read", clientToolName: "Read", toolUseId: "tu_1",
         input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
       })
       state.pendingTools.set("tu_2", {
-        mcpToolName: "Edit", clientToolName: "Edit", toolUseId: "tu_2",
+        mcpToolName: "edit", clientToolName: "Edit", toolUseId: "tu_2",
         input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
       })
       const seen: any[] = []
@@ -249,7 +271,7 @@ describe("createBlockingPassthroughMcpServer", () => {
       const state = makeState()
       state.pendingRoundClose = { expectedIds: new Set(["tu_1"]) }
       state.pendingTools.set("tu_1", {
-        mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_1",
+        mcpToolName: "read", clientToolName: "Read", toolUseId: "tu_1",
         input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
       })
       state.activeSink = null
@@ -261,7 +283,7 @@ describe("createBlockingPassthroughMcpServer", () => {
       const state = makeState()
       state.pendingRoundClose = { expectedIds: new Set(["tu_1"]) }
       state.pendingTools.set("tu_1", {
-        mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_1",
+        mcpToolName: "read", clientToolName: "Read", toolUseId: "tu_1",
         input: {}, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
       })
       state.status = "terminated"
@@ -286,11 +308,11 @@ describe("createBlockingPassthroughMcpServer", () => {
     // Stream: two tool_use blocks.
     translateBlockingMessage({
       type: "stream_event",
-      event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_A", name: `${PASSTHROUGH_MCP_PREFIX}Read`, input: {} } },
+      event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_A", name: `${PASSTHROUGH_MCP_PREFIX}read`, input: {} } },
     }, state, encoder)
     translateBlockingMessage({
       type: "stream_event",
-      event: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tu_B", name: `${PASSTHROUGH_MCP_PREFIX}Edit`, input: {} } },
+      event: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tu_B", name: `${PASSTHROUGH_MCP_PREFIX}edit`, input: {} } },
     }, state, encoder)
 
     // API signals end-of-turn with stop_reason tool_use — arms the gate.
@@ -332,7 +354,7 @@ describe("createBlockingPassthroughMcpServer", () => {
 
     translateBlockingMessage({
       type: "stream_event",
-      event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_A", name: `${PASSTHROUGH_MCP_PREFIX}Read`, input: {} } },
+      event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_A", name: `${PASSTHROUGH_MCP_PREFIX}read`, input: {} } },
     }, state, encoder)
 
     // Handler enters first (unusual but allowed): gate not yet armed → no close.
