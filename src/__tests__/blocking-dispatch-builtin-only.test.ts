@@ -50,6 +50,17 @@ mock.module("../mcpTools", () => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
+mock.module("../proxy/models", () => ({
+  resolveModel: (model: string) => model,
+  resolveClaudeExecutableAsync: async () => "mock-claude",
+  getClaudeAuthStatusAsync: async () => ({ loggedIn: true }),
+  getAuthCacheInfo: () => ({ lastCheckedAt: 0, lastSuccessAt: 0, isFailure: false }),
+  hasExtendedContext: (model: string) => model.endsWith("[1m]"),
+  stripExtendedContext: (model: string) => model.endsWith("[1m]") ? model.slice(0, -4) : model,
+  isClosedControllerError: (error: unknown) =>
+    error instanceof Error && error.message.includes("Controller is already closed"),
+}))
+
 const tmpDir = mkdtempSync(join(tmpdir(), "blocking-dispatch-builtin-only-"))
 process.env.CLAUDE_PROXY_SESSION_DIR = tmpDir
 

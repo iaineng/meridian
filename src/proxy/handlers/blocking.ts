@@ -43,6 +43,7 @@ import {
   PASSTHROUGH_MCP_PREFIX,
   createBlockingPassthroughMcpServer,
 } from "../passthroughTools"
+import { resolvePassthroughToolSet } from "../pipeline/toolFiltering"
 import {
   computeMessageHashes,
   computeToolsFingerprint,
@@ -54,6 +55,7 @@ import {
 import {
   blockingPool,
   type BlockingSessionKey,
+  type BlockingSessionState,
 } from "../session/blockingPool"
 import { classifyQueryDirect, buildQueryDirectMessages } from "../session/queryDirect"
 import type { LineageResult } from "../session"
@@ -65,6 +67,17 @@ export class BlockingProtocolMismatchError extends Error {
     super(message)
     this.name = "BlockingProtocolMismatchError"
   }
+}
+
+function createPrebuiltBlockingPassthroughMcp(shared: SharedRequestContext, state: BlockingSessionState) {
+  const toolSet = resolvePassthroughToolSet({
+    tools: shared.body?.tools,
+    passthrough: shared.initialPassthrough,
+    blockingMode: true,
+  })
+  return toolSet.passthrough && toolSet.effectiveTools.length > 0
+    ? createBlockingPassthroughMcpServer(toolSet.effectiveTools, state)
+    : undefined
 }
 
 export async function buildBlockingHandler(shared: SharedRequestContext): Promise<HandlerContext> {
@@ -358,9 +371,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
       systemFingerprint: incomingSystemFingerprint,
       cleanup: queryDirectCleanup,
     })
-    const prebuiltPassthroughMcpQd = Array.isArray(shared.body?.tools) && shared.body.tools.length > 0
-      ? createBlockingPassthroughMcpServer(shared.body.tools, stateQd)
-      : undefined
+    const prebuiltPassthroughMcpQd = createPrebuiltBlockingPassthroughMcp(shared, stateQd)
     const lineageResultQd: LineageResult = { type: "ephemeral" }
     return {
       isEphemeral: true,
@@ -472,9 +483,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   })
 
   // Prebuild the blocking MCP server so hooks.ts uses it verbatim.
-  const prebuiltPassthroughMcp = Array.isArray(shared.body?.tools) && shared.body.tools.length > 0
-    ? createBlockingPassthroughMcpServer(shared.body.tools, state)
-    : undefined
+  const prebuiltPassthroughMcp = createPrebuiltBlockingPassthroughMcp(shared, state)
 
   const lineageResult: LineageResult = { type: "ephemeral" }
   return {

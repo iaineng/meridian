@@ -3,6 +3,7 @@ import { createPassthroughMcpServer, createBlockingPassthroughMcpServer, stripMc
 import { createFileChangeHook, type FileChange } from "../fileChanges"
 import { claudeLog } from "../../logger"
 import type { BlockingSessionState } from "../session/blockingPool"
+import { resolvePassthroughToolSet } from "./toolFiltering"
 
 export interface HookBundle {
   sdkHooks: any
@@ -56,32 +57,17 @@ export function buildHookBundle(input: BuildHookBundleInput): HookBundle {
   const fileChanges: FileChange[] = []
 
   // --- Tool type filtering (passthrough mode) ---
-  // Filter out non-custom typed tools (API built-ins like web_search, computer_use).
-  // Two exceptions:
-  //   1. Single web_search tool → switch to internal SDK execution.
-  //   2. Blocking-MCP mode + web_search mixed with custom tools → keep both.
-  //      The SDK iterator's maxTurns is already 10_000 in blocking mode, so
-  //      built-in WebSearch can chain alongside the agent's passthrough tools
-  //      without burning rounds. Only the built-in web_search is promoted; any
-  //      other non-custom typed tools (computer_use, etc.) are still dropped.
-  let useBuiltinWebSearch = false
-  let effectiveTools: any[] = Array.isArray(body.tools) ? body.tools : []
-  if (passthrough && effectiveTools.length > 0) {
-    const hasNonCustomTools = effectiveTools.some((t: any) => t.type && t.type !== "custom")
-    if (hasNonCustomTools) {
-      const hasWebSearch = effectiveTools.some((t: any) => typeof t.type === "string" && t.type.includes("web_search"))
-      if (effectiveTools.length === 1 && effectiveTools[0].type?.includes("web_search")) {
-        useBuiltinWebSearch = true
-        passthrough = false
-        effectiveTools = []
-      } else if (input.blockingMode && hasWebSearch) {
-        useBuiltinWebSearch = true
-        effectiveTools = effectiveTools.filter((t: any) => !t.type || t.type === "custom")
-      } else {
-        effectiveTools = effectiveTools.filter((t: any) => !t.type || t.type === "custom")
-      }
-    }
-  }
+  // Filter out non-custom typed tools (API built-ins like web_search,
+  // computer_use). Blocking handler prebuilds its MCP server with the same
+  // helper so `allowedTools` and actual registered tools stay aligned.
+  const toolSet = resolvePassthroughToolSet({
+    tools: body.tools,
+    passthrough,
+    blockingMode: input.blockingMode,
+  })
+  passthrough = toolSet.passthrough
+  const effectiveTools = toolSet.effectiveTools
+  const useBuiltinWebSearch = toolSet.useBuiltinWebSearch
 
   // In passthrough mode, register the agent's tools as MCP tools so Claude
   // can actually call them (not just see them as text descriptions).
