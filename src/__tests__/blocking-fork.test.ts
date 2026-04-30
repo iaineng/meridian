@@ -19,7 +19,7 @@ import {
   type BlockingSessionKey,
   type PendingTool,
 } from "../proxy/session/blockingPool"
-import { computeMessageHashes, computeToolsFingerprint } from "../proxy/session/lineage"
+import { computeMessageHashes, computeSystemFingerprint, computeToolsFingerprint } from "../proxy/session/lineage"
 
 async function tmpDir(): Promise<string> {
   const dir = path.join(tmpdir(), `meridian-fork-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -69,7 +69,7 @@ describe("blocking pool: multi-sibling forks", () => {
     else process.env.CLAUDE_CONFIG_DIR = prevClaudeConfig
   })
 
-  function makeShared(opts: { messages: any[]; agentSessionId?: string; tools?: any[] }) {
+  function makeShared(opts: { messages: any[]; agentSessionId?: string; tools?: any[]; system?: unknown }) {
     const tools = opts.tools ?? DEFAULT_TOOLS
     return {
       workingDirectory: cwd,
@@ -79,7 +79,7 @@ describe("blocking pool: multi-sibling forks", () => {
       requestMeta: { requestId: "req-fork", endpoint: "/v1/messages", queueEnteredAt: 0, queueStartedAt: 0 },
       agentSessionId: opts.agentSessionId,
       initialPassthrough: true,
-      body: { tools, messages: opts.messages, model: "claude-sonnet-4-5-20250929" },
+      body: { tools, messages: opts.messages, model: "claude-sonnet-4-5-20250929", system: opts.system },
     } as any
   }
 
@@ -405,6 +405,74 @@ describe("blocking pool: multi-sibling forks", () => {
     // Live sibling released; no promote happened.
     expect(live.status).toBe("terminated")
     expect(blockingPool.totalSize()).toBe(0)
+  })
+
+  it("JSONL initial path stores systemFingerprint (regression: second agent loop continuations always promoted)", async () => {
+    // Repro for the bug where a second agent loop never reaches the
+    // continuation branch:
+    //   - Loop A round 1 was lone-user → query-direct path correctly stored
+    //     state.systemFingerprint.
+    //   - Loop A ended with end_turn → pool released that sibling.
+    //   - Loop B round 1 carries `[u1, a1, u2]` (assistant in history, query-
+    //     direct ineligible), so the JSONL initial branch runs. Previously
+    //     this branch forgot to pass `systemFingerprint` to acquire(), so the
+    //     stored value defaulted to "". On Loop B round 2 the lookup matched
+    //     by prior-hash but `state.systemFingerprint("") !== incoming` fired
+    //     `system_changed` → release + promote → forever stuck on initial.
+    const system = "You are a helpful assistant."
+    const messages = [
+      { role: "user", content: "first request" },
+      { role: "assistant", content: [{ type: "text", text: "all done" }] },
+      { role: "user", content: "follow up" },
+    ]
+
+    const result = await buildBlockingHandler(makeShared({ messages, system }))
+
+    expect(result.blockingMode).toBe(true)
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(blockingPool.totalSize()).toBe(1)
+    const expected = computeSystemFingerprint(system)
+    expect(expected).not.toBe("")
+    expect(result.blockingState!.systemFingerprint).toBe(expected)
+  })
+
+  it("second agent loop tool_result follow-up triggers continuation (with system prompt)", async () => {
+    // End-to-end repro: a second agent loop's first request takes the JSONL
+    // initial branch (assistant in history → query-direct ineligible). After
+    // the SDK emits tool_use, the matching tool_result round must reach
+    // `isBlockingContinuation: true` instead of being promoted to a fresh
+    // initial because of a missing systemFingerprint baseline.
+    const system = "You are a helpful assistant."
+    const round1 = [
+      { role: "user", content: "first request" },
+      { role: "assistant", content: [{ type: "text", text: "first answer" }] },
+      { role: "user", content: "follow up" },
+    ]
+    const r1 = await buildBlockingHandler(makeShared({ messages: round1, system }))
+    expect(r1.isBlockingContinuation).toBe(false)
+
+    const live = r1.blockingState!
+    // Simulate the SDK emitting tool_use for this round so the continuation
+    // path has something to route the tool_result back into.
+    live.pendingTools.set("tu_X", {
+      mcpToolName: "Read", clientToolName: "Read", toolUseId: "tu_X",
+      input: { path: "x" }, resolve: () => {}, reject: () => {}, startedAt: Date.now(),
+    })
+    live.lastEmittedAssistantBlocks = [
+      { type: "tool_use", name: "Read", input: { path: "x" } },
+    ]
+
+    const round2 = [
+      ...round1,
+      { role: "assistant", content: [{ type: "tool_use", id: "tu_X", name: "Read", input: { path: "x" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_X", content: "ok" }] },
+    ]
+    const r2 = await buildBlockingHandler(makeShared({ messages: round2, system }))
+
+    expect(r2.isBlockingContinuation).toBe(true)
+    expect(r2.lineageType).toBe("blocking_continuation")
+    expect(r2.blockingState).toBe(live)
+    expect(live.status).toBe("streaming")
   })
 
   it("janitor reaps one stale sibling while leaving a fresh one", async () => {

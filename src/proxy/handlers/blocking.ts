@@ -467,6 +467,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     workingDirectory,
     priorMessageHashes: allMessageHashes,
     toolsFingerprint: incomingToolsFingerprint,
+    systemFingerprint: incomingSystemFingerprint,
     cleanup,
   })
 
