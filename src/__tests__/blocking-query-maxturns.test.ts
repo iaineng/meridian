@@ -47,9 +47,13 @@ describe("buildQueryOptions blockingMode", () => {
     expect(options.maxTurns).toBe(10_000)
   })
 
-  it("non-passthrough + blockingMode → maxTurns=200 (blocking flag ignored)", () => {
+  it("non-passthrough + blockingMode → maxTurns=10000 (blocking owns the turn budget)", () => {
+    // blockingMode is now the master signal for maxTurns regardless of
+    // passthrough — the lone-web_search single-tool flip leaves passthrough
+    // false, but the session still lives in the blocking pool and chains
+    // internal SDK turns around the built-in WebSearch.
     const { options } = buildQueryOptions(baseCtx({ passthrough: false, blockingMode: true }))
-    expect(options.maxTurns).toBe(200)
+    expect(options.maxTurns).toBe(10_000)
   })
 
   it("blockingMode injects CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=1800000", () => {

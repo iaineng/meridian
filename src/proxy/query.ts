@@ -127,7 +127,26 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
       // Hosts like OpenCode embed Bun, so the check fires even when `bun`
       // is not in PATH — causing subprocess spawns to fail.
       executable: "node" as const,
-      maxTurns: passthrough ? (ctx.blockingMode ? 10_000 : 1) : 200,
+      // blockingMode owns the turn budget. The session lives across many
+      // HTTP rounds (suspended MCP handlers) and built-in tools like
+      // WebSearch chain internal SDK turns within one round; 10_000 is the
+      // generous cap that absorbs both.
+      //
+      // When blocking is off, the budget depends on whether the SDK needs
+      // headroom for its own retries:
+      //   * `outputFormat`: the SDK auto-retries (appends a directive +
+      //     re-prompts) when the model fails to call StructuredOutput. With
+      //     maxTurns=1 (passthrough's normal default), that retry has
+      //     nowhere to go and the response degrades to plain text. Bump to
+      //     200 whenever outputFormat is active so the executor's
+      //     buffer-and-synthesize-terminal-delta path (executor.ts) actually
+      //     gets to see the recovered StructuredOutput call.
+      //   * Plain passthrough (no outputFormat): each tool round closes the
+      //     SDK; one turn is correct.
+      //   * SDK-internal (non-passthrough): standard 200.
+      maxTurns: ctx.blockingMode
+        ? 10_000
+        : (ctx.outputFormat ? 200 : (passthrough ? 1 : 200)),
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
