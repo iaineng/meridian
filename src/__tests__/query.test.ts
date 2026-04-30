@@ -175,4 +175,21 @@ describe("buildQueryOptions", () => {
     const disallowed = (result.options as any).disallowedTools as string[]
     expect(disallowed).toContain("WebSearch")
   })
+
+  it("removes WebSearch from disallowedTools when passthrough + passthroughMcp + useBuiltinWebSearch", () => {
+    const mockPassthroughMcp = {
+      toolNames: ["mcp__passthrough__custom_tool"],
+      server: {} as any,
+    }
+    const result = buildQueryOptions(makeContext({
+      passthrough: true,
+      passthroughMcp: mockPassthroughMcp,
+      useBuiltinWebSearch: true,
+    }))
+    const disallowed = (result.options as any).disallowedTools as string[]
+    expect(disallowed).not.toContain("WebSearch")
+    // Passthrough MCP tools still on the auto-approve list.
+    const allowed = (result.options as any).allowedTools as string[]
+    expect(allowed).toContain("mcp__passthrough__custom_tool")
+  })
 })

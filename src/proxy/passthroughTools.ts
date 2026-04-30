@@ -139,6 +139,21 @@ export function maybeCloseRound(state: BlockingSessionState): void {
   }
   state.pendingRoundClose = null
   state.status = "awaiting_results"
+  // The current round is over — the next time the SDK iterator emits a
+  // `message_start` (after the client returns tool_results in the next
+  // HTTP), it should be treated as the FIRST message_start of the new
+  // round and forwarded to the client.  The merged-message index counter
+  // and per-turn SDK→client map also reset here so the next round's first
+  // content block starts at index 0 and the per-turn 0-based SDK indices
+  // remap cleanly into a fresh sequence.
+  state.messageStartEmittedThisRound = false
+  state.nextClientBlockIndex = 0
+  state.sdkToClientIndex.clear()
+  state.webSearchSkipIndices.clear()
+  state.structuredOutputIndices.clear()
+  state.outputFormatTextSkipIndices.clear()
+  state.outputFormatLastDelta = undefined
+  state.outputFormatTerminalForwarded = false
   const sink = state.activeSink
   const evt = { kind: "close_round" as const, stopReason: "tool_use" as const }
   if (sink) sink(evt)

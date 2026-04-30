@@ -57,16 +57,26 @@ export function buildHookBundle(input: BuildHookBundleInput): HookBundle {
 
   // --- Tool type filtering (passthrough mode) ---
   // Filter out non-custom typed tools (API built-ins like web_search, computer_use).
-  // Exception: single web_search tool → switch to internal SDK execution.
+  // Two exceptions:
+  //   1. Single web_search tool → switch to internal SDK execution.
+  //   2. Blocking-MCP mode + web_search mixed with custom tools → keep both.
+  //      The SDK iterator's maxTurns is already 10_000 in blocking mode, so
+  //      built-in WebSearch can chain alongside the agent's passthrough tools
+  //      without burning rounds. Only the built-in web_search is promoted; any
+  //      other non-custom typed tools (computer_use, etc.) are still dropped.
   let useBuiltinWebSearch = false
   let effectiveTools: any[] = Array.isArray(body.tools) ? body.tools : []
   if (passthrough && effectiveTools.length > 0) {
     const hasNonCustomTools = effectiveTools.some((t: any) => t.type && t.type !== "custom")
     if (hasNonCustomTools) {
+      const hasWebSearch = effectiveTools.some((t: any) => typeof t.type === "string" && t.type.includes("web_search"))
       if (effectiveTools.length === 1 && effectiveTools[0].type?.includes("web_search")) {
         useBuiltinWebSearch = true
         passthrough = false
         effectiveTools = []
+      } else if (input.blockingMode && hasWebSearch) {
+        useBuiltinWebSearch = true
+        effectiveTools = effectiveTools.filter((t: any) => !t.type || t.type === "custom")
       } else {
         effectiveTools = effectiveTools.filter((t: any) => !t.type || t.type === "custom")
       }
@@ -123,10 +133,16 @@ export function buildHookBundle(input: BuildHookBundleInput): HookBundle {
 
   const sdkHooks = passthrough
     ? (input.blockingMode
-        // Blocking mode: let MCP handlers run. They return Promises that
-        // suspend until the next HTTP delivers a matching tool_result, so
-        // we do NOT want PreToolUse to block them.
-        ? {}
+        // Blocking mode: let custom-tool MCP handlers run their suspended
+        // Promises (no PreToolUse blocking). The webSearchHook IS still
+        // registered when useBuiltinWebSearch is true so the SDK's local
+        // WebSearch result is captured into `pendingWebSearchResults`; the
+        // blocking translator drains that buffer into synthetic
+        // `server_tool_use` / `web_search_tool_result` SSE frames on the
+        // next message_start. fileChangeHook is intentionally omitted —
+        // file-change tracking runs through the executor's non-blocking
+        // path; blocking mode currently does not surface a final summary.
+        ? (webSearchHook ? { PostToolUse: [webSearchHook] } : {})
         : {
             PreToolUse: [{
               matcher: "",  // Match ALL tools

@@ -200,6 +200,104 @@ export interface BlockingSessionState {
   sdkEndReason?: "end_turn" | "max_tokens" | "error"
   sdkError?: Error
 
+  /**
+   * True when `hooks.useBuiltinWebSearch` was set for this session — i.e.
+   * `body.tools` carried a `web_search_*` typed tool. The translator uses
+   * this to (a) skip the model's client-side `tool_use { name: "WebSearch" }`
+   * blocks (the SDK runs WebSearch locally as a client tool) and (b) drain
+   * the synthetic `server_tool_use` / `web_search_tool_result` frames
+   * captured by the PostToolUse hook into `pendingWebSearchResults`.
+   */
+  useBuiltinWebSearch: boolean
+  /**
+   * Capture buffer shared with the hooks bundle's PostToolUse webSearchHook.
+   * The translator drains this on subsequent (non-first) message_start
+   * frames within a round and on round close, mirroring the executor's
+   * behaviour for non-blocking paths. Reference is bound at consumer start.
+   */
+  pendingWebSearchResults: Array<{
+    query: string
+    results: Array<{ tool_use_id: string; content: Array<{ title: string; url: string }> }>
+  }>
+  /**
+   * Indices (SDK-block-index) the translator has elected to skip — used to
+   * silence content_block_delta / content_block_stop frames that follow the
+   * client-side WebSearch tool_use's content_block_start. Cleared at
+   * message_start so each turn starts fresh.
+   */
+  webSearchSkipIndices: Set<number>
+  /**
+   * True when the originating request carried `output_config.format` (i.e.
+   * StructuredOutput is in play). The translator uses this to convert the
+   * SDK's terminal `tool_use { name: "StructuredOutput" }` block into a
+   * client-visible `text` block — the JSON-schema-conformant payload is
+   * forwarded as text via `input_json_delta` → `text_delta` rewriting.
+   * Bound at consumer start, mirroring `useBuiltinWebSearch`.
+   */
+  outputFormatActive: boolean
+  /**
+   * SDK-block indices the translator has tagged as the StructuredOutput
+   * tool_use → text translation. content_block_delta on these indices
+   * rewrites `input_json_delta` to `text_delta`. Cleared at message_start
+   * so each turn starts fresh.
+   */
+  structuredOutputIndices: Set<number>
+  /**
+   * SDK-block indices for raw `text` content blocks the translator is
+   * suppressing because `outputFormatActive` is true — the client only
+   * wants the schema-conformant StructuredOutput payload, not any prose
+   * the model produced alongside it. Cleared at message_start (per-turn
+   * SDK reset) and at round close.
+   */
+  outputFormatTextSkipIndices: Set<number>
+  /**
+   * When `outputFormatActive` is true, intermediate non-tool_use
+   * `message_delta` events from SDK retry attempts are buffered (latest
+   * wins) instead of being forwarded — otherwise the client would see a
+   * premature `stop_reason: "end_turn"` from a turn where the model failed
+   * to call StructuredOutput. The buffered event's usage is reused when
+   * the consumer's finally block synthesises a terminal frame in the
+   * total-failure path. Round-scoped: cleared on round close.
+   */
+  outputFormatLastDelta: any
+  /**
+   * Set true once the translator has emitted a terminal `message_delta`
+   * for the current round (either via the StructuredOutput-emission
+   * rewrite or the consumer's synthetic finally-block frame). The
+   * spawnConsumer's terminal synthesiser checks this so a successfully
+   * emitted StructuredOutput round does not get a duplicate terminal
+   * delta on `end`. Round-scoped: cleared on round close.
+   */
+  outputFormatTerminalForwarded: boolean
+  /**
+   * Monotonic block-index counter for the current blocking round. SDK
+   * indices reset to 0 at every internal message_start; meridian remaps
+   * them onto a single client-visible Anthropic message whose indices must
+   * grow monotonically from 0. Synthetic WebSearch frames consume slots
+   * here too. Reset to 0 on round close.
+   */
+  nextClientBlockIndex: number
+  /**
+   * Per-turn SDK-index → client-index mapping. Populated at content_block_start,
+   * read at content_block_delta / content_block_stop. Cleared on every
+   * message_start so the next turn's `index: 0` does not alias the previous
+   * turn's index 0.
+   */
+  sdkToClientIndex: Map<number, number>
+  /**
+   * Tracks whether the translator has already emitted a `message_start` SSE
+   * frame for the current blocking round. Subsequent SDK message_starts
+   * within the same round (which happen when the SDK runs an internal
+   * follow-up turn after a built-in WebSearch call) are coalesced into the
+   * existing client-visible message — the translator drains
+   * `pendingWebSearchResults` to synthetic frames and skips the duplicate
+   * message_start so the client only sees one Anthropic Message per HTTP.
+   * Reset on round close (passthroughTools.maybeCloseRound) and on
+   * applyContinuation; flipped true the first time message_start is
+   * forwarded.
+   */
+  messageStartEmittedThisRound: boolean
+
   /** Cleanup closure — deletes JSONL + releases pool id. Called on terminate. */
   cleanup: () => Promise<void>
   /** Optional abort handle to interrupt the SDK query on terminate. */
@@ -237,7 +335,19 @@ class BlockingPool {
       | "inputJsonAccum" | "toolUseIdBySdkIdx"
       | "lastEmittedAssistantBlocks"
       | "toolsFingerprint" | "systemFingerprint"
-    > & { toolsFingerprint?: string; systemFingerprint?: string },
+      | "useBuiltinWebSearch" | "pendingWebSearchResults"
+      | "webSearchSkipIndices" | "messageStartEmittedThisRound"
+      | "nextClientBlockIndex" | "sdkToClientIndex"
+      | "outputFormatActive" | "structuredOutputIndices"
+      | "outputFormatLastDelta" | "outputFormatTerminalForwarded"
+      | "outputFormatTextSkipIndices"
+    > & {
+      toolsFingerprint?: string
+      systemFingerprint?: string
+      useBuiltinWebSearch?: boolean
+      pendingWebSearchResults?: BlockingSessionState["pendingWebSearchResults"]
+      outputFormatActive?: boolean
+    },
   ): BlockingSessionState {
     const id = stringifyBlockingKey(key)
     const arr = this.siblings.get(id) ?? []
@@ -252,6 +362,17 @@ class BlockingPool {
       ...init,
       toolsFingerprint: init.toolsFingerprint ?? "",
       systemFingerprint: init.systemFingerprint ?? "",
+      useBuiltinWebSearch: init.useBuiltinWebSearch ?? false,
+      pendingWebSearchResults: init.pendingWebSearchResults ?? [],
+      webSearchSkipIndices: new Set(),
+      outputFormatActive: init.outputFormatActive ?? false,
+      structuredOutputIndices: new Set(),
+      outputFormatTextSkipIndices: new Set(),
+      outputFormatLastDelta: undefined,
+      outputFormatTerminalForwarded: false,
+      nextClientBlockIndex: 0,
+      sdkToClientIndex: new Map(),
+      messageStartEmittedThisRound: false,
       createdAt: now,
       expiresAt: now + this.timeoutMs,
       status: "streaming",

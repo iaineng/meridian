@@ -189,10 +189,32 @@ Triggered when **all** of these hold:
 - `MERIDIAN_EPHEMERAL_JSONL=1`
 - `MERIDIAN_BLOCKING_MCP=1`
 - `shared.initialPassthrough === true` (adapter override or `MERIDIAN_PASSTHROUGH=1`)
-- `body.tools.length > 0`
-- `shared.outputFormat` is unset
 
-Any missing precondition → silent fallback to plain ephemeral passthrough (synthetic filler / continue).
+`body.tools.length > 0` is **not** a precondition. When the env switch is
+on, every passthrough+ephemeral request takes the blocking path — including:
+
+- Plain-text-only chats (no tools, no outputFormat). The pool just lives
+  one HTTP round; no tool_use round-close fires, so the consumer's natural
+  SDK end drives teardown.
+- `outputFormat`-only requests. `maxTurns=10_000` gives the SDK plenty of
+  headroom to exhaust its internal StructuredOutput retry budget, and
+  `translateBlockingMessage` converts the SDK's terminal
+  `tool_use{name:"StructuredOutput"}` block to a `text` block client-side.
+  Raw `text` content blocks the model emits alongside StructuredOutput are
+  suppressed (`outputFormatTextSkipIndices`) so the client receives only the
+  schema-conformant payload — no mixed prose + JSON shapes.
+- Built-in-only tool sets (lone `web_search`, …). The blocking pipeline
+  owns the WebSearch synthesis (see "Built-in WebSearch" below) and can
+  leverage the 10_000-turn budget for chained searches.
+- Mixed (custom MCP tools + built-in `web_search`) and outputFormat alongside
+  any of the above.
+
+`shared.outputFormat` is **not** a precondition: blocking mode raises
+`maxTurns` to 10_000, so `StructuredOutput` co-exists with passthrough tools
+without burning the turn budget.
+
+Any missing precondition → silent fallback to plain ephemeral passthrough
+(synthetic filler / continue).
 
 `shared.stream` is **not** a precondition: a single conversation may freely alternate `stream:true` and `stream:false` across rounds. Streaming HTTPs return Anthropic SSE; non-streaming HTTPs return a single Anthropic JSON Message reconstructed from the same internal `BufferedEvent` stream. See "Non-stream variant" below.
 
@@ -278,11 +300,67 @@ When the client requests with `stream:false`, the same SDK iterator and `Blockin
 
 Because the aggregator consumes the exact frames the streaming path forwards, the assistant blocks delivered to the client are byte-equivalent across modes. `lastEmittedAssistantBlocks`, `priorMessageHashes`, and the drift check in `buildBlockingHandler` are therefore mode-agnostic — a conversation may freely alternate `stream:true` and `stream:false` across rounds.
 
+### Built-in WebSearch handling
+
+The SDK's built-in `WebSearch` is a CLIENT tool (it executes locally inside
+the SDK process and the model sees `tool_use { name: "WebSearch" }` blocks).
+Anthropic's hosted API exposes the same capability as a server tool —
+`server_tool_use` + `web_search_tool_result` content blocks. Clients that
+target the API directly expect the server-side shape.
+
+`hooks.ts` registers a `PostToolUse` matcher on `WebSearch` whenever
+`useBuiltinWebSearch` is true (which fires both for the lone `web_search`
+tool — passthrough flips to false — and for the `custom + web_search` mix —
+passthrough stays on but blocking mode keeps the matcher live). The hook
+captures each result into `pendingWebSearchResults`. `runBlockingStream` /
+`runBlockingNonStream` bind that array onto `state.pendingWebSearchResults`
+on the initial HTTP via `bindWebSearchStateToHooks`.
+
+`translateBlockingMessage` then does the heavy lifting:
+
+1. **Suppresses the model's `tool_use { name: "WebSearch" }` block** (and its
+   trailing `content_block_delta` / `content_block_stop` frames, tracked
+   through `state.webSearchSkipIndices`). The client never sees the
+   client-tool form.
+2. **Coalesces duplicate `message_start` frames within a round.** Built-in
+   WebSearch causes the SDK to open a fresh API turn after each local call;
+   `state.messageStartEmittedThisRound` ensures only the first turn's
+   `message_start` reaches the client. Reset to `false` on round close
+   (`maybeCloseRound`) so the next blocking round starts clean.
+3. **Drains `pendingWebSearchResults` into synthetic
+   `server_tool_use` + `web_search_tool_result` content blocks** at each
+   message_start boundary (covering both subsequent SDK turns within one
+   round and the next round's first turn). A trailing drain in
+   `spawnConsumer`'s finally also flushes captures stranded by the SDK
+   ending right after a WebSearch.
+4. **Remaps SDK block indices onto a monotonic per-round counter
+   (`state.nextClientBlockIndex`).** SDK indices reset to 0 every turn but
+   the client sees one merged Anthropic Message per round, so the
+   translator allocates a fresh non-negative index for every emitted
+   `content_block_start` (real and synthetic) and `state.sdkToClientIndex`
+   re-routes the matching `content_block_delta` / `content_block_stop`
+   frames. The counter resets on `maybeCloseRound`.
+5. **Suppresses orphan `message_delta(stop_reason="tool_use")` frames** —
+   when a turn ends with `stop_reason=tool_use` but every tool_use was a
+   suppressed WebSearch (`expectedIds.size === 0` *and*
+   `state.useBuiltinWebSearch` *and* `state.webSearchSkipIndices.size > 0`),
+   the frame is dropped. Without this the client would see an "act on
+   tool_use" signal with no corresponding tool_use block; the SDK opens a
+   fresh internal turn whose final `message_delta` carries the real
+   terminal `stop_reason`.
+
+This mirrors the executor's non-blocking behaviour but the timing is shifted:
+the executor drains synthetic frames at duplicate-message_start in its
+streaming forwarder; the blocking translator does the same inside the
+session-level event stream that feeds both `runBlockingStream` (SSE) and
+`runBlockingNonStream` (JSON aggregator) — keeping the byte-equivalence
+invariant across stream/non-stream modes intact.
+
 ### Failure Handling
 
 | Scenario | Handling |
 |----------|----------|
-| Preconditions not met (outputFormat, no tools, …) | Dispatch goes through the plain ephemeral handler (no blocking). |
+| Preconditions not met (no tools, no passthrough, …) | Dispatch goes through the plain ephemeral handler (no blocking). |
 | Continuation hits pool but the stored `priorMessageHashes` is not a prefix of the incoming prior (tampering / undo / different branch) | `buildBlockingHandler` falls through to `buildEphemeralHandler` silently. |
 | Continuation hash matches but `body.tools` fingerprint differs from the live sibling's stored `toolsFingerprint` | Live sibling released; promoted to a fresh blocking initial. The SDK iterator's in-process MCP server has the OLD tool definitions baked in (no re-enumeration across resumes within one `query()`), so feeding tool_results into stale handlers would let the model continue thinking against an outdated schema. Logged as `blocking.continuation.tools_changed` + `blocking.continuation.promoted{from:"tools_changed"}`. |
 | Continuation hash matches but `tool_result` id set ≠ pending set | `BlockingProtocolMismatchError` → 400 `invalid_request_error`, session released. |
@@ -293,7 +371,6 @@ Because the aggregator consumes the exact frames the streaming path forwards, th
 
 ### Known Limits (v1)
 
-- No `outputFormat` (StructuredOutput) integration — falls back.
 - No `stale_session_error` retry (resume semantics do not apply inside a live query).
 - Per-session timeout only; no per-tool deadline (see DEFERRED.md).
 - Sub-agent (Task) nested `parent_tool_use_id` streams are not validated — see DEFERRED.md.

@@ -110,10 +110,29 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
         // Dispatch: blocking-MCP > ephemeral > classic.
         //  - blocking-MCP: keeps one SDK query alive across HTTP rounds by
-        //    suspending MCP handlers; requires ephemeral + passthrough + tools
-        //    + no outputFormat. Works with both streaming and non-streaming
-        //    requests, and a single conversation may freely alternate
-        //    `stream:true`/`stream:false` across rounds.
+        //    suspending MCP handlers; requires ephemeral + passthrough.
+        //    Works with both streaming and non-streaming requests, and a
+        //    single conversation may freely alternate
+        //    `stream:true`/`stream:false` across rounds. `outputFormat` is
+        //    allowed: blocking mode raises maxTurns to 10_000, so the SDK's
+        //    internal StructuredOutput retry loop has plenty of headroom and
+        //    `translateBlockingMessage` translates the SDK's terminal
+        //    `tool_use{name:"StructuredOutput"}` block to a `text` block on
+        //    the client side. Built-in `web_search` (alone or mixed) is also
+        //    handled inside the blocking pipeline: see
+        //    `translateBlockingMessage` for duplicate message_start
+        //    suppression + synthetic `server_tool_use` /
+        //    `web_search_tool_result` injection.
+        //  - **No tools is fine.** Plain-text-only and outputFormat-only
+        //    requests still take this path when blocking is enabled — the
+        //    pool just lives one HTTP round (no tool_use round-close fires
+        //    since there's nothing to wait on), and the consumer's natural
+        //    SDK end drives teardown. Removing the old `hasTools` precondition
+        //    means callers who set `MERIDIAN_BLOCKING_MCP=1` get blocking
+        //    semantics uniformly: maxTurns=10_000 lets the SDK exhaust its
+        //    StructuredOutput retry budget, and the translator's terminal
+        //    rewrite ensures the client sees one well-formed end_turn even
+        //    when retries fire.
         //  - ephemeral: bypasses lineage/cache, one-shot JSONL transcript.
         //  - classic: LRU session cache with optional JSONL prewarm.
         const isEphemeral = envBool("EPHEMERAL_JSONL")
@@ -123,11 +142,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           isEphemeral
           && blockingEnvOn
           && shared.initialPassthrough
-          && hasTools
-          && !shared.outputFormat
         if (blockingEnvOn && !isBlockingMcp) {
           // Surface the exact precondition that gated blocking out so deploy
           // operators can diagnose without enabling debug logging.
+          // `hasTools` is logged for diagnostic visibility only — it's no
+          // longer a precondition.
           claudeLog("blocking.dispatch.skipped", {
             isEphemeral,
             initialPassthrough: shared.initialPassthrough,
@@ -138,6 +157,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           claudeLog("blocking.dispatch.accepted", {
             requestId: requestMeta.requestId,
             stream: shared.stream,
+            hasTools,
+            outputFormat: !!shared.outputFormat,
           })
         }
         const handler: HandlerContext = isBlockingMcp

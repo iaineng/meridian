@@ -72,6 +72,25 @@ function sumUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
 
 // --- Sink attach / detach ---
 
+/**
+ * Bind the session's translator-affecting state to the initial HTTP's
+ * hook bundle and shared context. The consumer task lives across all HTTPs
+ * of one blocking session, so it reads from the array the SDK's PostToolUse
+ * hook captures into — i.e. the one constructed for the *initial* HTTP.
+ * Continuation HTTPs build new hook bundles that the SDK never sees (the
+ * iterator is already running with the initial hooks installed), so binding
+ * only makes sense once at session start.
+ */
+function bindTranslatorState(
+  state: BlockingSessionState,
+  hooks: HookBundle,
+  outputFormat: SharedRequestContext["outputFormat"],
+): void {
+  state.useBuiltinWebSearch = hooks.useBuiltinWebSearch
+  state.pendingWebSearchResults = hooks.pendingWebSearchResults
+  state.outputFormatActive = !!outputFormat
+}
+
 function attachSink(
   state: BlockingSessionState,
   sink: (evt: BufferedEvent) => void,
@@ -175,6 +194,77 @@ export function applyContinuation(
 // (gate 2 of the two-gate round closer). `message_stop` is therefore
 // re-emitted synthetically from `close_round` / `end` in runBlockingStream.
 
+/**
+ * Drain `state.pendingWebSearchResults` to synthetic SSE frames in the
+ * `server_tool_use` + `web_search_tool_result` shape the Anthropic API
+ * normally emits for hosted `web_search` calls. Used by the translator
+ * when it sees a duplicate message_start (the SDK starts another
+ * internal turn after running WebSearch as a client tool) and on round
+ * close, mirroring `executor.ts`'s injection logic.
+ *
+ * Synthetic indices come from `state.nextClientBlockIndex` so they are
+ * monotonically ordered with the surrounding real-block indices the
+ * translator emits — no negative numbers, no per-turn index resets bleeding
+ * through to the client.
+ */
+function drainWebSearchToFrames(
+  state: BlockingSessionState,
+  encoder: TextEncoder,
+): Uint8Array[] {
+  if (state.pendingWebSearchResults.length === 0) return []
+  const frames: Uint8Array[] = []
+  while (state.pendingWebSearchResults.length > 0) {
+    const ws = state.pendingWebSearchResults.shift()!
+    for (const result of ws.results) {
+      const stuIdx = state.nextClientBlockIndex++
+      frames.push(encoder.encode(
+        `event: content_block_start\ndata: ${JSON.stringify({
+          type: "content_block_start",
+          index: stuIdx,
+          content_block: {
+            type: "server_tool_use",
+            id: result.tool_use_id,
+            name: "web_search",
+            input: { query: ws.query },
+          },
+        })}\n\n`,
+      ))
+      frames.push(encoder.encode(
+        `event: content_block_stop\ndata: ${JSON.stringify({
+          type: "content_block_stop",
+          index: stuIdx,
+        })}\n\n`,
+      ))
+
+      const wstrIdx = state.nextClientBlockIndex++
+      frames.push(encoder.encode(
+        `event: content_block_start\ndata: ${JSON.stringify({
+          type: "content_block_start",
+          index: wstrIdx,
+          content_block: {
+            type: "web_search_tool_result",
+            tool_use_id: result.tool_use_id,
+            content: result.content.map((c) => ({
+              type: "web_search_result",
+              title: c.title,
+              url: c.url,
+              encrypted_content: "",
+              page_age: null,
+            })),
+          },
+        })}\n\n`,
+      ))
+      frames.push(encoder.encode(
+        `event: content_block_stop\ndata: ${JSON.stringify({
+          type: "content_block_stop",
+          index: wstrIdx,
+        })}\n\n`,
+      ))
+    }
+  }
+  return frames
+}
+
 export function translateBlockingMessage(
   msg: any,
   state: BlockingSessionState,
@@ -187,17 +277,39 @@ export function translateBlockingMessage(
   const frames: Uint8Array[] = []
 
   if (eventType === "message_start") {
-    // New SDK turn → new HTTP round's message. Reset per-turn accumulators
-    // (input_json, SDK-index → tool_use_id map) so the next turn's
-    // bindings/snapshot don't see stale entries. Note we do NOT clear
-    // `lastEmittedAssistantBlocks` here — the next continuation request
-    // needs it for drift detection and it gets overwritten the next time
-    // the SDK reaches `message_delta(stop_reason=tool_use)`.
+    // New SDK turn → reset per-turn accumulators. The SDK restarts block
+    // indices at 0 every turn but meridian merges turns into a single
+    // client-visible message, so the per-turn `sdkToClientIndex` map MUST
+    // clear here (its keys are SDK indices) while `nextClientBlockIndex`
+    // (a monotonic counter into the merged message) keeps growing across
+    // turns within one round. `lastEmittedAssistantBlocks` is NOT cleared
+    // — the next continuation needs it for drift detection and it gets
+    // overwritten when the SDK reaches `message_delta(stop_reason=tool_use)`.
     state.inputJsonAccum.clear()
     state.toolUseIdBySdkIdx.clear()
+    state.webSearchSkipIndices.clear()
+    state.structuredOutputIndices.clear()
+    state.outputFormatTextSkipIndices.clear()
+    state.sdkToClientIndex.clear()
     const startUsage = event.message?.usage as TokenUsage | undefined
     if (startUsage) state.cumulativeUsage = sumUsage(state.cumulativeUsage, startUsage)
+
+    // Drain any captured WebSearch results into synthetic frames before
+    // touching the message_start itself. The synthetic frames belong to the
+    // round's accumulated content and inherit `nextClientBlockIndex`.
+    const synthetic = drainWebSearchToFrames(state, encoder)
+
+    if (state.messageStartEmittedThisRound) {
+      // Subsequent SDK turn within one blocking round — coalesce into the
+      // existing client-visible message: drop the dup `message_start` and
+      // forward only the synthetic frames the previous turn produced via
+      // its built-in WebSearch.
+      frames.push(...synthetic)
+      return frames
+    }
+    state.messageStartEmittedThisRound = true
     frames.push(encoder.encode(`event: message_start\ndata: ${JSON.stringify(event)}\n\n`))
+    frames.push(...synthetic)
     return frames
   }
 
@@ -210,8 +322,10 @@ export function translateBlockingMessage(
     if (u) state.cumulativeUsage = sumUsage(state.cumulativeUsage, { output_tokens: u.output_tokens })
     // API signal: assistant turn finished with tool_use — arm the round
     // closer. `expectedIds` is the set of tool_use ids observed in the
-    // turn's content_block_start events. close_round will fire as soon as
-    // every handler has registered its PendingTool (whichever gate edge
+    // turn's content_block_start events (passthrough-prefixed only — the
+    // built-in WebSearch tool_uses we suppress never enter
+    // `state.toolUseIdBySdkIdx`). close_round will fire as soon as every
+    // handler has registered its PendingTool (whichever gate edge
     // completes last) — the caller runs `maybeCloseRound` AFTER pushing
     // these frames to the sink. Calling it here would race: if handlers
     // are already pending, close_round would fire first, detach the sink,
@@ -221,7 +335,37 @@ export function translateBlockingMessage(
     if (stopReason === "tool_use") {
       const expectedIds = new Set<string>()
       for (const [, v] of state.toolUseIdBySdkIdx) expectedIds.add(v.toolUseId)
-      if (expectedIds.size > 0) state.pendingRoundClose = { expectedIds }
+      if (expectedIds.size === 0 && state.structuredOutputIndices.size > 0) {
+        // Terminal StructuredOutput: the only "tool_use" this turn was the
+        // schema-conformant payload, which we already translated to a
+        // text block. The SDK will end shortly; rewrite stop_reason to
+        // `end_turn` so the client treats this as the final response and
+        // does NOT try to send back a tool_result. Round-close is NOT
+        // armed — the natural SDK `end` event drives HTTP teardown. The
+        // `outputFormatTerminalForwarded` flag suppresses the consumer's
+        // synthetic finally-block frame so the client never sees two
+        // terminal deltas.
+        const rewritten = {
+          ...event,
+          delta: { ...event.delta, stop_reason: "end_turn" },
+        }
+        frames.push(encoder.encode(`event: message_delta\ndata: ${JSON.stringify(rewritten)}\n\n`))
+        state.outputFormatTerminalForwarded = true
+        return frames
+      }
+      if (expectedIds.size === 0
+          && state.useBuiltinWebSearch
+          && state.webSearchSkipIndices.size > 0) {
+        // The turn ended with `stop_reason=tool_use` but every tool_use was
+        // a suppressed built-in (WebSearch) — no client-callable tool was
+        // emitted. Forwarding `message_delta(stop_reason=tool_use)` would
+        // strand the client with an "act on the tool_use" signal that has
+        // no corresponding tool_use block. Drop the frame; the SDK will
+        // open a fresh internal turn whose final message_delta carries the
+        // real terminal stop_reason.
+        return frames
+      }
+      state.pendingRoundClose = { expectedIds }
       // Snapshot the assistant turn's tool_use blocks for the next
       // continuation's drift check. Only tool_use is tracked — text and
       // thinking blocks don't affect tool routing or SDK in-memory state,
@@ -236,6 +380,19 @@ export function translateBlockingMessage(
           if (raw) { try { input = JSON.parse(raw) } catch {} }
           return { type: "tool_use" as const, name: tu.toolName, input }
         })
+    } else if (state.outputFormatActive
+               && state.structuredOutputIndices.size === 0) {
+      // outputFormat retry path: the SDK will (a) detect the model failed
+      // to call StructuredOutput, (b) append a continuation directive,
+      // and (c) re-prompt — opening a fresh internal turn that we'll
+      // coalesce into the same client-visible message. Forwarding this
+      // intermediate `end_turn` (or other non-tool_use stop_reason) would
+      // make the client think the response is over before the recovered
+      // StructuredOutput call has even happened. Buffer the latest delta
+      // for usage tallying so spawnConsumer's finally block can synthesise
+      // a terminal frame in the all-retries-exhausted path.
+      state.outputFormatLastDelta = event
+      return frames
     }
     frames.push(encoder.encode(`event: message_delta\ndata: ${JSON.stringify(event)}\n\n`))
     return frames
@@ -243,6 +400,61 @@ export function translateBlockingMessage(
 
   if (eventType === "content_block_start") {
     const block = event.content_block
+    // Per-name dispatch for SDK-internal client tools (no MCP prefix means
+    // it cannot be a passthrough/external tool — those are always prefixed
+    // with `PASSTHROUGH_MCP_PREFIX`). blockingMode runs with maxTurns=10_000,
+    // so suppression is never about saving rounds — it is always about
+    // shaping the wire protocol the client expects.
+    //
+    //   * "WebSearch": the SDK runs it locally as a client tool, but the
+    //     Anthropic wire shape for hosted web_search is
+    //     `server_tool_use` + `web_search_tool_result`. Drop the regular
+    //     tool_use here; the synthetic server-side pair is injected from
+    //     `state.pendingWebSearchResults` on the next message_start (or at
+    //     round close, see drainWebSearchToFrames).
+    //   * "StructuredOutput": the SDK emits a tool_use whose `input_json`
+    //     IS the schema-conformant payload. Translate to a `text` block so
+    //     OpenAI-style consumers receive the JSON as text — content_block_delta
+    //     rewrites `input_json_delta` → `text_delta` for indices in
+    //     `structuredOutputIndices`.
+    if (block?.type === "tool_use" && typeof block.name === "string") {
+      if (state.useBuiltinWebSearch && block.name === "WebSearch") {
+        if (eventIndex !== undefined) state.webSearchSkipIndices.add(eventIndex)
+        return frames
+      }
+      if (state.outputFormatActive && block.name === "StructuredOutput") {
+        const clientIndex = state.nextClientBlockIndex++
+        if (eventIndex !== undefined) {
+          state.sdkToClientIndex.set(eventIndex, clientIndex)
+          state.structuredOutputIndices.add(eventIndex)
+        }
+        frames.push(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
+          ...event,
+          index: clientIndex,
+          content_block: { type: "text", text: "" },
+        })}\n\n`))
+        return frames
+      }
+    }
+    // outputFormat: suppress raw `text` blocks the model emits alongside (or
+    // instead of) StructuredOutput. The client requested a schema-conformant
+    // structured payload only — any prose would mix two response shapes in
+    // the same Anthropic Message. Mirrors executor.ts' non-blocking branch
+    // (skipBlockIndices.add for text blocks under outputFormat). Indexes are
+    // tracked so the matching content_block_delta / content_block_stop frames
+    // are silenced too. This runs AFTER the StructuredOutput-as-text rewrite
+    // above, which already returned, so we never suppress the translated
+    // payload here.
+    if (state.outputFormatActive && block?.type === "text") {
+      if (eventIndex !== undefined) state.outputFormatTextSkipIndices.add(eventIndex)
+      return frames
+    }
+    // Allocate a fresh client-block index. SDK indices restart at 0 every
+    // turn but the client sees one merged Anthropic message per round;
+    // mapping SDK → client here lets content_block_delta and
+    // content_block_stop (below) re-route their frames consistently.
+    const clientIndex = state.nextClientBlockIndex++
+    if (eventIndex !== undefined) state.sdkToClientIndex.set(eventIndex, clientIndex)
     if (block?.type === "tool_use" && typeof block.name === "string" && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
       const clientName = stripMcpPrefix(block.name)
       if (block.id && typeof block.id === "string") {
@@ -257,18 +469,23 @@ export function translateBlockingMessage(
           state.inputJsonAccum.set(eventIndex, "")
         }
       }
-      // Forward with the MCP prefix stripped; keep SDK's native block index.
       frames.push(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
         ...event,
+        index: clientIndex,
         content_block: { ...block, name: clientName, input: {} },
       })}\n\n`))
       return frames
     }
-    frames.push(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify(event)}\n\n`))
+    frames.push(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
+      ...event,
+      index: clientIndex,
+    })}\n\n`))
     return frames
   }
 
   if (eventType === "content_block_delta") {
+    if (eventIndex !== undefined && state.webSearchSkipIndices.has(eventIndex)) return frames
+    if (eventIndex !== undefined && state.outputFormatTextSkipIndices.has(eventIndex)) return frames
     if (eventIndex !== undefined) {
       const delta = event.delta
       if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string"
@@ -277,11 +494,31 @@ export function translateBlockingMessage(
         state.inputJsonAccum.set(eventIndex, prev + delta.partial_json)
       }
     }
-    frames.push(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify(event)}\n\n`))
+    const clientIndex = eventIndex !== undefined ? state.sdkToClientIndex.get(eventIndex) : undefined
+    if (clientIndex === undefined) return frames
+    // StructuredOutput: rewrite the SDK's `input_json_delta` to a `text_delta`
+    // whose text is the partial JSON. The block was emitted as `type: "text"`
+    // at content_block_start, so deltas must follow text-block shape.
+    let outEvent: any = event
+    if (eventIndex !== undefined && state.structuredOutputIndices.has(eventIndex)) {
+      const delta = event.delta
+      if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        outEvent = {
+          ...event,
+          delta: { type: "text_delta", text: delta.partial_json },
+        }
+      }
+    }
+    frames.push(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
+      ...outEvent,
+      index: clientIndex,
+    })}\n\n`))
     return frames
   }
 
   if (eventType === "content_block_stop") {
+    if (eventIndex !== undefined && state.webSearchSkipIndices.has(eventIndex)) return frames
+    if (eventIndex !== undefined && state.outputFormatTextSkipIndices.has(eventIndex)) return frames
     if (eventIndex !== undefined) {
       const tu = state.toolUseIdBySdkIdx.get(eventIndex)
       if (tu) {
@@ -292,7 +529,12 @@ export function translateBlockingMessage(
         if (pending) pending.input = input
       }
     }
-    frames.push(encoder.encode(`event: content_block_stop\ndata: ${JSON.stringify(event)}\n\n`))
+    const clientIndex = eventIndex !== undefined ? state.sdkToClientIndex.get(eventIndex) : undefined
+    if (clientIndex === undefined) return frames
+    frames.push(encoder.encode(`event: content_block_stop\ndata: ${JSON.stringify({
+      ...event,
+      index: clientIndex,
+    })}\n\n`))
     return frames
   }
 
@@ -345,6 +587,32 @@ async function spawnConsumer(
       pushEvent(state, { kind: "error", error: state.sdkError })
     }
   } finally {
+    // Drain stragglers — if the very last SDK turn ran a built-in WebSearch
+    // and then `end_turn`-ed without opening another internal turn, the
+    // hook's capture would otherwise be stranded in the buffer. Inject the
+    // synthetic frames into the round before the terminal `end` event so
+    // the client's final message includes the full WebSearch trail.
+    const trailing = drainWebSearchToFrames(state, encoder)
+    for (const f of trailing) pushEvent(state, { kind: "sse", frame: f })
+    // outputFormat: the translator buffered every intermediate
+    // `message_delta` whose stop_reason was non-tool_use (SDK retry
+    // attempts) so the client never saw a premature `end_turn`. If we
+    // also never reached the StructuredOutput-emission rewrite that
+    // forwards a terminal frame on its own (`outputFormatTerminalForwarded`),
+    // synthesise one here from the buffered delta so the client always
+    // gets exactly one terminal `end_turn`. Mirrors executor.ts:996-1009.
+    if (state.outputFormatActive && !state.outputFormatTerminalForwarded) {
+      const buffered = state.outputFormatLastDelta
+      const usage = (buffered && (buffered as Record<string, unknown>).usage)
+        ?? { output_tokens: 0 }
+      const synthFrame = encoder.encode(`event: message_delta\ndata: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage,
+      })}\n\n`)
+      pushEvent(state, { kind: "sse", frame: synthFrame })
+      state.outputFormatTerminalForwarded = true
+    }
     pushEvent(state, { kind: "end", reason: state.sdkEndReason ?? "end_turn" })
   }
 }
@@ -376,6 +644,11 @@ export function runBlockingStream(
     })
     applyContinuation(state, handler, shared)
   } else {
+    // Bind hook references onto the session state so the consumer task /
+    // translator can react to them across HTTP boundaries. The webSearchHook
+    // (when registered) appends to `hooks.pendingWebSearchResults`; the
+    // translator drains the same array on duplicate message_start.
+    bindTranslatorState(state, hooks, shared.outputFormat)
     claudeLog("blocking.initial.start", {
       requestId: shared.requestMeta.requestId,
       key: stringifyBlockingKey(key),
@@ -636,6 +909,7 @@ export async function runBlockingNonStream(
     })
     applyContinuation(state, handler, shared)
   } else {
+    bindTranslatorState(state, hooks, shared.outputFormat)
     claudeLog("blocking.initial.start", {
       requestId: shared.requestMeta.requestId,
       key: stringifyBlockingKey(key),
