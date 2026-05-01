@@ -536,7 +536,7 @@ export async function runNonStream(
   if (trackFileChanges) {
     if (passthrough && finalStopReason === "end_turn" && adapter.extractFileChangesFromToolUse) {
       const passthroughChanges = extractFileChangesFromMessages(
-        body.messages || [],
+        allMessages,
         adapter.extractFileChangesFromToolUse.bind(adapter),
       )
       fileChanges.push(...passthroughChanges)

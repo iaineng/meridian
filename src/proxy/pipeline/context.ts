@@ -7,7 +7,7 @@ import { resolveModel } from "../models"
 import { filterBetasForProfile } from "../betas"
 import { obfuscateSystemMessage } from "../obfuscate"
 import { detectAdapter } from "../adapters/detect"
-import { extractSystemText } from "../messages"
+import { extractSystemText, mergeAdjacentSameRole } from "../messages"
 import { claudeLog } from "../../logger"
 
 /**
@@ -215,7 +215,7 @@ export async function buildSharedContext(
       agentSessionId,
       profileSessionId,
       profileScopedCwd,
-      allMessages: body.messages || [],
+      allMessages: mergeAdjacentSameRole(body.messages || []),
     },
   }
 }

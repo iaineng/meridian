@@ -152,7 +152,9 @@ describe("Query-direct lone-user (ephemeral mode)", () => {
     }
   })
 
-  it("[u1, u2] (trailing user, no anchoring assistant) → AsyncIterable with 2 entries", async () => {
+  it("[u1, u2] (adjacent same-role merged) → AsyncIterable with 1 entry", async () => {
+    // mergeAdjacentSameRole in buildSharedContext combines [u1, u2] into a
+    // single user message before the handler sees it.
     const app = createTestApp()
     const res = await post(app, {
       model: "claude-sonnet-4-5",
@@ -165,13 +167,9 @@ describe("Query-direct lone-user (ephemeral mode)", () => {
     })
     expect(res.status).toBe(200)
     expect(capturedQueryParams?.options?.resume).toBeUndefined()
-    expect(capturedPromptMessages.length).toBe(2)
-    // No meridian-set cache_control on either entry — SDK auto-anchors
-    // the trailing message via addCacheBreakpoints.
-    for (const m of capturedPromptMessages) {
-      for (const block of m.message.content) {
-        expect(block?.cache_control).toBeUndefined()
-      }
+    expect(capturedPromptMessages.length).toBe(1)
+    for (const block of capturedPromptMessages[0].message.content) {
+      expect(block?.cache_control).toBeUndefined()
     }
   })
 
@@ -221,7 +219,11 @@ describe("Query-direct lone-user (ephemeral mode)", () => {
     for (const b of blocks) expect(b?.cache_control).toBeUndefined()
   })
 
-  it("[u1{cc}, u2] (cache_control not on last) → falls through to prepareFreshSession, resume is set", async () => {
+  it("[u1{cc}, u2] (adjacent same-role merged, mid-block cc preserved) → JSONL path, resume is set", async () => {
+    // mergeAdjacentSameRole merges [u1{cc}, u2] into a single user message
+    // with two text blocks. The cache_control sits on the first (non-trailing)
+    // block, so cacheBreakpointOnTrailingOnly returns false and the request
+    // falls through to prepareFreshSession to honor the breakpoint position.
     const app = createTestApp()
     const res = await post(app, {
       model: "claude-sonnet-4-5",
@@ -233,7 +235,6 @@ describe("Query-direct lone-user (ephemeral mode)", () => {
       ],
     })
     expect(res.status).toBe(200)
-    // Existing path: SDK gets a resume id and a JSONL was written.
     expect(typeof capturedQueryParams?.options?.resume).toBe("string")
   })
 

@@ -179,3 +179,56 @@ export function getLastUserMessage(messages: Array<{ role: string; content: any 
   }
   return messages.slice(-1)
 }
+
+/**
+ * Wrap a message's content as an array of content blocks.
+ * String content becomes `[{ type: "text", text }]`; arrays pass through.
+ */
+function contentToBlocks(content: any): any[] {
+  if (typeof content === "string") return [{ type: "text", text: content }]
+  if (Array.isArray(content)) return content
+  return [{ type: "text", text: String(content) }]
+}
+
+/**
+ * Merge adjacent messages that share the same `role` into a single message
+ * whose `content` is the concatenation of their content blocks.
+ *
+ * The Anthropic API forbids consecutive same-role messages, but some clients
+ * (e.g. IDE plugins) produce them — notably splitting a single assistant turn
+ * into a plain-text message followed by a tool_use-bearing message. This
+ * breaks `extractContinuationTrailing` which requires each trailing assistant
+ * message's `content` to be an array containing at least one `tool_use`.
+ *
+ * Returns the original array (reference-equal) when no merging is needed.
+ */
+export function mergeAdjacentSameRole(
+  messages: Array<{ role: string; content: any }>,
+): Array<{ role: string; content: any }> {
+  if (messages.length <= 1) return messages
+
+  let needsMerge = false
+  for (let i = 1; i < messages.length; i++) {
+    if (messages[i]!.role === messages[i - 1]!.role) {
+      needsMerge = true
+      break
+    }
+  }
+  if (!needsMerge) return messages
+
+  const result: Array<{ role: string; content: any }> = []
+  let current = { role: messages[0]!.role, content: contentToBlocks(messages[0]!.content) }
+
+  for (let i = 1; i < messages.length; i++) {
+    const msg = messages[i]!
+    if (msg.role === current.role) {
+      current.content = [...current.content, ...contentToBlocks(msg.content)]
+    } else {
+      result.push(current)
+      current = { role: msg.role, content: contentToBlocks(msg.content) }
+    }
+  }
+  result.push(current)
+
+  return result
+}

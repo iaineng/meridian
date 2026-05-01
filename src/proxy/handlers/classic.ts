@@ -37,7 +37,7 @@ export async function buildClassicHandler(shared: SharedRequestContext): Promise
 
   const lineageResult: LineageResult = lookupSession(
     profileSessionId,
-    shared.body.messages || [],
+    allMessages,
     profileScopedCwd,
   )
   const isResume = lineageResult.type === "continuation" || lineageResult.type === "compaction"
@@ -141,7 +141,7 @@ export function persistClassicSession(
   if (!sdkSessionId) return
   storeSession(
     shared.profileSessionId,
-    shared.body.messages || [],
+    shared.allMessages,
     sdkSessionId,
     shared.profileScopedCwd,
     sdkUuidMap,

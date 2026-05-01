@@ -33,6 +33,7 @@ import {
   type PendingTool,
 } from "../proxy/session/blockingPool"
 import { computeMessageHashes, computeToolsFingerprint } from "../proxy/session/lineage"
+import { mergeAdjacentSameRole } from "../proxy/messages"
 
 const DEFAULT_TOOLS = [{ name: "Read" }, { name: "Bash" }]
 const DEFAULT_TOOLS_FP = computeToolsFingerprint(DEFAULT_TOOLS)
@@ -596,5 +597,35 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
     expect(result.isBlockingContinuation).toBe(true)
     expect(result.pendingToolResults).toHaveLength(3)
     expect(result.pendingToolResults!.map(t => t.content)).toEqual(["1", "2", "3"])
+  })
+
+  // ---- Adjacent same-role merge (pre-normalized by buildSharedContext) ------
+
+  it("split assistant (string + array with tool_use) is accepted after mergeAdjacentSameRole", async () => {
+    const r0Raw = [{ role: "user", content: [{ type: "text", text: "测试工具" }] }]
+    const r0 = mergeAdjacentSameRole(r0Raw)
+    seedRound0({
+      r0Messages: r0,
+      emittedToolUses: [{ name: "view_file_outline", input: { absolutePath: "/some/path" }, pendingId: "tu_A" }],
+    })
+
+    const rawMessages = [
+      ...r0Raw,
+      { role: "assistant", content: "    好的，我来测试工具的功能。" },
+      { role: "assistant", content: [
+        { type: "text", text: "..." },
+        { type: "tool_use", id: "tu_A", name: "view_file_outline", input: { absolutePath: "/some/path" } },
+      ] },
+      { role: "user", content: [
+        { type: "tool_result", tool_use_id: "tu_A", content: [{ type: "text", text: "Total lines: 43" }] },
+      ] },
+    ]
+    const messages = mergeAdjacentSameRole(rawMessages)
+    expect(messages).toHaveLength(3)
+
+    const result = await buildBlockingHandler(makeShared(messages))
+    expect(result.isBlockingContinuation).toBe(true)
+    expect(result.pendingToolResults).toHaveLength(1)
+    expect(result.pendingToolResults![0]!.tool_use_id).toBe("tu_A")
   })
 })
