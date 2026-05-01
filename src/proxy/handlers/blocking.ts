@@ -16,17 +16,18 @@
  *      left off." filler can seed a tool_result-tail conversation — then `acquire`
  *      a new sibling under the conversation key and prebuild the MCP
  *      server.
- *   3. Validation mismatch (sibling matched on prefix but the incoming
- *      tool_result COUNT differs from pending handler count): throw a
- *      BlockingProtocolMismatchError that server.ts translates to 400.
- *      NOT promoted — the imbalance would carry over to a fresh sibling's
- *      JSONL and Anthropic would reject it. Note: tool_use_id values are
- *      NOT compared (clients may rewrite or omit them); routing is
- *      positional via `state.currentRoundToolIds`.
+ *   3. Validation mismatch (sibling matched on prefix but the trailing
+ *      tool_use/tool_result shape differs from what the live sibling was
+ *      waiting for): keep the live sibling (it may be a fork still waiting
+ *      for its own tool results) and promote the incoming request to the
+ *      initial path, which rebuilds JSONL and acquires a fresh blocking
+ *      sibling. Note: tool_use_id values are NOT compared (clients may
+ *      rewrite or omit them); routing is positional via
+ *      `state.currentRoundToolIds`.
  *
  * Promotion semantics: continuation miss / stale fall through to the
  * initial path so the new sibling preserves the interleaved-thinking
- * signature chain. Only the protocol-mismatch case still hard-fails.
+ * signature chain.
  */
 
 import { claudeLog } from "../../logger"
@@ -59,15 +60,6 @@ import {
 } from "../session/blockingPool"
 import { classifyQueryDirect, buildQueryDirectMessages } from "../session/queryDirect"
 import type { LineageResult } from "../session"
-
-export class BlockingProtocolMismatchError extends Error {
-  readonly kind = "blocking_protocol_mismatch" as const
-  readonly status = 400 as const
-  constructor(message: string) {
-    super(message)
-    this.name = "BlockingProtocolMismatchError"
-  }
-}
 
 function createPrebuiltBlockingPassthroughMcp(shared: SharedRequestContext, state: BlockingSessionState) {
   const toolSet = resolvePassthroughToolSet({
@@ -183,17 +175,23 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
         // fall through to the initial path below
       } else if (verdict.kind === "malformed") {
         // Structural problem with the trailing — count mismatch, missing
-        // assistant tool_use, or non-tool-only user content. Promoting
-        // can't recover; the JSONL would carry the same imbalance and
-        // Anthropic would reject it. 400 is the right signal.
+        // assistant tool_use, or non-tool-only user content. Do not hard
+        // fail the HTTP request or release the matched sibling: this may
+        // be a fork whose original suspended handlers are still valid.
+        // Fall through to the initial JSONL path so the incoming branch
+        // gets a fresh blocking session rooted at the exact conversation
+        // it sent.
         claudeLog("blocking.continuation.mismatch", {
           requestId: requestMeta.requestId,
           expected_count: expected,
           reason: verdict.reason,
           trailing_count: trailing.length,
         })
-        await blockingPool.release(state, verdict.reason)
-        throw new BlockingProtocolMismatchError(verdict.reason)
+        claudeLog("blocking.continuation.promoted", {
+          requestId: requestMeta.requestId,
+          from: "tool_mismatch",
+        })
+        // fall through to the initial path below
       } else if (state.toolsFingerprint !== incomingToolsFingerprint) {
         // Tools-set change: the incoming request declares a different tool
         // list than the one baked into the live SDK iterator's MCP server.

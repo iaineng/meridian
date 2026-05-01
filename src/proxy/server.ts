@@ -26,7 +26,7 @@ import { buildHookBundle } from "./pipeline/hooks"
 import { recordRequestError } from "./pipeline/telemetry"
 import { runNonStream, runStream, type ExecutorCallbacks, type ExecutorEnv } from "./pipeline/executor"
 import { buildEphemeralHandler } from "./handlers/ephemeral"
-import { buildBlockingHandler, BlockingProtocolMismatchError } from "./handlers/blocking"
+import { buildBlockingHandler } from "./handlers/blocking"
 import { buildClassicHandler, persistClassicSession, staleSessionRetryClassic } from "./handlers/classic"
 import type { HandlerContext } from "./handlers/types"
 import { detectAdapter } from "./adapters/detect"
@@ -238,23 +238,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         ephemeralDeferredToStream = true
         return res
       } catch (error) {
-        // Blocking-MCP protocol violation: client sent the wrong set of
-        // tool_result ids. Return a crisp 400 without falling back, so the
-        // client fixes its request instead of masking the bug.
-        if (error instanceof BlockingProtocolMismatchError) {
-          claudeLog("blocking.protocol_mismatch", {
-            durationMs: Date.now() - requestStartAt,
-            error: error.message,
-          })
-          return new Response(
-            JSON.stringify({
-              type: "error",
-              error: { type: "invalid_request_error", message: error.message },
-            }),
-            { status: 400, headers: { "Content-Type": "application/json" } },
-          )
-        }
-
         const errMsg = error instanceof Error ? error.message : String(error)
         claudeLog("error.unhandled", {
           durationMs: Date.now() - requestStartAt,

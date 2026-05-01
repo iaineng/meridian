@@ -361,10 +361,10 @@ invariant across stream/non-stream modes intact.
 | Scenario | Handling |
 |----------|----------|
 | Preconditions not met (no tools, no passthrough, …) | Dispatch goes through the plain ephemeral handler (no blocking). |
-| Continuation hits pool but the stored `priorMessageHashes` is not a prefix of the incoming prior (tampering / undo / different branch) | `buildBlockingHandler` falls through to `buildEphemeralHandler` silently. |
+| Continuation hits pool but the stored `priorMessageHashes` is not a prefix of the incoming prior (tampering / undo / different branch) | `buildBlockingHandler` falls through to the fresh blocking initial path. |
 | Continuation hash matches but `body.tools` fingerprint differs from the live sibling's stored `toolsFingerprint` | Live sibling released; promoted to a fresh blocking initial. The SDK iterator's in-process MCP server has the OLD tool definitions baked in (no re-enumeration across resumes within one `query()`), so feeding tool_results into stale handlers would let the model continue thinking against an outdated schema. Logged as `blocking.continuation.tools_changed` + `blocking.continuation.promoted{from:"tools_changed"}`. |
-| Continuation hash matches but `tool_result` id set ≠ pending set | `BlockingProtocolMismatchError` → 400 `invalid_request_error`, session released. |
-| Continuation hash matches but pool has no entry (server restart, timeout) | Fall through to `buildEphemeralHandler`. |
+| Continuation hash matches but the trailing tool_use/tool_result shape mismatches the live pending set | Live sibling is preserved because the request may be a fork; incoming branch is promoted to a fresh blocking initial via JSONL rebuild. Logged as `blocking.continuation.mismatch` + `blocking.continuation.promoted{from:"tool_mismatch"}`. |
+| Continuation hash matches but pool has no entry (server restart, timeout) | Fall through to the fresh blocking initial path. |
 | SDK query errors mid-flight | `error` SSE event + `message_delta(end_turn)` + `message_stop`; session released. |
 | 30-min idle (janitor) | All pending tools rejected, JSONL cleaned up, pool entry dropped. |
 | Client disconnect mid-HTTP | `detachSink`; state keeps running, consumer pushes into buffer; next reconnect / continuation attaches. |
@@ -378,7 +378,7 @@ invariant across stream/non-stream modes intact.
 ### Critical Files
 
 - `src/proxy/session/blockingPool.ts` — registry, janitor, session state shape.
-- `src/proxy/handlers/blocking.ts` — initial vs continuation dispatch, `BlockingProtocolMismatchError`.
+- `src/proxy/handlers/blocking.ts` — initial vs continuation dispatch and mismatch promotion.
 - `src/proxy/pipeline/blockingStream.ts` — consumer task, sink attach/detach, per-HTTP meridian framing for both `runBlockingStream` (SSE) and `runBlockingNonStream` (aggregated JSON), plus the shared `applyContinuation` helper.
 - `src/proxy/pipeline/blockingNonStreamAggregator.ts` — reverse-parses SSE frames into a single Anthropic JSON Message for the non-stream sink.
 - `src/proxy/passthroughTools.ts` — `createBlockingPassthroughMcpServer` with `annotations: { readOnlyHint: true }` and FIFO `tool_use_id` rendezvous.

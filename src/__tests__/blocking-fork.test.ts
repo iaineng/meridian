@@ -384,7 +384,7 @@ describe("blocking pool: multi-sibling forks", () => {
     expect(live.status).toBe("streaming")
   })
 
-  it("count mismatch does NOT promote — still throws 400", async () => {
+  it("count mismatch preserves live sibling and promotes to fresh blocking initial", async () => {
     const messages = [
       { role: "user", content: "list files" },
       { role: "assistant", content: [{ type: "tool_use", id: "toolu_X", name: "mcp__tools__Read", input: {} }] },
@@ -399,12 +399,15 @@ describe("blocking pool: multi-sibling forks", () => {
     const live = seedState(key, priorHashes, cwd, "01")
     live.pendingTools.set("toolu_X", seedPending({ toolUseId: "toolu_X" }))
 
-    await expect(buildBlockingHandler(makeShared({ messages }))).rejects.toThrow(
-      /tool_result count mismatch/,
-    )
-    // Live sibling released; no promote happened.
-    expect(live.status).toBe("terminated")
-    expect(blockingPool.totalSize()).toBe(0)
+    const result = await buildBlockingHandler(makeShared({ messages }))
+
+    expect(live.status).toBe("streaming")
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(result.lineageType).toBe("blocking")
+    expect(result.blockingState).not.toBe(live)
+    expect(live.pendingTools.has("toolu_X")).toBe(true)
+    expect(blockingPool.totalSize()).toBe(2)
+    expect(blockingPool.lookup(key, computeMessageHashes(messages))).toBe(result.blockingState)
   })
 
   it("JSONL initial path stores systemFingerprint (regression: second agent loop continuations always promoted)", async () => {

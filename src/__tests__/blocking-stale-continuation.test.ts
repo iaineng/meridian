@@ -207,7 +207,7 @@ describe("blocking handler: stale continuation fall-through", () => {
     })
   })
 
-  it("count mismatch (incoming count != pending count) still throws 400", async () => {
+  it("count mismatch (incoming count != pending count) promotes to fresh blocking initial", async () => {
     const r0Messages = [{ role: "user", content: "read README" }]
     const r0Hashes = computeMessageHashes(r0Messages)
     const firstUserHash = r0Hashes[0]!
@@ -239,11 +239,15 @@ describe("blocking handler: stale continuation fall-through", () => {
       ] },
     ]
 
-    await expect(buildBlockingHandler(makeShared({ messages }))).rejects.toThrow(
-      /tool_result count mismatch/,
-    )
-    expect(blockingPool.lookup(key, r0Hashes)).toBeUndefined()
-    expect(state.status).toBe("terminated")
+    const result = await buildBlockingHandler(makeShared({ messages }))
+
+    expect(state.status).toBe("streaming")
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(result.lineageType).toBe("blocking")
+    expect(result.blockingState).not.toBe(state)
+    expect(state.pendingTools.has("toolu_X")).toBe(true)
+    expect(blockingPool.totalSize()).toBe(2)
+    expect(blockingPool.lookup(key, computeMessageHashes(messages))).toBe(result.blockingState)
   })
 
   it("incoming tool_use_id differs from pending (count matches) → continuation accepted; resolve routes positionally", async () => {

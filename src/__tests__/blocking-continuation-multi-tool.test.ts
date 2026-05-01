@@ -26,7 +26,7 @@ import { tmpdir } from "node:os"
 import { promises as fs } from "node:fs"
 import path from "node:path"
 
-import { buildBlockingHandler, BlockingProtocolMismatchError } from "../proxy/handlers/blocking"
+import { buildBlockingHandler } from "../proxy/handlers/blocking"
 import {
   blockingPool,
   type BlockingSessionKey,
@@ -262,11 +262,11 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
     expect(result.pendingToolResults).toHaveLength(2)
   })
 
-  // ---- Malformed → 400 -----------------------------------------------------
+  // ---- Malformed → promote ------------------------------------------------
 
-  it("assistant in trailing has no tool_use → 400", async () => {
+  it("assistant in trailing has no tool_use → promoted to fresh blocking initial", async () => {
     const r0 = [{ role: "user", content: "go" }]
-    seedRound0({
+    const { state } = seedRound0({
       r0Messages: r0,
       emittedToolUses: [{ name: "Read", input: {}, pendingId: "tu_A" }],
     })
@@ -276,10 +276,15 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
       { role: "assistant", content: [{ type: "text", text: "no tools" }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_A", content: "ok" }] },
     ]
-    await expect(buildBlockingHandler(makeShared(messages))).rejects.toThrow(BlockingProtocolMismatchError)
+    const result = await buildBlockingHandler(makeShared(messages))
+    expect(state.status).toBe("streaming")
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(result.lineageType).toBe("blocking")
+    expect(result.blockingState).not.toBe(state)
+    expect(blockingPool.totalSize()).toBe(2)
   })
 
-  it("user message in trailing has mixed text + tool_result → 400", async () => {
+  it("user message in trailing has mixed text + tool_result → initial path", async () => {
     const r0 = [{ role: "user", content: "go" }]
     seedRound0({
       r0Messages: r0,
@@ -295,15 +300,15 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
     ]
     // Note: last user message has mixed content → fails isToolResultOnlyUserMessage,
     // so isContinuationShape is FALSE at the outer check; handler takes initial path,
-    // not 400. Adjust assertion.
+    // not a continuation mismatch. Assert the initial path shape.
     const result = await buildBlockingHandler(makeShared(messages))
     expect(result.isBlockingContinuation).toBe(false)
     expect(result.lineageType).toBe("blocking")
   })
 
-  it("tool_use count != tool_result count (extra tr) → 400", async () => {
+  it("tool_use count != tool_result count (extra tr) → promoted to fresh blocking initial", async () => {
     const r0 = [{ role: "user", content: "go" }]
-    seedRound0({
+    const { state } = seedRound0({
       r0Messages: r0,
       emittedToolUses: [{ name: "Read", input: {}, pendingId: "tu_A" }],
     })
@@ -315,7 +320,12 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
         { type: "tool_result", tool_use_id: "tu_EXTRA", content: "ok" },
       ] },
     ]
-    await expect(buildBlockingHandler(makeShared(messages))).rejects.toThrow(/tool_result count mismatch/)
+    const result = await buildBlockingHandler(makeShared(messages))
+    expect(state.status).toBe("streaming")
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(result.lineageType).toBe("blocking")
+    expect(result.blockingState).not.toBe(state)
+    expect(blockingPool.totalSize()).toBe(2)
   })
 
   it("empty trailing (priorLen == allMessages.length) → promote stale, not 400", async () => {
@@ -497,9 +507,9 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
     expect(result.isBlockingContinuation).toBe(false)
   })
 
-  it("count drift: emitted=2 tool_uses, client supplies only 1 in trailing → 400", async () => {
+  it("count drift: emitted=2 tool_uses, client supplies only 1 in trailing → promoted to fresh blocking initial", async () => {
     const r0 = [{ role: "user", content: "go" }]
-    seedRound0({
+    const { state } = seedRound0({
       r0Messages: r0,
       emittedToolUses: [
         { name: "Read", input: {}, pendingId: "tu_A" },
@@ -512,7 +522,12 @@ describe("blocking handler: format-agnostic continuation trailing", () => {
       { role: "assistant", content: [{ type: "tool_use", id: "tu_A", name: "Read", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_A", content: "ok" }] },
     ]
-    await expect(buildBlockingHandler(makeShared(messages))).rejects.toThrow(/tool_result count mismatch/)
+    const result = await buildBlockingHandler(makeShared(messages))
+    expect(state.status).toBe("streaming")
+    expect(result.isBlockingContinuation).toBe(false)
+    expect(result.lineageType).toBe("blocking")
+    expect(result.blockingState).not.toBe(state)
+    expect(blockingPool.totalSize()).toBe(2)
   })
 
   // ---- Edge cases ----------------------------------------------------------
