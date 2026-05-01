@@ -374,7 +374,7 @@ function applyJsonlHistoryBreakpoints(
  * the byte representation stable regardless of position.
  *
  * - string → [{type:"text", text: crEncode(string)}]
- * - array → map each block (text → crEncode; tool_result → recurse into .content)
+ * - array → map each block (text → crEncode; tool_result → Claude Code MCP final shape)
  * - other → unchanged
  *
  * Exported so the query-direct path (queryDirect.ts) can produce SDK input
@@ -402,15 +402,22 @@ export function normalizeUserContentForSdkPath(content: any): any[] {
   return Array.isArray(normalized) ? normalized : []
 }
 
-/** Per-block variant: never wraps a string into an array (used for
- *  `tool_result.content` which must stay a string-or-block-list per Anthropic). */
+type NormalizedMcpToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+
+type SdkToolResultContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+
+/** Per-block variant for user-side SDK input. */
 function crEncodeUserBlock(block: any): any {
   if (block == null || typeof block !== "object") return block
   if (block.type === "text" && typeof block.text === "string") {
     return { ...block, text: crEncode(block.text) }
   }
   if (block.type === "tool_result") {
-    return { ...block, content: crEncodeToolResultContent(block.content) }
+    return normalizeToolResultBlockForSdk(block)
   }
   // Non-standard `tool_reference` block (some clients emit it inside
   // tool_result.content to nudge the model toward a related tool). Anthropic
@@ -423,12 +430,91 @@ function crEncodeUserBlock(block: any): any {
   return block
 }
 
-/** tool_result.content: string stays string (crEncoded); array → map blocks. */
-function crEncodeToolResultContent(content: any): any {
-  if (content == null) return content
-  if (typeof content === "string") return crEncode(content)
-  if (Array.isArray(content)) return content.map(crEncodeUserBlock)
-  return content
+function normalizeToolResultContentForMcp(content: unknown): NormalizedMcpToolContent[] {
+  const out: NormalizedMcpToolContent[] = []
+  if (typeof content === "string") {
+    out.push({ type: "text", text: crEncode(content) })
+  } else if (Array.isArray(content)) {
+    for (const b of content) {
+      if (!b || typeof b !== "object") continue
+      const rec = b as Record<string, unknown>
+      if (rec.type === "text" && typeof rec.text === "string") {
+        out.push({ type: "text", text: crEncode(rec.text) })
+      } else if (rec.type === "image" && rec.source && typeof rec.source === "object") {
+        const src = rec.source as Record<string, unknown>
+        const data = typeof src.data === "string" ? src.data : ""
+        const mimeType = typeof src.media_type === "string" ? src.media_type : "image/png"
+        if (data) out.push({ type: "image", data, mimeType })
+      } else if (rec.type === "tool_reference" && typeof rec.tool_name === "string") {
+        out.push({ type: "text", text: crEncode(`tool_reference: ${rec.tool_name}`) })
+      } else if (typeof rec.text === "string") {
+        out.push({ type: "text", text: crEncode(rec.text) })
+      }
+    }
+  } else if (content == null) {
+    // empty content: leave array empty
+  } else {
+    out.push({ type: "text", text: crEncode(String(content)) })
+  }
+  return out
+}
+
+function mcpContentToSdkToolResultContent(content: NormalizedMcpToolContent[]): SdkToolResultContentBlock[] {
+  return content.map((block) => {
+    if (block.type === "text") return block
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: block.mimeType,
+        data: block.data,
+      },
+    }
+  })
+}
+
+function formatMcpToolErrorContent(content: string): string {
+  if (content.length <= 10000) return content
+  const halfLength = 5000
+  const start = content.slice(0, halfLength)
+  const end = content.slice(-halfLength)
+  return `${start}\n\n... [${content.length - 10000} characters truncated] ...\n\n${end}`
+}
+
+/**
+ * Normalize a client-sent Anthropic `tool_result` block to the same model-facing
+ * block Claude Code emits after our blocking MCP handler resolves.
+ *
+ * Success path:
+ *   MCP CallToolResult.content -> processMCPResult -> MCPTool.mapToolResult...
+ *   => { tool_use_id, type:"tool_result", content: ContentBlockParam[] }
+ *
+ * Error path:
+ *   MCP CallToolResult.isError -> McpToolCallError -> formatError
+ *   => { type:"tool_result", content: string, is_error:true, tool_use_id }
+ */
+function normalizeToolResultBlockForSdk(block: any): any {
+  const content = normalizeToolResultContentForMcp(block?.content)
+  const toolUseId = block?.tool_use_id
+
+  if (block?.is_error) {
+    const first = content[0]
+    const errorContent = first?.type === "text"
+      ? formatMcpToolErrorContent(first.text)
+      : "Unknown error"
+    return {
+      type: "tool_result",
+      content: errorContent,
+      is_error: true,
+      tool_use_id: toolUseId,
+    }
+  }
+
+  return {
+    tool_use_id: toolUseId,
+    type: "tool_result",
+    content: mcpContentToSdkToolResultContent(content),
+  }
 }
 
 /** Validate that a string is a UUID — used to accept client-supplied ids unchanged. */
@@ -787,13 +873,11 @@ export async function prepareFreshSession(
  *  - block array    → preserve text blocks; image blocks remapped to MCP shape
  *  - `is_error`      → `isError: true`
  *
- * `crEncode` is applied to every text payload so the bytes the SDK sees here
- * (and replays on every subsequent in-memory turn) match what
- * `crEncodeToolResultContent` would write if the same tool_result was
- * rebuilt into JSONL on a follow-up request. Without this the agent-loop
- * cache entries are keyed on raw text while the follow-up JSONL's prefix
- * starts with CR-escaped text — prefix bytes diverge at the first
- * tool_result turn and every mid-loop cache entry is invalidated.
+ * `crEncode` is applied to every text payload and the content normalization is
+ * shared with the JSONL rebuild path. That keeps the eventual Anthropic
+ * `tool_result` block shape/fields/content identical whether the result
+ * reaches Claude Code through the live MCP continuation or through resumed
+ * JSONL history on a later request.
  */
 export function normalizeToolResultForMcp(block: {
   type?: string
@@ -801,34 +885,6 @@ export function normalizeToolResultForMcp(block: {
   content?: unknown
   is_error?: boolean
 }): { content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean } {
-  const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = []
-  const raw = block.content
-  if (typeof raw === "string") {
-    content.push({ type: "text", text: crEncode(raw) })
-  } else if (Array.isArray(raw)) {
-    for (const b of raw) {
-      if (!b || typeof b !== "object") continue
-      const rec = b as Record<string, unknown>
-      if (rec.type === "text" && typeof rec.text === "string") {
-        content.push({ type: "text", text: crEncode(rec.text) })
-      } else if (rec.type === "image" && rec.source && typeof rec.source === "object") {
-        const src = rec.source as Record<string, unknown>
-        const data = typeof src.data === "string" ? src.data : ""
-        const mimeType = typeof src.media_type === "string" ? src.media_type : "image/png"
-        if (data) content.push({ type: "image", data, mimeType })
-      } else if (rec.type === "tool_reference" && typeof rec.tool_name === "string") {
-        // Mirror crEncodeUserBlock: collapse tool_reference to a text block so
-        // the bytes the MCP handler sees match what a follow-up JSONL rebuild
-        // would produce (cache-prefix parity).
-        content.push({ type: "text", text: crEncode(`tool_reference: ${rec.tool_name}`) })
-      } else if (typeof rec.text === "string") {
-        content.push({ type: "text", text: crEncode(rec.text) })
-      }
-    }
-  } else if (raw == null) {
-    // empty content — leave array empty
-  } else {
-    content.push({ type: "text", text: crEncode(String(raw)) })
-  }
+  const content = normalizeToolResultContentForMcp(block.content)
   return block.is_error ? { content, isError: true } : { content }
 }

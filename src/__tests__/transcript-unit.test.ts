@@ -165,7 +165,7 @@ describe("buildJsonlLines", () => {
     }
   })
 
-  it("preserves tool_result block structure on user messages (crEncode applied to body)", () => {
+  it("preserves tool_result block structure on user messages (Claude Code MCP success shape)", () => {
     const toolResult = {
       type: "tool_result",
       tool_use_id: "toolu_abc",
@@ -187,7 +187,7 @@ describe("buildJsonlLines", () => {
     expect(row.message.content[0]).toEqual({
       type: "tool_result",
       tool_use_id: "toolu_abc",
-      content: "file\r contents\r here",
+      content: [{ type: "text", text: "file\r contents\r here" }],
       cache_control: { type: "ephemeral", ttl: "1h" },
     })
   })
@@ -277,7 +277,7 @@ describe("buildJsonlLines", () => {
     })
   })
 
-  it("applies crEncode inside tool_result content (string)", () => {
+  it("applies crEncode inside successful tool_result content and emits SDK content blocks", () => {
     const { lines } = buildJsonlLines(
       [
         { role: "user", content: "read it" },
@@ -292,7 +292,7 @@ describe("buildJsonlLines", () => {
     expect(toolResultRow.message.content[0]).toEqual({
       type: "tool_result",
       tool_use_id: "t1",
-      content: "file\r body\r here",
+      content: [{ type: "text", text: "file\r body\r here" }],
       cache_control: { type: "ephemeral", ttl: "1h" },
     })
   })

@@ -40,6 +40,12 @@ function hasSyntheticAssistant(rows: any[]): boolean {
   )
 }
 
+function withoutCacheControl(block: any): any {
+  if (!block || typeof block !== "object") return block
+  const { cache_control: _cacheControl, ...rest } = block
+  return rest
+}
+
 describe("prepareFreshSession (ephemeral/blocking share identical JSONL construction)", () => {
   it("lone-user: filler appended, prompt = 'Continue from where you left off.', JSONL ends on assistant", async () => {
     const cwd = await tmpCwd()
@@ -70,6 +76,28 @@ describe("prepareFreshSession (ephemeral/blocking share identical JSONL construc
     expect(rows[rows.length - 1]!.type).toBe("assistant")
   })
 
+  it("trailing error tool_result: JSONL mirrors Claude Code MCP error block", async () => {
+    const cwd = await tmpCwd()
+    const messages = [
+      { role: "user", content: "do something" },
+      { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "Read", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_1", content: "oops", is_error: true }] },
+    ]
+    const { sessionId, wroteTranscript } = await prepareFreshSession(messages, cwd, {})
+    expect(wroteTranscript).toBe(true)
+    const rows = await readJsonl(cwd, sessionId)
+    const toolResult = rows
+      .flatMap(r => Array.isArray(r.message?.content) ? r.message.content : [])
+      .find(b => b?.type === "tool_result")
+    expect(Object.keys(withoutCacheControl(toolResult))).toEqual(["type", "content", "is_error", "tool_use_id"])
+    expect(withoutCacheControl(toolResult)).toEqual({
+      type: "tool_result",
+      content: crEncode("oops"),
+      is_error: true,
+      tool_use_id: "tu_1",
+    })
+  })
+
   it("trailing tool_use + tool_result: filler appended, prompt = 'Continue from where you left off.'", async () => {
     const cwd = await tmpCwd()
     const messages = [
@@ -82,6 +110,15 @@ describe("prepareFreshSession (ephemeral/blocking share identical JSONL construc
     expect(lastUserPrompt).toBe("Continue from where you left off.")
     const rows = await readJsonl(cwd, sessionId)
     expect(hasSyntheticAssistant(rows)).toBe(true)
+    const toolResult = rows
+      .flatMap(r => Array.isArray(r.message?.content) ? r.message.content : [])
+      .find(b => b?.type === "tool_result")
+    expect(Object.keys(withoutCacheControl(toolResult))).toEqual(["tool_use_id", "type", "content"])
+    expect(withoutCacheControl(toolResult)).toEqual({
+      tool_use_id: "tu_1",
+      type: "tool_result",
+      content: [{ type: "text", text: crEncode("ok") }],
+    })
     expect(rows[rows.length - 1]!.type).toBe("assistant")
   })
 
@@ -152,11 +189,11 @@ describe("normalizeToolResultForMcp", () => {
     expect(result.content).toEqual([{ type: "text", text: crEncode("oops") }])
   })
 
-  it("text bytes match crEncodeToolResultContent output for cache-prefix parity", () => {
+  it("text bytes match the JSONL model-facing block content for cache-prefix parity", () => {
     // Cache-parity guarantee: the bytes handed to the MCP handler during the
-    // agent loop MUST equal the bytes a follow-up JSONL rebuild would produce
-    // from the same client-sent string. If this invariant breaks, prior
-    // mid-loop cache_control markers are invalidated on the next user turn.
+    // agent loop MUST equal the text bytes in a follow-up JSONL rebuild. The
+    // JSONL wrapper shape is tested above because Claude Code sends successful
+    // MCP tool outputs as tool_result.content block arrays.
     const raw = "line one: details (v1) -> result"
     const result = normalizeToolResultForMcp({
       type: "tool_result",
