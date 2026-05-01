@@ -59,9 +59,17 @@ export function cacheBreakpointOnTrailingOnly(
   if (n === 0) return true
   const lastIdx = n - 1
   for (let i = 0; i < n; i++) {
-    if (i === lastIdx) continue
     const m = messages[i]
     if (!m || !Array.isArray(m.content)) continue
+    if (i === lastIdx) {
+      for (let j = 0; j < m.content.length - 1; j++) {
+        const block = m.content[j]
+        if (block && typeof block === "object" && block.cache_control) {
+          return false
+        }
+      }
+      continue
+    }
     for (const block of m.content) {
       if (block && typeof block === "object" && block.cache_control) {
         return false

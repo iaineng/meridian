@@ -242,4 +242,26 @@ describe("cacheBreakpointOnTrailingOnly", () => {
       cacheBreakpointOnTrailingOnly([uString("x"), uString("y")]),
     ).toBe(true)
   })
+
+  it("cc on non-trailing block within last message → false", () => {
+    expect(
+      cacheBreakpointOnTrailingOnly([
+        { role: "user", content: [
+          { type: "text", text: "anchor", cache_control: { type: "ephemeral" } },
+          { type: "text", text: "trailing" },
+        ] },
+      ]),
+    ).toBe(false)
+  })
+
+  it("cc on trailing block within last message → true", () => {
+    expect(
+      cacheBreakpointOnTrailingOnly([
+        { role: "user", content: [
+          { type: "text", text: "first" },
+          { type: "text", text: "last", cache_control: { type: "ephemeral" } },
+        ] },
+      ]),
+    ).toBe(true)
+  })
 })
