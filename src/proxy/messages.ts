@@ -15,6 +15,31 @@ function stripCacheControlForHashing(obj: any): any {
 }
 
 /**
+ * Canonical-JSON encode: deeply sort object keys before serialising. Used
+ * for tool_use inputs so hashes and drift checks ignore object insertion
+ * order while preserving array order.
+ */
+export function canonicalJson(v: unknown): string {
+  return JSON.stringify(canonicalizeValue(v))
+}
+
+function canonicalizeValue(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v
+  if (Array.isArray(v)) return v.map(canonicalizeValue)
+  const sorted: Record<string, unknown> = {}
+  for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+    sorted[k] = canonicalizeValue((v as Record<string, unknown>)[k])
+  }
+  return sorted
+}
+
+function normalizeToolUseForHashing(block: any, options?: { relaxedToolUseInput?: boolean }): string {
+  const name = typeof block.name === "string" ? block.name : ""
+  if (options?.relaxedToolUseInput) return `tool_use:${name}`
+  return `tool_use:${name}:${canonicalJson(block.input)}`
+}
+
+/**
  * Normalize message content to a string for hashing and comparison.
  * Handles both string content and array content (Anthropic content blocks).
  * Strips cache_control metadata to ensure hash stability across requests.
@@ -23,8 +48,10 @@ function stripCacheControlForHashing(obj: any): any {
  * an array on subsequent ones. This normalizer handles both formats.
  * Other agents may behave differently — this will move to the adapter pattern.
  *
- * `options.relaxedToolUseInput` (default false) drops the `id` and `input`
- * portions of `tool_use` blocks from the hash, leaving only the tool name.
+ * Strict `tool_use` hashing mirrors `verifyEmittedAssistant`: ignore `id`,
+ * compare name, and canonical-JSON encode input (object key order ignored,
+ * array order preserved). `options.relaxedToolUseInput` (default false) also
+ * drops the `input` portion of `tool_use` blocks, leaving only the tool name.
  * Mirrors the relaxation in `verifyEmittedAssistant({skipInputCheck:true})`
  * so the blocking-pool prefix lookup tolerates the same client-side
  * rewrites the drift check tolerates. Used only by the blocking handler;
@@ -39,8 +66,7 @@ export function normalizeContent(
     return content.map((block: any) => {
       if (block.type === "text" && block.text) return block.text
       if (block.type === "tool_use") {
-        if (options?.relaxedToolUseInput) return `tool_use:${block.name}`
-        return `tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`
+        return normalizeToolUseForHashing(block, options)
       }
       if (block.type === "tool_result") {
         const inner = block.content

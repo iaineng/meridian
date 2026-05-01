@@ -6,7 +6,7 @@
  */
 
 import { xxh64 as xxh64BigInt } from "@node-rs/xxhash"
-import { normalizeContent } from "../messages"
+import { canonicalJson, normalizeContent } from "../messages"
 import { diagnosticLog } from "../../telemetry"
 
 /** 64-bit xxHash → 16-char hex string. */
@@ -141,25 +141,6 @@ export function measurePrefixOverlap(storedHashes: string[], incomingHashes: str
  */
 export type EmittedAssistantBlock =
   | { type: "tool_use"; name: string; input: unknown }
-
-/**
- * Canonical-JSON encode: deeply sort object keys before serialising. Used
- * to compare tool_use `input` objects independent of key insertion order.
- * Arrays preserve order; primitives pass through.
- */
-function canonicalJson(v: unknown): string {
-  return JSON.stringify(canonicalizeValue(v))
-}
-
-function canonicalizeValue(v: unknown): unknown {
-  if (v === null || typeof v !== "object") return v
-  if (Array.isArray(v)) return v.map(canonicalizeValue)
-  const sorted: Record<string, unknown> = {}
-  for (const k of Object.keys(v as Record<string, unknown>).sort()) {
-    sorted[k] = canonicalizeValue((v as Record<string, unknown>)[k])
-  }
-  return sorted
-}
 
 /**
  * Compute a fingerprint hash over a request's `tools` array.

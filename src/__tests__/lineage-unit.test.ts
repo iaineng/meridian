@@ -623,11 +623,28 @@ describe("computeMessageHashes with relaxedToolUseInput", () => {
     ],
   })
 
-  it("strict mode: differing input or id changes the hash", () => {
+  it("strict mode: differing input changes the hash, rewritten id does not", () => {
     const a = hashMessage(assistantWithToolUse("tu_01", "Bash", { cmd: "ls /tmp" }))
     const b = hashMessage(assistantWithToolUse("tu_01", "Bash", { cmd: "ls -la /tmp" }))
     const c = hashMessage(assistantWithToolUse("tu_REWRITTEN", "Bash", { cmd: "ls /tmp" }))
     expect(a).not.toBe(b)
+    expect(a).toBe(c)
+  })
+
+  it("strict mode: input object key order is ignored, array order is preserved", () => {
+    const a = hashMessage(assistantWithToolUse("tu_01", "Bash", {
+      args: ["a", "b"],
+      opts: { recursive: true, depth: 2 },
+    }))
+    const b = hashMessage(assistantWithToolUse("tu_REWRITTEN", "Bash", {
+      opts: { depth: 2, recursive: true },
+      args: ["a", "b"],
+    }))
+    const c = hashMessage(assistantWithToolUse("tu_01", "Bash", {
+      args: ["b", "a"],
+      opts: { recursive: true, depth: 2 },
+    }))
+    expect(a).toBe(b)
     expect(a).not.toBe(c)
   })
 

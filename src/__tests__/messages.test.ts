@@ -17,8 +17,15 @@ describe("normalizeContent", () => {
   it("handles tool_use blocks", () => {
     const content = [{ type: "tool_use", id: "tu_1", name: "Read", input: { file: "a.ts" } }]
     const result = normalizeContent(content)
-    expect(result).toContain("tool_use:tu_1:Read:")
+    expect(result).toContain("tool_use:Read:")
     expect(result).toContain('"file":"a.ts"')
+    expect(result).not.toContain("tu_1")
+  })
+
+  it("normalizes tool_use ids and input object key order like drift checks", () => {
+    const a = [{ type: "tool_use", id: "tu_1", name: "Read", input: { path: "a.ts", opts: { depth: 1, mode: "r" } } }]
+    const b = [{ type: "tool_use", id: "tu_REWRITTEN", name: "Read", input: { opts: { mode: "r", depth: 1 }, path: "a.ts" } }]
+    expect(normalizeContent(a)).toBe(normalizeContent(b))
   })
 
   it("handles tool_result blocks with string content", () => {
