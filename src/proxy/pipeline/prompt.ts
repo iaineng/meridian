@@ -46,17 +46,30 @@ export function buildPromptBundle(input: BuildPromptBundleInput): PromptBundle {
   const lastContent = messagesToConvert[0]?.content
 
   // Empty-prompt sentinel: paired with `useSdkInterruptedResume` in
-  // `prepareFreshSession`. Hand the SDK an immediately-closing AsyncIterable
-  // so `streamInput` ends the SDK→claude.exe stdin without writing any
-  // user-message frame. Passing the literal string `""` doesn't work — the
-  // SDK's `yK` still serialises a `{type:"user", content:[{type:"text",
-  // text:""}]}` frame, which lands behind the m3-injected auto-resume in
-  // claude.exe's prompt queue and triggers a second turn whose empty text
-  // block fails the SDK's `addCacheBreakpoints` (cc-on-empty-text). With an
-  // empty iterable, only the m3-injected interrupted-turn prompt drives the
-  // agent.
+  // `prepareFreshSession`. We need to hand the SDK something so the
+  // bidirectional channel stays open until the run completes — but it must
+  // not become a user frame for claude.exe.
+  //
+  // Yielding a single `{type:"keep_alive"}` satisfies both:
+  //  - SDK's `streamInput` only awaits `waitForFirstResult` (and thus only
+  //    keeps stdin open for control-RPC like `mcp_message`) when
+  //    `X > 0 && hasBidirectionalNeeds()`. An empty iterable leaves X=0 and
+  //    short-circuits the await; SDK closes claude.exe's stdin immediately,
+  //    so the SDK MCP `tools/list` round-trip never gets its response and
+  //    every passthrough tool is dropped from the API request.
+  //  - claude.exe's `processLine` (cli.js) returns immediately on
+  //    `type === "keep_alive"`, so the message is not enqueued as a prompt
+  //    and does not interfere with the m3-injected auto-resume.
+  //
+  // Passing the literal string `""` is still wrong — the SDK's `yK`
+  // serialises it as `{type:"user", content:[{type:"text", text:""}]}`,
+  // which lands in claude.exe's prompt queue behind the auto-resume and
+  // triggers a second turn whose empty text fails `addCacheBreakpoints`.
   if (lastContent === "") {
-    return { toolPrefix, makePrompt: () => (async function* () {})() }
+    return {
+      toolPrefix,
+      makePrompt: () => (async function* () { yield { type: "keep_alive" } })(),
+    }
   }
 
   const content = typeof lastContent === "string"
