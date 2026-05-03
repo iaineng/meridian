@@ -1,14 +1,14 @@
 /**
  * Dynamic MCP tool registration for passthrough mode.
  *
- * In passthrough mode, OpenCode's tools need to be real callable tools
- * (not just text descriptions in the prompt). We create an MCP server
- * that registers each tool from OpenCode's request with a normalised
- * kebab-case MCP name and the original schema, so Claude generates proper
- * tool_use blocks while the client still receives its original tool names.
+ * The client's tools need to be real callable tools (not just text
+ * descriptions in the prompt). We create an MCP server that registers
+ * each tool from the request with a normalised kebab-case MCP name and
+ * the original schema, so Claude generates proper tool_use blocks while
+ * the client still receives its original tool names.
  *
- * Tool handlers are no-ops — the PreToolUse hook blocks execution.
- * We just need the definitions so Claude can call them.
+ * In blocking mode the handler suspends on a Promise until the next HTTP
+ * round delivers a matching tool_result.
  */
 
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
@@ -42,7 +42,7 @@ export {
 
 /**
  * Convert a JSON Schema object to a Zod schema (simplified).
- * Handles the common types OpenCode sends. Falls back to z.any() for complex types.
+ * Handles the common types clients send. Falls back to z.any() for complex types.
  */
 function jsonSchemaToZod(schema: any): z.ZodTypeAny {
   if (!schema || typeof schema !== "object") return z.any()
@@ -77,7 +77,7 @@ function jsonSchemaToZod(schema: any): z.ZodTypeAny {
 }
 
 /**
- * Create an MCP server with tool definitions matching OpenCode's request.
+ * Create an MCP server with tool definitions matching the client's request.
  */
 export function createPassthroughMcpServer(
   tools: Array<{ name: string; description?: string; input_schema?: any }>
@@ -94,7 +94,7 @@ export function createPassthroughMcpServer(
     clientNameByFullToolName.set(fullToolName, tool.name)
 
     try {
-      // Convert OpenCode's JSON Schema to Zod for MCP registration
+      // Convert the client's JSON Schema to Zod for MCP registration
       const zodSchema = tool.input_schema?.properties
         ? jsonSchemaToZod(tool.input_schema)
         : z.object({})
@@ -128,7 +128,7 @@ export function createPassthroughMcpServer(
 }
 
 /**
- * Strip the MCP prefix from a tool name to get the OpenCode tool name.
+ * Strip the MCP prefix from a tool name to get the client tool name.
  * e.g., "mcp__oc__todowrite" → "todowrite"
  */
 export function stripMcpPrefix(toolName: string): string {

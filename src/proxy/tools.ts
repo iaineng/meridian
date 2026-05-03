@@ -1,62 +1,46 @@
 /**
- * Tool blocking lists and MCP tool configuration.
+ * SDK built-in tool blocking lists.
  *
- * NOTE: These lists are currently OpenCode-specific. When the adapter pattern
- * is implemented, these will move into the OpenCode adapter and become
- * configurable per-agent. See DEFERRED.md.
+ * Meridian runs in passthrough mode: every tool the client sends is
+ * forwarded back through a dynamic MCP server for the client to execute.
+ * The lists below tell the SDK which of its built-ins to block so the
+ * model never tries to call them — either because the client provides a
+ * better equivalent, or because they are Claude Code-only mechanisms with
+ * no generic counterpart.
  */
 
 /**
- * Block SDK built-in tools so Claude only uses MCP tools
- * (which have correct param names for the calling agent).
+ * SDK built-in file/tool implementations. Blocked so the model uses the
+ * client's MCP-forwarded equivalents (which match the client's tool
+ * naming and parameter shape).
  */
 export const BLOCKED_BUILTIN_TOOLS = [
   "Read", "Write", "Edit", "MultiEdit",
   "Bash", "Glob", "Grep", "NotebookEdit",
   "WebFetch", "WebSearch", "TodoWrite",
   "RemoteTrigger", "Monitor", "ScheduleWakeup",
-  "PushNotification"
+  "PushNotification",
 ]
 
 /**
- * Claude Code SDK tools that have NO equivalent in the calling agent (OpenCode).
- * Only block these — everything else either has an agent equivalent
- * or is handled by the agent's own tool system.
- *
- * Tools where the agent has an equivalent but with a DIFFERENT name/schema
- * are blocked so Claude uses the agent's version instead of the SDK's.
+ * Claude Code SDK tools that have no generic equivalent. Blocked because
+ * a Claude Code-only mechanism would be a no-op for any other client.
  */
 export const CLAUDE_CODE_ONLY_TOOLS = [
   "ToolSearch",        // Claude Code deferred tool loading (internal mechanism)
   "CronCreate",        // Claude Code cron jobs
-  "CronDelete",        // Claude Code cron jobs
-  "CronList",          // Claude Code cron jobs
-  "EnterPlanMode",     // Claude Code mode switching (OpenCode uses plan agent instead)
-  "ExitPlanMode",      // Claude Code mode switching
+  "CronDelete",
+  "CronList",
+  "EnterPlanMode",     // Claude Code mode switching
+  "ExitPlanMode",
   "EnterWorktree",     // Claude Code git worktree management
-  "ExitWorktree",      // Claude Code git worktree management
+  "ExitWorktree",
   "NotebookEdit",      // Jupyter notebook editing
-  // Schema-incompatible: SDK tool name differs from OpenCode's.
-  // If Claude calls the SDK version, OpenCode won't recognize it.
-  // Block the SDK's so Claude only sees OpenCode's definitions.
-  "TodoWrite",         // OpenCode: todowrite (requires 'priority' field)
-  "AskUserQuestion",   // OpenCode: question
-  "Skill",             // OpenCode: skill / skill_mcp / slashcommand
-  "Agent",             // OpenCode: delegate_task / task
-  "TaskOutput",        // OpenCode: background_output
-  "TaskStop",          // OpenCode: background_cancel
-  "WebSearch",         // OpenCode: websearch_web_search_exa
-]
-
-/** MCP server name used by the calling agent */
-export const MCP_SERVER_NAME = "opencode"
-
-/** MCP tools that are allowed through the proxy's tool filter */
-export const ALLOWED_MCP_TOOLS = [
-  `mcp__${MCP_SERVER_NAME}__read`,
-  `mcp__${MCP_SERVER_NAME}__write`,
-  `mcp__${MCP_SERVER_NAME}__edit`,
-  `mcp__${MCP_SERVER_NAME}__bash`,
-  `mcp__${MCP_SERVER_NAME}__glob`,
-  `mcp__${MCP_SERVER_NAME}__grep`
+  "TodoWrite",
+  "AskUserQuestion",
+  "Skill",
+  "Agent",
+  "TaskOutput",
+  "TaskStop",
+  "WebSearch",
 ]

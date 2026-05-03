@@ -1,6 +1,5 @@
 import type { TokenUsage } from "../session/lineage"
 import { telemetryStore } from "../../telemetry"
-import { envBool } from "../../env"
 import type { SharedRequestContext } from "./context"
 import type { HandlerContext } from "../handlers/types"
 
@@ -22,7 +21,6 @@ export function logUsage(requestId: string, usage: TokenUsage): void {
 export interface RequestTelemetryContext {
   requestMeta: { requestId: string; queueEnteredAt: number; queueStartedAt: number }
   requestStartAt: number
-  adapterName: string
 }
 
 // Proxy overhead = time inside the handler *before* the upstream SDK call
@@ -38,8 +36,6 @@ export interface RecordSuccessInput {
   sdkSessionId: string | undefined
   contentBlocks: number
   textEvents: number
-  /** Possibly-flipped passthrough value from the hook bundle. */
-  passthrough: boolean
 }
 
 /**
@@ -57,21 +53,10 @@ export function recordRequestSuccess(
   telemetryStore.record({
     requestId: ctx.requestMeta.requestId,
     timestamp: now,
-    adapter: ctx.adapterName,
     model: shared.model,
     requestModel: shared.body.model || undefined,
     mode: input.mode,
-    isResume: handler.isResume,
-    isPassthrough: input.passthrough,
-    isEphemeral: handler.isEphemeral,
-    // Plain ephemeral has no real session lineage — collapse to undefined so
-    // it doesn't pollute the Lineage breakdown. Blocking-MCP variants keep
-    // their explicit lineageType so the dashboard can render "blocking" /
-    // "blocking_continuation" badges on the request row.
-    lineageType: (handler.isEphemeral && handler.lineageType !== "blocking" && handler.lineageType !== "blocking_continuation")
-      || handler.lineageType === "ephemeral"
-      ? undefined
-      : handler.lineageType,
+    lineageType: handler.lineageType,
     messageCount: shared.allMessages.length,
     sdkSessionId: input.sdkSessionId,
     status: 200,
@@ -89,7 +74,7 @@ export function recordRequestSuccess(
 /**
  * Record a request that errored before producing a successful response.
  * This path cannot use the shared/handler bundles because buildSharedContext
- * may have failed early — falls back to envBool() for passthrough/ephemeral.
+ * may have failed early.
  */
 export function recordRequestError(
   ctx: RequestTelemetryContext,
@@ -100,20 +85,14 @@ export function recordRequestError(
   telemetryStore.record({
     requestId: ctx.requestMeta.requestId,
     timestamp: now,
-    adapter: ctx.adapterName,
     model: "unknown",
     requestModel: undefined,
     mode: "non-stream",
-    isResume: false,
-    isPassthrough: envBool("PASSTHROUGH"),
-    isEphemeral: envBool("EPHEMERAL_JSONL"),
     lineageType: undefined,
     messageCount: undefined,
     sdkSessionId: undefined,
     status: classified.status,
     queueWaitMs,
-    // Error path never reaches `upstreamStartAt`; treat the full in-handler
-    // duration as proxy overhead. `queueWaitMs` is tracked separately.
     proxyOverheadMs: Math.max(0, now - ctx.requestStartAt),
     ttfbMs: null,
     upstreamDurationMs: now - ctx.requestStartAt,

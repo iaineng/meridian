@@ -3,5 +3,4 @@
  */
 export { computeLineageHash, hashMessage, computeMessageHashes, verifyLineage, measurePrefixOverlap, measureSuffixOverlap, verifyEmittedAssistant, computeSystemFingerprint, MIN_SUFFIX_FOR_COMPACTION } from "./lineage"
 export type { SessionState, LineageResult, SessionCacheLike, EmittedAssistantBlock } from "./lineage"
-export { extractClientCwd, getConversationFingerprint } from "./fingerprint"
-export { lookupSession, storeSession, clearSessionCache, getMaxSessionsLimit, evictSession } from "./cache"
+export { getConversationFingerprint } from "./fingerprint"

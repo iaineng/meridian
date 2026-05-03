@@ -1,9 +1,8 @@
 /**
  * Multi-profile support.
  *
- * Allows a single Meridian instance to route requests to different Claude
- * accounts. Each profile is a named auth context (a CLAUDE_CONFIG_DIR for
- * Max subscriptions, or an API key for direct API access).
+ * Allows a single Meridian instance to route requests to different Claude Max
+ * accounts. Each profile is a named CLAUDE_CONFIG_DIR.
  *
  * Profile selection priority:
  *   1. x-meridian-profile request header (per-request override)
@@ -50,24 +49,15 @@ export function loadProfilesFromDisk(): ProfileConfig[] {
   }
 }
 
-export type ProfileType = "claude-max" | "api"
-
 export interface ProfileConfig {
   /** Unique profile identifier (e.g. "personal", "work") */
   id: string
-  /** Auth type — "claude-max" uses CLAUDE_CONFIG_DIR, "api" uses ANTHROPIC_API_KEY */
-  type?: ProfileType
-  /** Path to .claude config directory (claude-max profiles) */
+  /** Path to .claude config directory */
   claudeConfigDir?: string
-  /** Anthropic API key (api profiles) */
-  apiKey?: string
-  /** Anthropic base URL override (api profiles) */
-  baseUrl?: string
 }
 
 export interface ResolvedProfile {
   id: string
-  type: ProfileType
   /** Env vars to overlay on the SDK subprocess environment */
   env: Record<string, string>
 }
@@ -109,7 +99,6 @@ export function restoreActiveProfile(configProfiles?: ProfileConfig[]): void {
   if (!diskDiscoveryEnabled) return // tests / programmatic usage — don't read disk
   const saved = getSetting("activeProfile")
   if (!saved) return
-  // Validate the saved profile exists in the effective profile list
   const effective = getEffectiveProfiles(configProfiles)
   if (effective.length === 0 || effective.some(p => p.id === saved)) {
     activeProfileId = saved
@@ -118,11 +107,6 @@ export function restoreActiveProfile(configProfiles?: ProfileConfig[]): void {
   }
 }
 
-/**
- * Get the effective profile list: config-provided profiles merged with
- * disk-loaded profiles. Disk profiles are re-read on each call so new
- * profiles added via `meridian profile add` are picked up without restart.
- */
 /** Whether disk auto-discovery is enabled (set by CLI at startup) */
 let diskDiscoveryEnabled = false
 
@@ -137,7 +121,6 @@ export function getEffectiveProfiles(configProfiles: ProfileConfig[] | undefined
   const fromConfig = configProfiles ?? []
   if (!diskDiscoveryEnabled) return fromConfig
   const fromDisk = loadProfilesFromDisk()
-  // Config (env var) takes precedence; disk fills in anything not already defined
   const configIds = new Set(fromConfig.map(p => p.id))
   return [...fromConfig, ...fromDisk.filter(p => !configIds.has(p.id))]
 }
@@ -161,12 +144,10 @@ export function resolveProfile(
 ): ResolvedProfile {
   const effective = getEffectiveProfiles(profiles)
 
-  // No profiles configured — return empty env (standard single-account mode)
   if (effective.length === 0) {
-    return { id: DEFAULT_PROFILE_ID, type: "claude-max", env: {} }
+    return { id: DEFAULT_PROFILE_ID, env: {} }
   }
 
-  // Priority: header > active > config default > first profile
   const resolvedId = requestedId || activeProfileId || defaultProfile || effective[0]!.id
   const profile = effective.find(p => p.id === resolvedId)
 
@@ -178,39 +159,25 @@ export function resolveProfile(
   return buildResolvedProfile(profile)
 }
 
-/**
- * Build env overrides for a profile config.
- */
 function buildResolvedProfile(profile: ProfileConfig): ResolvedProfile {
-  const type = profile.type ?? "claude-max"
-
-  if (type === "api") {
-    const env: Record<string, string> = {}
-    if (profile.apiKey) env.ANTHROPIC_API_KEY = profile.apiKey
-    if (profile.baseUrl) env.ANTHROPIC_BASE_URL = profile.baseUrl
-    return { id: profile.id, type, env }
-  }
-
-  // claude-max: override config directory
   const env: Record<string, string> = {}
   if (profile.claudeConfigDir) env.CLAUDE_CONFIG_DIR = profile.claudeConfigDir
-  return { id: profile.id, type, env }
+  return { id: profile.id, env }
 }
 
 /**
- * Get all configured profile IDs with their types.
+ * Get all configured profile IDs.
  */
 export function listProfiles(
   profiles: ProfileConfig[] | undefined,
   defaultProfile: string | undefined
-): Array<{ id: string; type: ProfileType; isActive: boolean }> {
+): Array<{ id: string; isActive: boolean }> {
   const effective = getEffectiveProfiles(profiles)
   if (effective.length === 0) return []
 
   const currentActive = activeProfileId || defaultProfile || effective[0]!.id
   return effective.map(p => ({
     id: p.id,
-    type: p.type ?? "claude-max",
     isActive: p.id === currentActive,
   }))
 }

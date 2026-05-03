@@ -4,7 +4,7 @@ Project guidelines for AI agents working in this codebase.
 
 ## What This Is
 
-A proxy that bridges OpenCode (Anthropic API format) to Claude Max (Agent SDK). See `ARCHITECTURE.md` for the full module map and dependency rules.
+A proxy that exposes any Anthropic API client to Claude Max via the Claude Agent SDK. The proxy is agent-agnostic — it accepts the standard `POST /v1/messages` shape with optional `x-meridian-*` headers. See `ARCHITECTURE.md` for the full module map and dependency rules.
 
 ## Commands
 
@@ -22,14 +22,6 @@ npm start         # Start the proxy server
 - **`session/lineage.ts` must stay pure.** No side effects, no I/O, no imports from cache or server.
 - **Leaf modules (`errors.ts`, `models.ts`, `tools.ts`, `messages.ts`) must not import from `server.ts` or `session/`.** Dependencies flow downward only.
 - **No circular dependencies.**
-
-### Agent-Specific Logic
-
-OpenCode-specific behavior is documented in `ARCHITECTURE.md` under "Agent-Specific Logic". When modifying these areas:
-
-- Add a `NOTE:` comment marking the code as agent-specific
-- Do not spread agent-specific logic into new modules
-- Future work will use an adapter pattern — see `DEFERRED.md`
 
 ### Testing
 
@@ -49,29 +41,24 @@ OpenCode-specific behavior is documented in `ARCHITECTURE.md` under "Agent-Speci
 
 ## Environment Flags (selected)
 
-- `MERIDIAN_EPHEMERAL_JSONL=1` — Per-request one-shot JSONL mode. Bypasses session cache; writes a fresh JSONL transcript, deletes after response.
-- `MERIDIAN_EPHEMERAL_JSONL_BACKUP=1` — With ephemeral enabled, rename the JSONL to `.<timestamp>.bak` instead of deleting.
-- `MERIDIAN_PASSTHROUGH=1` — Forward client tool calls through a dummy MCP server; the client executes tools and resends a `tool_result`.
-- `MERIDIAN_BLOCKING_MCP=1` — Blocking-MCP real-handler mode (requires `MERIDIAN_EPHEMERAL_JSONL=1` + passthrough + `body.tools`; works for both streaming and non-streaming requests, including alternation across rounds in one conversation). Keeps one SDK query alive across HTTP rounds so interleaved-thinking signatures survive; avoids the synthetic filler / continue-prompt placeholders. Compatible with `output_config.format` (StructuredOutput) and with built-in `web_search` mixed alongside custom passthrough tools — `maxTurns` is already 10_000 in this mode, so neither restricts the model's turn budget. Falls back silently to plain ephemeral when prerequisites are not met. See `ARCHITECTURE.md` for the state machine and wire protocol.
-- `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1` — Relax both the blocking-continuation drift check AND the prefix-hash lookup to ignore `tool_use` inputs (and ids), enforcing only count + per-position name equality. Escape hatch for clients that semantically rewrite tool inputs between rounds (array reordering, Unicode normalisation, dropping null fields). The two relaxations move together: `verifyEmittedAssistant` skips the canonical-JSON input compare, and `computeMessageHashes` drops `tool_use.id` + `JSON.stringify(input)` from each message hash so subsequent-round prefix lookups stay consistent. Off by default — keep off unless you are seeing spurious `assistant_drift` promotions whose only difference is the input payload.
+The blocking-MCP + passthrough + ephemeral-JSONL path is now the **only** path — those env switches no longer exist. The remaining knobs:
+
+- `MERIDIAN_EPHEMERAL_JSONL_BACKUP=1` — Rename the JSONL to `.<timestamp>.bak` instead of deleting on cleanup.
+- `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1` — Relax both the blocking-continuation drift check AND the prefix-hash lookup to ignore `tool_use` inputs (and ids), enforcing only count + per-position name equality. Escape hatch for clients that semantically rewrite tool inputs between rounds. Off by default.
 
 ## Architecture Quick Reference
 
 ```
 server.ts          → HTTP routes, SSE streaming, concurrency (orchestration only)
-adapter.ts         → AgentAdapter interface (extensibility point)
-adapters/
-  opencode.ts      → OpenCode-specific: headers, CWD, tool config
-query.ts           → buildQueryOptions (shared stream/non-stream SDK call builder)
+query.ts           → buildQueryOptions (shared SDK call builder, blocking-only)
 errors.ts          → classifyError (pure)
 models.ts          → mapModelToClaudeModel, resolveClaudeExecutableAsync
-tools.ts           → BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, MCP_SERVER_NAME
+tools.ts           → BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS
 messages.ts        → normalizeContent, getLastUserMessage (pure)
-fileChanges.ts     → PostToolUse hook: file write/edit tracking + summary formatting (pure)
 session/
   lineage.ts       → Hashing, lineage verification (PURE — no I/O)
-  fingerprint.ts   → extractClientCwd, getConversationFingerprint
-  cache.ts         → LRU caches, lookupSession, storeSession (stateful)
+  fingerprint.ts   → getConversationFingerprint
+  blockingPool.ts  → Blocking session registry (one per logical conversation)
 ```
 
 ## Stable API Contract
@@ -80,13 +67,12 @@ External plugins depend on these interfaces. **Do not change without project own
 
 | Interface | Location | Used by |
 |-----------|----------|---------|
-| `startProxyServer(config)` → `ProxyInstance` | `server.ts` | Plugins that spawn proxy instances |
-| `ProxyInstance.close()` | `types.ts` | Plugins for graceful shutdown |
-| `ProxyConfig` type | `types.ts` | Plugin configuration |
-| `x-opencode-session` header | `adapters/opencode.ts` | Session tracking from agent plugins |
-| `x-meridian-profile` header | `server.ts`, `profiles.ts` | Per-request profile selection |
-| `GET /health` response shape | `server.ts` | Plugin health checks |
-| `POST /v1/messages` request/response format | `server.ts` | All agents (Anthropic API contract) |
+| `startProxyServer(config)` → `ProxyInstance` | `server.ts` | Hosts that spawn proxy instances |
+| `ProxyInstance.close()` | `types.ts` | Hosts for graceful shutdown |
+| `ProxyConfig` type | `types.ts` | Embed configuration |
+| `x-meridian-profile` header | `server.ts`, `profiles.ts` | Per-request profile selection (only header consulted) |
+| `GET /health` response shape | `server.ts` | Health checks |
+| `POST /v1/messages` request/response format | `server.ts` | Anthropic API contract |
 | `GET /profiles/list` response shape | `server.ts` | Profile management UI and CLI |
 | `POST /profiles/active` request/response | `server.ts` | Profile switching from CLI and UI |
 

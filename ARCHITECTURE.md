@@ -1,11 +1,11 @@
 # Architecture
 
-A transparent proxy that bridges OpenCode (Anthropic API format) to Claude Max (Agent SDK). This document defines the module structure, dependency rules, and design decisions.
+A transparent proxy that exposes any Anthropic API client to Claude Max via the Claude Agent SDK. This document defines the module structure, dependency rules, and design decisions.
 
 ## Request Flow
 
 ```
-Agent (OpenCode) ──► HTTP POST /v1/messages ──► Proxy Server
+Client ──► HTTP POST /v1/messages ──► Proxy Server
                                                     │
                                         ┌───────────┴───────────┐
                                         │   Session Resolution   │
@@ -28,7 +28,7 @@ Agent (OpenCode) ──► HTTP POST /v1/messages ──► Proxy Server
                                         │  (SSE, tool_use filter) │
                                         └───────────┬───────────┘
                                                     │
-Agent (OpenCode) ◄── SSE Response ◄─────────────────┘
+Client ◄── SSE Response ◄────────────────────────────┘
 ```
 
 ## Module Map
@@ -37,20 +37,18 @@ Agent (OpenCode) ◄── SSE Response ◄────────────�
 src/
 ├── proxy/
 │   ├── server.ts              ← HTTP layer: routes, SSE streaming, concurrency, request orchestration
-│   ├── adapter.ts             ← AgentAdapter interface (extensibility point for multi-agent support)
-│   ├── adapters/
-│   │   └── opencode.ts        ← OpenCode adapter (session headers, CWD extraction, tool config)
-│   ├── handlers/              ← Session-lifecycle dispatch (classic cache vs ephemeral one-shot)
-│   │   ├── types.ts           ← HandlerContext: per-request session-lifecycle bundle
-│   │   ├── classic.ts         ← Classic path: LRU cache lookup, lineage, stale-retry, persist
-│   │   └── ephemeral.ts       ← Ephemeral path: pooled UUID, per-request JSONL, idempotent cleanup
-│   ├── pipeline/              ← Request processing pipeline (shared between classic and ephemeral)
+│   ├── handlers/              ← Session-lifecycle dispatch (blocking only)
+│   │   ├── types.ts           ← HandlerContext: per-request bundle
+│   │   └── blocking.ts        ← Blocking-MCP handler (initial + continuation)
+│   ├── pipeline/
 │   │   ├── context.ts         ← SharedRequestContext: profile/model/thinking/env resolution
 │   │   ├── prompt.ts          ← PromptBundle builder (structured / multimodal / flat-text)
-│   │   ├── hooks.ts           ← SDK hook bundle: passthrough MCP, file-change, web-search capture
-│   │   ├── executor.ts        ← SDK query with retry loop; runNonStream + runStream
+│   │   ├── hooks.ts           ← SDK hook bundle: passthrough MCP, web-search capture
+│   │   ├── executor.ts        ← Thin shim that delegates to blockingStream
+│   │   ├── blockingStream.ts  ← Blocking SSE/JSON pipeline (consumer task, sink, frame translation)
+│   │   ├── blockingNonStreamAggregator.ts ← Reverse-parses SSE frames into a JSON Message
 │   │   └── telemetry.ts       ← Per-request success/error metric emission
-│   ├── query.ts               ← SDK query options builder (shared between stream/non-stream paths)
+│   ├── query.ts               ← SDK query options builder (blocking-only)
 │   ├── concurrency.ts         ← FIFO session gate (`createConcurrencyGate`); `max<=0` disables the queue
 │   ├── errors.ts              ← Error classification (SDK errors → HTTP responses)
 │   ├── models.ts              ← Model mapping, Claude executable resolution
@@ -61,20 +59,16 @@ src/
 │   │   ├── index.ts           ← Barrel export
 │   │   ├── lineage.ts         ← Pure functions: hashing, lineage verification
 │   │   ├── fingerprint.ts     ← Conversation fingerprinting, client CWD extraction
-│   │   ├── cache.ts           ← LRU session caches, lookup/store operations
+│   │   ├── blockingPool.ts    ← Blocking session registry + janitor + state shape
 │   │   ├── transcript.ts      ← JSONL transcript prewarm, delete/backup
+│   │   ├── queryDirect.ts     ← Lone-user shortcut classification
 │   │   └── ephemeralPool.ts   ← Pooled ephemeral session UUIDs
-│   ├── sessionStore.ts        ← Shared file store (cross-proxy session resume)
 │   ├── profiles.ts            ← Multi-profile support: resolve, list, switch auth contexts (leaf)
 │   ├── profileCli.ts          ← CLI commands for profile management (leaf, I/O)
-│   ├── agentDefs.ts           ← Subagent definition extraction from tool descriptions
-│   ├── agentMatch.ts          ← Fuzzy agent name matching
-│   └── passthroughTools.ts    ← Tool forwarding mode (agent handles execution)
-├── fileChanges.ts             ← PostToolUse hook: tracks write/edit ops, formats summary
-├── mcpTools.ts                ← MCP tool definitions (read, write, edit, bash, glob, grep)
+│   └── passthroughTools.ts    ← Tool forwarding mode (client handles execution)
 ├── logger.ts                  ← Logging with AsyncLocalStorage context
 ├── utils/
-│   └── lruMap.ts              ← Generic LRU map with eviction callbacks
+│   └── lruMap.ts              ← Generic LRU map (still used by telemetry / pool)
 ├── telemetry/
 │   ├── index.ts               ← Barrel export
 │   ├── store.ts               ← Request metrics storage
@@ -84,8 +78,6 @@ src/
 │   ├── profileBar.ts          ← Shared profile switcher bar (injected into HTML pages)
 │   ├── profilePage.ts         ← Profile management page HTML
 │   └── types.ts               ← Telemetry types
-└── plugin/
-    └── claude-max-headers.ts  ← OpenCode plugin for session header injection
 ```
 
 ## Dependency Rules
@@ -95,34 +87,30 @@ Dependencies flow **downward**. A module may only import from modules at the sam
 ```
 server.ts (HTTP layer)
     │
-    ├── adapter.ts (interface)
-    ├── adapters/opencode.ts ──► messages.ts, session/fingerprint.ts, tools.ts
-    ├── handlers/
-    │   ├── types.ts         ──► session/lineage.ts
-    │   ├── classic.ts       ──► pipeline/context.ts, pipeline/prompt.ts, session/
-    │   └── ephemeral.ts     ──► pipeline/context.ts, session/transcript.ts, session/ephemeralPool.ts
+    ├── handlers/blocking.ts ──► pipeline/context.ts, session/{transcript,ephemeralPool,blockingPool,queryDirect}
     ├── pipeline/
-    │   ├── context.ts       ──► adapter.ts, profiles.ts, models.ts, betas.ts, obfuscate.ts
+    │   ├── context.ts       ──► profiles.ts, models.ts, obfuscate.ts
     │   ├── prompt.ts        ──► messages.ts, obfuscate.ts, passthroughTools.ts
-    │   ├── hooks.ts         ──► adapter.ts, passthroughTools.ts, fileChanges.ts
+    │   ├── hooks.ts         ──► passthroughTools.ts
     │   ├── executor.ts      ──► query.ts, errors.ts, models.ts, tokenRefresh.ts,
-    │   │                        pipeline/{context,prompt,hooks,telemetry}, handlers/types
+    │   │                        pipeline/{context,prompt,hooks,telemetry,blockingStream}
+    │   ├── blockingStream.ts ──► passthroughTools.ts, query.ts, session/blockingPool.ts
     │   └── telemetry.ts     ──► telemetry/ (types only)
-    ├── query.ts ──► adapter.ts, mcpTools.ts, passthroughTools.ts
+    ├── query.ts ──► passthroughTools.ts, tools.ts
     ├── errors.ts
     ├── models.ts
     ├── tools.ts
     ├── messages.ts
-    ├── session/cache.ts ──► session/lineage.ts ──► messages.ts
-    │                    ──► session/fingerprint.ts
-    │                    ──► sessionStore.ts
-    ├── session/transcript.ts     ──► session/lineage.ts, messages.ts
+    ├── session/lineage.ts ──► messages.ts
+    ├── session/fingerprint.ts
+    ├── session/transcript.ts ──► session/lineage.ts, messages.ts
+    ├── session/blockingPool.ts
+    ├── session/queryDirect.ts
     ├── session/ephemeralPool.ts
     ├── profiles.ts
     ├── profileCli.ts
     ├── agentDefs.ts
     ├── agentMatch.ts
-    ├── fileChanges.ts
     ├── passthroughTools.ts
     ├── mcpTools.ts
     └── telemetry/
@@ -132,66 +120,19 @@ server.ts (HTTP layer)
 
 1. **`session/lineage.ts` is pure.** No side effects, no I/O, no caches. Only crypto hashing and comparison logic. Must stay testable without mocks.
 
-2. **`session/cache.ts` owns all mutable session state.** No other module should create or manage LRU caches for sessions.
+2. **`errors.ts`, `models.ts`, `tools.ts`, `messages.ts`, `profiles.ts`, `profileCli.ts` are leaf modules.** They must not import from `server.ts` or `session/`.
 
-3. **`errors.ts`, `models.ts`, `tools.ts`, `messages.ts`, `profiles.ts`, `profileCli.ts` are leaf modules.** They must not import from `server.ts`, `session/`, or `adapter.ts`.
+3. **`server.ts` is the only module that imports from Hono** or touches HTTP concerns. It orchestrates — it does not compute. Per-request work lives in `handlers/` and `pipeline/`.
 
-4. **`server.ts` is the only module that imports from Hono** or touches HTTP concerns. It orchestrates — it does not compute. Per-request work lives in `handlers/` and `pipeline/`.
+4. **No circular dependencies.** If you need to share types, put them in `types.ts` or the relevant leaf module.
 
-5. **No circular dependencies.** If you need to share types, put them in `types.ts` or the relevant leaf module.
-
-6. **`adapter.ts` is an interface only.** No implementation logic. Adapter implementations go in `adapters/`.
-
-7. **`query.ts` builds SDK options through the adapter interface**, never importing tool constants directly.
-
-8. **`pipeline/` modules are path-agnostic.** They take a `SharedRequestContext` + `HandlerContext` and must not branch on `isEphemeral`. Ephemeral vs classic differences are expressed by `ExecutorCallbacks` (supplied by the handler) and the handler-produced `HandlerContext`.
-
-9. **`handlers/` are the only modules that call `lookupSession` / `storeSession` / `evictSession` or touch the ephemeral session pool.** Pipeline code never calls them directly.
-
-## Agent Adapter Pattern
-
-Agent-specific behavior is isolated behind the `AgentAdapter` interface (`adapter.ts`). The proxy calls adapter methods instead of hardcoding agent logic.
-
-### Current Adapters
-
-- **`adapters/opencode.ts`** — OpenCode agent (session headers, `<env>` block parsing, tool mappings)
-
-### Adding a New Agent
-
-1. Create `adapters/myagent.ts` implementing `AgentAdapter`
-2. Wire it into `server.ts` (currently hardcoded to `openCodeAdapter`; future work will auto-detect)
-3. No changes needed to `query.ts`, `session/`, or other infrastructure
-
-### What the Adapter Controls
-
-| Method | What It Does |
-|--------|-------------|
-| `getSessionId(c)` | Extract session ID from request headers |
-| `extractWorkingDirectory(body)` | Parse working directory from request body |
-| `normalizeContent(content)` | Normalize message content for hashing |
-| `getBlockedBuiltinTools()` | SDK tools replaced by agent's MCP equivalents |
-| `getAgentIncompatibleTools()` | SDK tools with no agent equivalent |
-| `getMcpServerName()` | MCP server name for tool registration |
-| `getAllowedMcpTools()` | MCP tools allowed through the proxy |
-
-### Remaining OpenCode-Specific Code (Not Yet in Adapter)
-
-| Logic | Location | Status |
-|-------|----------|--------|
-| `buildAgentDefinitions` | `agentDefs.ts` | Parses OpenCode Task tool format. To be adapter method. |
-| Passthrough mode | `passthroughTools.ts` | Agent-agnostic but OpenCode-motivated. Keep as-is. |
-| `ALLOWED_MCP_TOOLS` usage in `server.ts` | Line ~176 | Used for `buildAgentDefinitions`. Move when adapter handles agent defs. |
+5. **Agent-agnostic.** The proxy speaks the standard Anthropic API plus optional `x-meridian-*` request headers. There is no adapter abstraction and no client-specific dispatch.
 
 ## Blocking-MCP Mode (Interleaved-Thinking Preservation)
 
-Triggered when **all** of these hold:
-
-- `MERIDIAN_EPHEMERAL_JSONL=1`
-- `MERIDIAN_BLOCKING_MCP=1`
-- `shared.initialPassthrough === true` (adapter override or `MERIDIAN_PASSTHROUGH=1`)
-
-`body.tools.length > 0` is **not** a precondition. When the env switch is
-on, every passthrough+ephemeral request takes the blocking path — including:
+This is the **only** dispatch path. Every request is treated as
+ephemeral + passthrough + blocking-MCP — there are no env switches to flip
+and no fallback to a non-blocking handler. That includes:
 
 - Plain-text-only chats (no tools, no outputFormat). The pool just lives
   one HTTP round; no tool_use round-close fires, so the consumer's natural
@@ -209,12 +150,8 @@ on, every passthrough+ephemeral request takes the blocking path — including:
 - Mixed (custom MCP tools + built-in `web_search`) and outputFormat alongside
   any of the above.
 
-`shared.outputFormat` is **not** a precondition: blocking mode raises
-`maxTurns` to 10_000, so `StructuredOutput` co-exists with passthrough tools
-without burning the turn budget.
-
-Any missing precondition → silent fallback to plain ephemeral passthrough
-(synthetic filler / continue).
+`shared.outputFormat` co-exists with passthrough tools because
+`maxTurns` is fixed at 10_000.
 
 `shared.stream` is **not** a precondition: a single conversation may freely alternate `stream:true` and `stream:false` across rounds. Streaming HTTPs return Anthropic SSE; non-streaming HTTPs return a single Anthropic JSON Message reconstructed from the same internal `BufferedEvent` stream. See "Non-stream variant" below.
 
@@ -386,7 +323,7 @@ invariant across stream/non-stream modes intact.
 
 ## Query-Direct Lone-User Path
 
-Active under `MERIDIAN_EPHEMERAL_JSONL=1` (and the blocking variant) when the request matches the lone-user shape and carries no out-of-position cache_control. Bypasses `prepareFreshSession` entirely: no JSONL on disk, no `resume` to the SDK, no synthetic filler. The user message(s) are fed straight to `query()` as an `AsyncIterable<SDKUserMessage>`.
+Active when the request matches the lone-user shape and carries no out-of-position cache_control. Bypasses `prepareFreshSession` entirely: no JSONL on disk, no `resume` to the SDK, no synthetic filler. The user message(s) are fed straight to `query()` as an `AsyncIterable<SDKUserMessage>`.
 
 ### Trigger Conditions
 
@@ -444,23 +381,12 @@ In blocking-MCP mode the query-direct path is fully compatible with the multi-ro
 
 ## Session Management
 
-Sessions map an agent's conversation ID to a Claude SDK session ID. Two caches work in tandem:
-
-- **Session cache**: keyed by agent header (`x-opencode-session`)
-- **Fingerprint cache**: keyed by hash of first user message + working directory (fallback when no header)
-
-Both are LRU with coordinated eviction — evicting from one removes the corresponding entry in the other.
-
-### Lineage Verification
-
-Every request verifies that incoming messages are a valid continuation of the cached session:
-
-| Classification | Condition | Action |
-|---------------|-----------|--------|
-| **Continuation** | Prefix hash matches stored | Resume normally |
-| **Compaction** | Suffix preserved, beginning changed | Resume (agent summarized old messages) |
-| **Undo** | Prefix preserved, suffix changed | Fork at rollback point |
-| **Diverged** | No meaningful overlap | Start fresh session |
+Blocking-MCP keeps one `BlockingSessionState` per logical conversation in
+`session/blockingPool`. The key is a hash of the first user message —
+meridian does not consult any client-supplied session header. There is no
+LRU cache and no classic-style lineage classification: continuation is
+detected positionally via `extractContinuationTrailing` against the live
+sibling's `priorMessageHashes`. See "Blocking-MCP Mode" above.
 
 ## Testing Strategy
 
@@ -494,17 +420,11 @@ E2E tests (`E2E.md`) should be run before releases or after major refactors.
 ### New pure logic (no I/O, no state)
 → Create a new leaf module in `src/proxy/`. Add unit tests.
 
-### New stateful logic (caches, stores)
-→ Add to the appropriate existing module (`session/cache.ts`, `sessionStore.ts`). Don't create new caches elsewhere.
+### New stateful logic
+→ Use `session/blockingPool.ts` for blocking-session state. Don't introduce new long-lived caches outside `session/`.
 
 ### New HTTP endpoints
 → Add to `server.ts`. Keep route handlers thin — delegate to extracted modules.
 
 ### New per-request processing step
-→ Add a module under `pipeline/` that consumes `SharedRequestContext` + `HandlerContext` and returns a typed bundle. Do not branch on `isEphemeral` — route path-specific behavior through `ExecutorCallbacks` or the handler.
-
-### New session-lifecycle mode
-→ Add a module under `handlers/` that returns a `HandlerContext`. Wire it into `server.ts` alongside `buildClassicHandler` / `buildEphemeralHandler`. Only handler modules may call `lookupSession` / `storeSession` / `evictSession` or touch the ephemeral pool.
-
-### New agent support
-→ Implement `AgentAdapter` in `src/proxy/adapters/`. See `adapters/opencode.ts` for reference. Do not hardcode agent-specific logic in leaf modules.
+→ Add a module under `pipeline/` that consumes `SharedRequestContext` + `HandlerContext` and returns a typed bundle.

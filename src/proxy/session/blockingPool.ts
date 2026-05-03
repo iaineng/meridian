@@ -6,10 +6,13 @@
  * holds MCP tool handlers suspended on Promises, waiting for the client's
  * next HTTP request to arrive with `tool_result`s.
  *
- * Keyed by either:
- *  - `header`:  an adapter-supplied session id (e.g. `x-opencode-session`)
- *  - `lineage`: a hash of the conversation history prefix (messages minus the
- *               trailing `tool_result` user message)
+ * Keyed by:
+ *  - `lineage`: a hash of the first user message (stable for the whole
+ *               conversation; multiple siblings can share a key when the
+ *               client forks at a tool-result boundary)
+ *
+ * The `header` variant is reserved for future use and not currently emitted
+ * — meridian does not consult any client-supplied session header.
  *
  * A 10-minute janitor reaps sessions that go idle without a continuation
  * HTTP request. The pool also installs process-termination hooks on first
@@ -315,9 +318,9 @@ class BlockingPool {
   /**
    * Multi-sibling storage: a single stringified conversation-identity key
    * can map to several concurrent live states. This models forked branches
-   * of the same conversation (same `firstUserHash` or `agentSessionId` but
-   * divergent `priorMessageHashes`). A lookup selects the sibling whose
-   * stored prior-hash array is the longest strict prefix of the incoming.
+   * of the same conversation (same `firstUserHash` but divergent
+   * `priorMessageHashes`). A lookup selects the sibling whose stored
+   * prior-hash array is the longest strict prefix of the incoming.
    */
   private readonly siblings = new Map<string, BlockingSessionState[]>()
   private janitor: ReturnType<typeof setInterval> | null = null

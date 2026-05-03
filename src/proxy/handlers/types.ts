@@ -1,102 +1,50 @@
-import type { LineageResult, SessionState, TokenUsage } from "../session/lineage"
+import type { TokenUsage } from "../session/lineage"
 import type { BlockingSessionKey, BlockingSessionState } from "../session/blockingPool"
 import type { createBlockingPassthroughMcpServer } from "../passthroughTools"
 import type { QueryDirectMessage } from "../session/queryDirect"
 
-/** Log-line classification. `diverged` never reaches this field — classic
- *  handler rewrites it to `new`; ephemeral synthesises `ephemeral` directly. */
-export type HandlerLineageType = "continuation" | "compaction" | "undo" | "new" | "ephemeral" | "blocking" | "blocking_continuation"
+/** Log-line classification used by the dispatcher. */
+export type HandlerLineageType = "blocking" | "blocking_continuation"
 
 /**
- * Per-request session-lifecycle state produced by either the classic or the
- * ephemeral handler. Downstream SDK execution and prompt building read from
- * this bundle without knowing which path produced it.
+ * Per-request session-lifecycle state produced by the blocking handler.
  */
 export interface HandlerContext {
-  isEphemeral: boolean
-
-  // Session resolution
-  lineageResult: LineageResult
-  isResume: boolean
-  isUndo: boolean
-  cachedSession: SessionState | undefined
-  resumeSessionId: string | undefined
-  undoRollbackUuid: string | undefined
+  /** Initial vs continuation. */
   lineageType: HandlerLineageType
 
-  // Messages narrowed for conversion (what becomes the prompt)
+  /** Messages narrowed for conversion (what becomes the prompt). */
   messagesToConvert: Array<{ role: string; content: any }>
 
-  // JSONL prewarm outcome (both ephemeral and classic-diverged can produce these)
+  /** JSONL prewarm outcome. `freshSessionId` is set only when the transcript
+   *  was actually written to disk; the SDK uses it as the resume target. */
   freshSessionId: string | undefined
   freshMessageUuids: Array<string | null> | undefined
-  /**
-   * True when `prepareFreshSession` was *attempted* (not necessarily successful).
-   * Kept separate from `freshSessionId` so the prompt builder's "JSONL path"
-   * detection mirrors the pre-refactor behavior: the JSONL-structured prompt
-   * branch only fires when the prewarm produced a 1-message shim, which
-   * requires both `useJsonlFresh === true` and `freshSessionId` being set.
-   */
-  useJsonlFresh: boolean
 
-  // Cleanup — ephemeral-only; classic returns an async no-op.
+  /** Idempotent transcript/pool cleanup — fires from the dispatcher's outer
+   *  finally for non-stream / errors, deferred to the stream's finally for SSE. */
   cleanup: () => Promise<void>
 
-  // --- Blocking-MCP mode (optional) ---
-  /** True when the request is being handled by the blocking-MCP pipeline. */
-  blockingMode?: boolean
+  // --- Blocking-MCP state ---
   /** True when this request is a continuation of an existing blocking session. */
-  isBlockingContinuation?: boolean
+  isBlockingContinuation: boolean
   /** Key used to look up / register the blocking session. */
-  blockingSessionKey?: BlockingSessionKey
-  /** Live state for continuation requests — already acquired from pool. */
-  blockingState?: BlockingSessionState
-  /** Pre-built passthrough MCP server (blocking mode stashes it on the handler). */
+  blockingSessionKey: BlockingSessionKey
+  /** Live state shared between consumer task, sink, and round-close logic. */
+  blockingState: BlockingSessionState
+  /** Pre-built passthrough MCP server (used by hooks.ts when wiring SDK options). */
   prebuiltPassthroughMcp?: ReturnType<typeof createBlockingPassthroughMcpServer>
-  /**
-   * Continuation-only: tool_result content blocks flattened across the
-   * trailing region (every tool_result-only user message beyond
-   * `state.priorMessageHashes.length`), in history order. `tool_use_id` is
-   * optional — clients may rewrite or omit the value, so the streaming
-   * pipeline routes results positionally via `state.currentRoundToolIds`
-   * and only consults `tool_use_id` as a hint. The trailing region may
-   * span multiple messages (split shape `a, u, a, u, …` or bundled shape
-   * `a, u, u, …`); both flatten into the same ordered array here.
-   */
+  /** Continuation-only: tool_result content blocks flattened across the
+   *  trailing region. */
   pendingToolResults?: Array<{ tool_use_id?: string; content: unknown; is_error?: boolean }>
-  /**
-   * Continuation-only: precomputed per-message hashes of the full incoming
-   * `allMessages` array. Threaded so `applyContinuation` can refresh
-   * `state.priorMessageHashes` to the new "client-confirmed prior" baseline
-   * without recomputing. The new baseline is the FULL allMessages (not
-   * `slice(0, -1)`) — every message the client just delivered counts as
-   * confirmed prior for the next round, including the trailing region.
-   */
+  /** Continuation-only: precomputed per-message hashes of the full incoming
+   *  `allMessages`. Threaded so `applyContinuation` can refresh
+   *  `state.priorMessageHashes` without recomputing. */
   allMessageHashes?: string[]
 
   // --- Query-direct lone-user path (optional) ---
-  /**
-   * True when the request matches the lone-user query-direct shape and is
-   * being routed straight to SDK `query()` as an `AsyncIterable<SDKUserMessage>`.
-   * Mutually exclusive with `freshSessionId` / `useJsonlFresh` — meridian
-   * has not written a JSONL transcript and must not pass `resume` to the SDK.
-   */
   isQueryDirect?: boolean
-  /**
-   * Pre-normalized SDKUserMessage records to yield through the AsyncIterable
-   * prompt. Each entry's `message.content` is shaped by the same primitives
-   * (`stripCacheControlDeep` + `normalizeUserContentForSdk`) that
-   * `buildJsonlLines` uses for non-last history rows, but carries NO
-   * cache_control: the SDK's `addCacheBreakpoints` pass overwrites the
-   * trailing message's last block unconditionally. Populated only when
-   * `isQueryDirect === true`.
-   */
   directPromptMessages?: QueryDirectMessage[]
-}
-
-export interface ClassicRetryResult {
-  prompt: string | AsyncIterable<any>
-  resumeSessionId: string | undefined
 }
 
 export type TokenUsageBag = TokenUsage | undefined

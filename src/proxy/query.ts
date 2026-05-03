@@ -1,54 +1,36 @@
 /**
  * SDK query options builder.
  *
- * Centralizes the construction of query() options, eliminating duplication
- * between the streaming and non-streaming paths in server.ts.
+ * Every request takes the blocking-MCP + passthrough path: real
+ * Promise-blocked MCP handlers, `maxTurns: 10_000`, and a 30-min
+ * stream-close timeout that lets the SDK wait for the next HTTP round to
+ * bring `tool_result` back. Streaming partial messages are always on; there
+ * is no non-streaming SDK call from meridian.
  */
 
-import type { AgentAdapter } from "./adapter"
-import type { Options, SdkBeta } from "@anthropic-ai/claude-agent-sdk"
-import { createOpencodeMcpServer } from "../mcpTools"
+import type { Options } from "@anthropic-ai/claude-agent-sdk"
 import { createPassthroughMcpServer, PASSTHROUGH_MCP_NAME } from "./passthroughTools"
+import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS } from "./tools"
 
 export interface QueryContext {
   /** The prompt to send (text or async iterable for multimodal) */
   prompt: string | AsyncIterable<any>
   /** Resolved Claude model name */
   model: string
-  /** Client working directory */
+  /** Sandbox working directory */
   workingDirectory: string
   /** System context text (may be empty) */
   systemContext: string
   /** Path to Claude executable */
   claudeExecutable: string
-  /** Whether passthrough mode is enabled */
-  passthrough: boolean
-  /** Whether this is a streaming request */
-  stream: boolean
-  /** SDK agent definitions extracted from tool descriptions */
-  sdkAgents: Record<string, any>
-  /** Passthrough MCP server (if passthrough mode + tools present) */
+  /** Passthrough MCP server (only present when client sent custom tools) */
   passthroughMcp?: ReturnType<typeof createPassthroughMcpServer>
-  /**
-   * Blocking MCP mode — integrated with MERIDIAN_EPHEMERAL_JSONL + passthrough.
-   * When true: `maxTurns` is raised to a very large value, the MCP server
-   * (provided via `passthroughMcp`) is expected to use real Promise-blocked
-   * handlers, and `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` is bumped to 30min so
-   * the SDK does not abort mid-wait.
-   */
-  blockingMode?: boolean
   /** Cleaned environment variables (API keys stripped) */
   cleanEnv: Record<string, string | undefined>
-  /** SDK session ID for resume (if continuing a session) */
+  /** SDK session ID for resume (set when JSONL prewarm produced a transcript) */
   resumeSessionId?: string
-  /** Whether this is an undo operation */
-  isUndo: boolean
-  /** UUID to rollback to for undo operations */
-  undoRollbackUuid?: string
-  /** SDK hooks (PreToolUse etc.) */
+  /** SDK hooks (PostToolUse for built-in WebSearch capture, etc.) */
   sdkHooks?: any
-  /** The agent adapter providing tool configuration */
-  adapter: AgentAdapter
   /** Output format configuration (e.g. json_schema for structured output) */
   outputFormat?: { type: "json_schema"; schema: Record<string, unknown> }
   /** Thinking/reasoning configuration */
@@ -66,15 +48,10 @@ export interface QueryContext {
   effort?: 'low' | 'medium' | 'high' | 'max'
   /** API-side task budget in tokens — model paces tool use within this limit */
   taskBudget?: { total: number }
-  /** Beta features to enable */
-  betas?: string[]
   /**
-   * Abort controller to cancel the SDK query. In blocking mode we wire this
-   * to `BlockingSessionState.abort` so `blockingPool.release` can tear down
-   * the Claude subprocess *before* rejecting pending MCP handlers — otherwise
-   * the rejections are serialised as error CallToolResults over stdio to a
-   * still-alive subprocess, triggering a billable follow-up API call whose
-   * response we immediately drop.
+   * Abort controller wired to `BlockingSessionState.abort` so
+   * `blockingPool.release` can tear down the Claude subprocess *before*
+   * rejecting pending MCP handlers.
    */
   abortController?: AbortController
 }
@@ -93,11 +70,6 @@ function withDefaultThinkingDisplay(
   return { ...thinking, display: "summarized" }
 }
 
-/**
- * Build the options object for the Claude Agent SDK query() call.
- * This is called identically from both streaming and non-streaming paths,
- * with the only difference being `includePartialMessages` for streaming.
- */
 export interface BuildQueryResult {
   prompt: QueryContext["prompt"]
   options: Options
@@ -106,110 +78,70 @@ export interface BuildQueryResult {
 export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
   const {
     prompt, model, workingDirectory, systemContext, claudeExecutable,
-    passthrough, stream, sdkAgents, passthroughMcp, cleanEnv,
-    resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+    passthroughMcp, cleanEnv,
+    resumeSessionId, sdkHooks,
     outputFormat, thinking, onStderr,
-    effort, taskBudget, betas, abortController,
+    effort, taskBudget, abortController,
   } = ctx
 
-  let blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
+  let blockedTools = [...BLOCKED_BUILTIN_TOOLS, ...CLAUDE_CODE_ONLY_TOOLS]
   if (ctx.useBuiltinWebSearch) {
     blockedTools = blockedTools.filter(t => t !== "WebSearch")
   }
-  const mcpServerName = adapter.getMcpServerName()
-  const allowedMcpTools = [...adapter.getAllowedMcpTools()]
 
   return {
     prompt,
     options: {
       // Force Node as the executable. The claude-agent-sdk auto-detects Bun
       // via process.versions.bun and defaults to spawning `bun cli.js`.
-      // Hosts like OpenCode embed Bun, so the check fires even when `bun`
-      // is not in PATH — causing subprocess spawns to fail.
+      // Some hosts embed Bun, so the check fires even when `bun` is not in
+      // PATH — causing subprocess spawns to fail.
       executable: "node" as const,
-      // blockingMode owns the turn budget. The session lives across many
+      // Blocking mode owns the turn budget. The session lives across many
       // HTTP rounds (suspended MCP handlers) and built-in tools like
       // WebSearch chain internal SDK turns within one round; 10_000 is the
       // generous cap that absorbs both.
-      //
-      // When blocking is off, the budget depends on whether the SDK needs
-      // headroom for its own retries:
-      //   * `outputFormat`: the SDK auto-retries (appends a directive +
-      //     re-prompts) when the model fails to call StructuredOutput. With
-      //     maxTurns=1 (passthrough's normal default), that retry has
-      //     nowhere to go and the response degrades to plain text. Bump to
-      //     200 whenever outputFormat is active so the executor's
-      //     buffer-and-synthesize-terminal-delta path (executor.ts) actually
-      //     gets to see the recovered StructuredOutput call.
-      //   * Plain passthrough (no outputFormat): each tool round closes the
-      //     SDK; one turn is correct.
-      //   * SDK-internal (non-passthrough): standard 200.
-      maxTurns: ctx.blockingMode
-        ? 10_000
-        : (ctx.outputFormat ? 200 : (passthrough ? 1 : 200)),
+      maxTurns: 10_000,
       cwd: workingDirectory,
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
-      ...(stream ? { includePartialMessages: true } : {}),
+      includePartialMessages: true,
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
-      ...(systemContext ? {
-        systemPrompt: (passthrough || ctx.useBuiltinWebSearch)
-          ? systemContext
-          : { type: "preset" as const, preset: "claude_code" as const, append: systemContext }
-      } : {}),
+      ...(systemContext ? { systemPrompt: systemContext } : {}),
       ...(effort ? { effort } : {}),
-      ...(passthrough
-        ? {
-            disallowedTools: blockedTools,
-            ...(passthroughMcp ? {
-              allowedTools: passthroughMcp.toolNames,
-              mcpServers: { [PASSTHROUGH_MCP_NAME]: passthroughMcp.server },
-            } : {}),
-          }
-        : {
-            disallowedTools: blockedTools,
-            ...(ctx.useBuiltinWebSearch ? {} : {
-              allowedTools: allowedMcpTools,
-              mcpServers: { [mcpServerName]: createOpencodeMcpServer() },
-            }),
-          }),
+      disallowedTools: blockedTools,
+      ...(passthroughMcp ? {
+        allowedTools: passthroughMcp.toolNames,
+        mcpServers: { [PASSTHROUGH_MCP_NAME]: passthroughMcp.server },
+      } : {}),
       plugins: [],
       ...(onStderr ? { stderr: onStderr } : {}),
       env: {
         ...cleanEnv,
         ENABLE_TOOL_SEARCH: "false",
         DISABLE_AUTO_COMPACT: "1",
-        ...(passthrough ? { ENABLE_CLAUDEAI_MCP_SERVERS: "false" } : {}),
+        ENABLE_CLAUDEAI_MCP_SERVERS: "false",
         // Blocking mode: MCP handlers may suspend for up to 30 min waiting
         // for the client's next HTTP request to deliver tool_result. Default
         // SDK timeout is 60s, which would abort the whole query.
-        ...(ctx.blockingMode ? { CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: "1800000" } : {}),
-        // Pass through client's max_tokens directly. The streaming event model
-        // handles max_tokens cleanly via message_delta break, so the SDK's
-        // internal 3-retry recovery loop is no longer a concern.
+        CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: "1800000",
         ...(ctx.maxOutputTokens
           ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(ctx.maxOutputTokens) }
           : {}),
         // When running as root (Docker, Unraid, NAS), set IS_SANDBOX=1 to
         // bypass the SDK's root check. Without this, the SDK exits with:
         // "--dangerously-skip-permissions cannot be used with root/sudo"
-        // See: https://github.com/rynfar/meridian/issues/256
         ...(process.getuid?.() === 0 ? { IS_SANDBOX: "1" } : {}),
-        // NOTE: Agent-specific — prevent the CLI from overriding non-adaptive
-        // thinking to adaptive. Without this, the CLI ignores the caller's
-        // { type: "enabled", budgetTokens } and forces adaptive on supported models.
+        // Prevent the CLI from overriding non-adaptive thinking to adaptive.
         ...(thinking?.type === "enabled" ? { CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1" } : {}),
       },
-      ...(Object.keys(sdkAgents).length > 0 ? { agents: sdkAgents } : {}),
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-      ...(isUndo ? { forkSession: true, ...(undoRollbackUuid ? { resumeSessionAt: undoRollbackUuid } : {}) } : {}),
       ...(sdkHooks ? { hooks: sdkHooks } : {}),
       ...(outputFormat ? { outputFormat } : {}),
       ...(thinking ? { thinking: withDefaultThinkingDisplay(thinking) } : {}),
       ...(taskBudget ? { taskBudget } : {}),
-      ...(betas && betas.length > 0 ? { betas: betas as SdkBeta[] } : {}),
       ...(abortController ? { abortController } : {}),
-    }
+    },
   }
 }

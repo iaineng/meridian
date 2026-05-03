@@ -374,16 +374,10 @@ stop_quiet() {
 start_quiet() {
   docker exec -d --user claude "$CONTAINER_NAME" bash -c "
     $(proxy_env)
-    export MERIDIAN_PASSTHROUGH=1
     export MERIDIAN_HOST=0.0.0.0
     export MERIDIAN_PORT=3456
     export MERIDIAN_MAX_CONCURRENT=-1
-    export MERIDIAN_NO_FILE_CHANGES=1
     export MERIDIAN_OBFUSCATION=cr
-    export MERIDIAN_BETA_POLICY=strip-all
-    export MERIDIAN_EPHEMERAL_JSONL=1
-    export MERIDIAN_BLOCKING_MCP=1
-    export MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=0
     export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
     cd /app
     nohup ./bin/claude-proxy-supervisor.sh > /tmp/meridian.log 2>&1 &

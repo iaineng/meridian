@@ -68,5 +68,5 @@ export const claudeLog = (event: string, extra?: LogFields) => {
   const context = contextStore.getStore() || {}
   const payload = sanitize({ ts: new Date().toISOString(), event, ...context, ...(extra || {}) })
 
-  console.debug(`[opencode-claude-code-provider] ${JSON.stringify(payload)}`)
+  console.debug(`[meridian] ${JSON.stringify(payload)}`)
 }

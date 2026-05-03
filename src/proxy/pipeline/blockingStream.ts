@@ -49,6 +49,7 @@ import { recordRequestSuccess, recordRequestError } from "./telemetry"
 import {
   blockingPool,
   stringifyBlockingKey,
+  type BlockingSessionKey,
   type BlockingSessionState,
   type BufferedEvent,
 } from "../session/blockingPool"
@@ -113,6 +114,80 @@ function attachSink(
 
 function detachSink(state: BlockingSessionState): void {
   state.activeSink = null
+}
+
+/**
+ * Per-HTTP frame telemetry: lazy `firstChunkAt`, plus cheap event-type peeks
+ * for approximate content_block / text-delta counts. Identical for the
+ * streaming and non-streaming sinks, so the bookkeeping lives here.
+ *
+ * The decoder is shared across calls — TextDecoder is stateless when used
+ * with `Uint8Array` slices that don't span partial UTF-8.
+ */
+const FRAME_PEEK_DECODER = new TextDecoder()
+
+interface FrameTelemetry {
+  firstChunkAt: number | undefined
+  contentBlocksSeen: number
+  textEventsSeen: number
+  observe(frame: Uint8Array): void
+}
+
+function createFrameTelemetry(): FrameTelemetry {
+  const t: FrameTelemetry = {
+    firstChunkAt: undefined,
+    contentBlocksSeen: 0,
+    textEventsSeen: 0,
+    observe(frame: Uint8Array): void {
+      if (t.firstChunkAt === undefined) t.firstChunkAt = Date.now()
+      // Cheap event-type peek — full parse would cost more than the
+      // telemetry is worth. 40 bytes covers `event: content_block_delta`.
+      const head = frame.length >= 40
+        ? FRAME_PEEK_DECODER.decode(frame.subarray(0, 40))
+        : FRAME_PEEK_DECODER.decode(frame)
+      if (head.startsWith("event: content_block_start")) t.contentBlocksSeen++
+      else if (head.startsWith("event: content_block_delta")) t.textEventsSeen++
+    },
+  }
+  return t
+}
+
+/**
+ * Per-HTTP dispatcher prologue shared by `runBlockingStream` and
+ * `runBlockingNonStream`. Either resolves the continuation's pending tool
+ * handlers or wires the initial HTTP's hook bundle onto the session state,
+ * then touches the pool entry so the janitor sees recent activity.
+ */
+function dispatchBlockingRound(
+  shared: SharedRequestContext,
+  handler: HandlerContext,
+  hooks: HookBundle,
+): { state: BlockingSessionState; key: BlockingSessionKey; isContinuation: boolean } {
+  const isContinuation = handler.isBlockingContinuation
+  const state = handler.blockingState!
+  const key = handler.blockingSessionKey!
+
+  if (isContinuation) {
+    claudeLog("blocking.continuation.start", {
+      requestId: shared.requestMeta.requestId,
+      key: stringifyBlockingKey(key),
+      resolving: handler.pendingToolResults?.length ?? 0,
+    })
+    applyContinuation(state, handler, shared)
+  } else {
+    // Bind hook references onto the session state so the consumer task /
+    // translator can react to them across HTTP boundaries. The webSearchHook
+    // (when registered) appends to `hooks.pendingWebSearchResults`; the
+    // translator drains the same array on duplicate message_start.
+    bindTranslatorState(state, hooks, shared.outputFormat)
+    claudeLog("blocking.initial.start", {
+      requestId: shared.requestMeta.requestId,
+      key: stringifyBlockingKey(key),
+    })
+  }
+
+  blockingPool.touch(state)
+  return { state, key, isContinuation }
 }
 
 function pushEvent(state: BlockingSessionState, evt: BufferedEvent): void {
@@ -634,35 +709,12 @@ export function runBlockingStream(
   env: ExecutorEnv,
 ): Response {
   const encoder = new TextEncoder()
-  const isContinuation = handler.isBlockingContinuation === true
-
-  const state = handler.blockingState!
-  const key = handler.blockingSessionKey!
-
-  // For a continuation request, resolve the suspended handlers BEFORE we
-  // build the new HTTP ReadableStream. The consumer task (spawned on the
-  // initial HTTP) will unblock and start feeding new SSE frames into the
-  // event buffer; they'll be flushed when the sink attaches.
-  if (isContinuation) {
-    claudeLog("blocking.continuation.start", {
-      requestId: shared.requestMeta.requestId,
-      key: stringifyBlockingKey(key),
-      resolving: handler.pendingToolResults?.length ?? 0,
-    })
-    applyContinuation(state, handler, shared)
-  } else {
-    // Bind hook references onto the session state so the consumer task /
-    // translator can react to them across HTTP boundaries. The webSearchHook
-    // (when registered) appends to `hooks.pendingWebSearchResults`; the
-    // translator drains the same array on duplicate message_start.
-    bindTranslatorState(state, hooks, shared.outputFormat)
-    claudeLog("blocking.initial.start", {
-      requestId: shared.requestMeta.requestId,
-      key: stringifyBlockingKey(key),
-    })
-  }
-
-  blockingPool.touch(state)
+  // For a continuation request, `dispatchBlockingRound` resolves the
+  // suspended handlers BEFORE we build the new HTTP ReadableStream. The
+  // consumer task (spawned on the initial HTTP) will unblock and start
+  // feeding new SSE frames into the event buffer; they'll be flushed when
+  // the sink attaches.
+  const { state, key, isContinuation } = dispatchBlockingRound(shared, handler, hooks)
 
   let streamClosed = false
   let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -672,9 +724,7 @@ export function runBlockingStream(
   // telemetry record, regardless of whether the HTTP ends via close_round
   // (round boundary), end (SDK finished), error, or client cancel.
   const upstreamStartAt = Date.now()
-  let firstChunkAt: number | undefined
-  let contentBlocksSeen = 0
-  let textEventsSeen = 0
+  const frameTelemetry = createFrameTelemetry()
   let telemetryRecorded = false
 
   const recordTelemetry = (err?: Error): void => {
@@ -683,7 +733,6 @@ export function runBlockingStream(
     const telemetryCtx = {
       requestMeta: shared.requestMeta,
       requestStartAt: env.requestStartAt,
-      adapterName: shared.adapter.name,
     }
     if (err) {
       recordRequestError(telemetryCtx, classifyError(err.message))
@@ -696,11 +745,10 @@ export function runBlockingStream(
       {
         mode: "stream",
         upstreamStartAt,
-        firstChunkAt,
+        firstChunkAt: frameTelemetry.firstChunkAt,
         sdkSessionId: state.ephemeralSessionId,
-        contentBlocks: contentBlocksSeen,
-        textEvents: textEventsSeen,
-        passthrough: true,
+        contentBlocks: frameTelemetry.contentBlocksSeen,
+        textEvents: frameTelemetry.textEventsSeen,
       },
     )
   }
@@ -736,14 +784,7 @@ export function runBlockingStream(
       const deliver = (evt: BufferedEvent) => {
         if (streamClosed) { state.eventBuffer.push(evt); return }
         if (evt.kind === "sse") {
-          if (firstChunkAt === undefined) firstChunkAt = Date.now()
-          // Cheap event-type peek for approximate content_block / text counts.
-          // Full parse would cost more than the telemetry is worth.
-          const head = evt.frame.length >= 40
-            ? new TextDecoder().decode(evt.frame.subarray(0, 40))
-            : new TextDecoder().decode(evt.frame)
-          if (head.startsWith("event: content_block_start")) contentBlocksSeen++
-          else if (head.startsWith("event: content_block_delta")) textEventsSeen++
+          frameTelemetry.observe(evt.frame)
           safeEnqueue(evt.frame)
           return
         }
@@ -837,18 +878,16 @@ async function startSdkIterator(
   env: ExecutorEnv,
   abortController: AbortController,
 ): Promise<AsyncIterable<unknown>> {
-  const { body, workingDirectory, systemContext, profileEnv, adapter, sdkAgents,
-          thinking, effort, taskBudget, betas, outputFormat } = shared
-  const { passthrough, sdkHooks, passthroughMcp, useBuiltinWebSearch, onStderr } = hooks
+  const { body, workingDirectory, systemContext, profileEnv,
+          thinking, effort, taskBudget, outputFormat } = shared
+  const { sdkHooks, passthroughMcp, useBuiltinWebSearch, onStderr } = hooks
   const { makePrompt } = promptBundle
 
   const strippedEnv: Record<string, string | undefined> = { ...profileEnv }
   for (const k of CLAUDE_OAUTH_ENV_KEYS) delete strippedEnv[k]
-  const oauthEnv = shared.profile.type === "api"
-    ? {}
-    : await resolveClaudeOauthEnv({
-        configDir: shared.profile.env.CLAUDE_CONFIG_DIR ?? homedir(),
-      })
+  const oauthEnv = await resolveClaudeOauthEnv({
+    configDir: shared.profile.env.CLAUDE_CONFIG_DIR ?? homedir(),
+  })
 
   const { prompt, options } = buildQueryOptions({
     prompt: makePrompt(),
@@ -856,19 +895,11 @@ async function startSdkIterator(
     workingDirectory,
     systemContext,
     claudeExecutable: env.claudeExecutable,
-    passthrough,
-    stream: true,
-    sdkAgents,
     passthroughMcp,
     cleanEnv: { ...strippedEnv, ...oauthEnv },
     // Query-direct skips JSONL prewrite — must NOT pass resume to the SDK.
-    resumeSessionId: handler.isQueryDirect
-      ? undefined
-      : (handler.resumeSessionId ?? handler.freshSessionId),
-    isUndo: handler.isUndo,
-    undoRollbackUuid: handler.undoRollbackUuid,
+    resumeSessionId: handler.isQueryDirect ? undefined : handler.freshSessionId,
     sdkHooks,
-    adapter,
     outputFormat,
     thinking,
     useBuiltinWebSearch,
@@ -876,8 +907,6 @@ async function startSdkIterator(
     onStderr,
     effort,
     taskBudget,
-    betas,
-    blockingMode: true,
     abortController,
   })
 
@@ -904,30 +933,10 @@ export async function runBlockingNonStream(
   hooks: HookBundle,
   env: ExecutorEnv,
 ): Promise<Response> {
-  const isContinuation = handler.isBlockingContinuation === true
-  const state = handler.blockingState!
-  const key = handler.blockingSessionKey!
-
-  if (isContinuation) {
-    claudeLog("blocking.continuation.start", {
-      requestId: shared.requestMeta.requestId,
-      key: stringifyBlockingKey(key),
-      resolving: handler.pendingToolResults?.length ?? 0,
-    })
-    applyContinuation(state, handler, shared)
-  } else {
-    bindTranslatorState(state, hooks, shared.outputFormat)
-    claudeLog("blocking.initial.start", {
-      requestId: shared.requestMeta.requestId,
-      key: stringifyBlockingKey(key),
-    })
-  }
-  blockingPool.touch(state)
+  const { state, key, isContinuation } = dispatchBlockingRound(shared, handler, hooks)
 
   const upstreamStartAt = Date.now()
-  let firstChunkAt: number | undefined
-  let contentBlocksSeen = 0
-  let textEventsSeen = 0
+  const frameTelemetry = createFrameTelemetry()
   let telemetryRecorded = false
 
   const aggregator = createBlockingJsonAggregator()
@@ -941,7 +950,6 @@ export async function runBlockingNonStream(
       const telemetryCtx = {
         requestMeta: shared.requestMeta,
         requestStartAt: env.requestStartAt,
-        adapterName: shared.adapter.name,
       }
       if (err) {
         recordRequestError(telemetryCtx, classifyError(err.message))
@@ -950,11 +958,10 @@ export async function runBlockingNonStream(
       recordRequestSuccess(telemetryCtx, shared, handler, {
         mode: "non-stream",
         upstreamStartAt,
-        firstChunkAt,
+        firstChunkAt: frameTelemetry.firstChunkAt,
         sdkSessionId: state.ephemeralSessionId,
-        contentBlocks: contentBlocksSeen,
-        textEvents: textEventsSeen,
-        passthrough: true,
+        contentBlocks: frameTelemetry.contentBlocksSeen,
+        textEvents: frameTelemetry.textEventsSeen,
       })
     }
 
@@ -979,12 +986,7 @@ export async function runBlockingNonStream(
       // attaches to a fresh sink that picks up exactly where we left off.
       if (closed) { state.eventBuffer.push(evt); return }
       if (evt.kind === "sse") {
-        if (firstChunkAt === undefined) firstChunkAt = Date.now()
-        const head = evt.frame.length >= 40
-          ? new TextDecoder().decode(evt.frame.subarray(0, 40))
-          : new TextDecoder().decode(evt.frame)
-        if (head.startsWith("event: content_block_start")) contentBlocksSeen++
-        else if (head.startsWith("event: content_block_delta")) textEventsSeen++
+        frameTelemetry.observe(evt.frame)
         aggregator.consumeSseFrame(evt.frame)
         return
       }

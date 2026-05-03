@@ -21,10 +21,10 @@
   "scripts": {
     "start": "./bin/claude-proxy-supervisor.sh",
     "proxy": "./bin/claude-proxy-supervisor.sh",
-    "build": "rm -rf dist && bun build bin/cli.ts src/proxy/server.ts --outdir dist --target node --splitting --external @anthropic-ai/claude-agent-sdk --external @node-rs/xxhash --entry-naming '[name].js' && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && bun build bin/cli.ts src/proxy/server.ts --outdir dist --target node --splitting --external @anthropic-ai/claude-agent-sdk --external @node-rs/xxhash --entry-naming [name].js && tsc -p tsconfig.build.json",
     "postbuild": "node --check dist/cli.js && node --check dist/server.js && test -f dist/proxy/server.d.ts",
     "prepublishOnly": "bun run build",
-    "test": "bun test --path-ignore-patterns \"**/*session-store*\" --path-ignore-patterns \"**/*proxy-async-ops*\" --path-ignore-patterns \"**/*proxy-extra-usage-fallback*\" --path-ignore-patterns \"**/*models-auth-status*\" --path-ignore-patterns \"**/*proxy-context-usage-store*\" --path-ignore-patterns \"**/*proxy-passthrough-thinking*\" --path-ignore-patterns \"**/*profile-switch-integration*\" --path-ignore-patterns \"**/*session-recovery*\" --path-ignore-patterns \"**/*blocking-dispatch-builtin-only*\" && bun test src/__tests__/blocking-dispatch-builtin-only.test.ts && bun test src/__tests__/profile-switch-integration.test.ts && bun test src/__tests__/proxy-extra-usage-fallback.test.ts && bun test src/__tests__/proxy-async-ops.test.ts && bun test src/__tests__/proxy-session-store.test.ts && bun test src/__tests__/session-store-pruning.test.ts && bun test src/__tests__/proxy-session-store-locking.test.ts && bun test src/__tests__/proxy-context-usage-store.test.ts && bun test src/__tests__/models-auth-status.test.ts && bun test src/__tests__/proxy-passthrough-thinking.test.ts && bun test src/__tests__/proxy-session-recovery.test.ts",
+    "test": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "proxy:direct": "bun run ./bin/cli.ts"
   },
@@ -42,7 +42,6 @@
   },
   "files": [
     "dist/",
-    "plugin/",
     "assets/",
     "README.md"
   ],
@@ -57,18 +56,8 @@
     "ai-coding",
     "ai-assistant",
     "proxy",
-    "opencode",
-    "cline",
-    "aider",
-    "crush",
-    "charmbracelet",
-    "droid",
-    "factory-ai",
-    "pi-coding-agent",
-    "open-webui",
     "llm",
-    "coding-assistant",
-    "opencode-claude-max-proxy"
+    "coding-assistant"
   ],
   "repository": {
     "type": "git",

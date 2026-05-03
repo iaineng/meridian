@@ -1,35 +1,12 @@
 /**
- * Conversation fingerprinting and client working directory extraction.
- *
- * NOTE: extractClientCwd is OpenCode-specific (parses <env> blocks).
- * When the adapter pattern is implemented, this will move to the
- * OpenCode adapter. getConversationFingerprint is agent-agnostic.
+ * Conversation fingerprinting.
  */
 
 import { xxh64 as xxh64BigInt } from "@node-rs/xxhash"
-import { extractSystemText } from "../messages"
 
 /** 64-bit xxHash → 16-char hex string. */
 function xxh64(data: string): string {
   return xxh64BigInt(data).toString(16).padStart(16, "0")
-}
-
-/**
- * Extract the client's working directory from the system prompt.
- * OpenCode embeds it inside an <env> block:
- *   <env>
- *     Working directory: /path/to/project
- *     ...
- *   </env>
- *
- * Returns the path if found, or undefined to fall back to server defaults.
- */
-export function extractClientCwd(body: any): string | undefined {
-  const systemText = extractSystemText(body.system)
-  if (!systemText) return undefined
-
-  const match = systemText.match(/<env>\s*[\s\S]*?Working directory:\s*([^\n<]+)/i)
-  return match?.[1]?.trim() || undefined
 }
 
 /**

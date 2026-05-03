@@ -173,12 +173,9 @@ function render(s, reqs, logs) {
     return;
   }
 
-  // Count lineage types for badges. Ephemeral requests (including blocking-MCP
-  // variants) are tracked separately via ephemeralCount and must not appear
-  // in the Lineage breakdown.
+  // Count lineage types (blocking / blocking_continuation) for badges.
   const lineageCounts = {};
   for (const r of reqs) {
-    if (r.isEphemeral) continue;
     const t = r.lineageType || 'unknown';
     lineageCounts[t] = (lineageCounts[t] || 0) + 1;
   }
@@ -217,13 +214,6 @@ function render(s, reqs, logs) {
     html += '</div>';
   }
 
-  // Ephemeral (one-shot JSONL) count — only render when non-zero.
-  if (s.ephemeralCount && s.ephemeralCount > 0) {
-    html += '<div class="cards">'
-      + card('Ephemeral', s.ephemeralCount + ' reqs', 'one-shot JSONL (bypass session cache)')
-      + '</div>';
-  }
-
   // Lineage breakdown
   if (Object.keys(lineageCounts).length > 0) {
     html += '<div class="cards">';
@@ -256,7 +246,7 @@ function render(s, reqs, logs) {
     + '<span><span class="legend-dot" style="background:var(--ttfb)"></span>TTFB</span>'
     + '<span><span class="legend-dot" style="background:var(--upstream)"></span>Response</span>'
     + '</div>'
-    + '<table><thead><tr><th>Time</th><th>Adapter</th><th>Model</th><th>Mode</th><th>Session</th><th>Status</th>'
+    + '<table><thead><tr><th>Time</th><th>Model</th><th>Mode</th><th>Session</th><th>Status</th>'
     + '<th>Queue</th><th>Proxy</th><th>TTFB</th><th>Total</th><th>Waterfall</th></tr></thead><tbody>';
 
   const maxTotal = Math.max(...reqs.map(r => r.totalDurationMs), 1);
@@ -270,21 +260,16 @@ function render(s, reqs, logs) {
     const ttfbW = Math.max((r.ttfbMs || 0) * scale, 0);
     const respW = Math.max((r.upstreamDurationMs - (r.ttfbMs || 0)) * scale, 2);
 
-    // Blocking-MCP requests are ephemeral but carry an explicit lineageType
-    // ("blocking" or "blocking_continuation") so we surface that instead of
-    // the generic "ephemeral" badge.
+    // Lineage badge — only blocking / blocking_continuation are emitted now.
     const blockingBadgeColors = { blocking: 'var(--purple)', blocking_continuation: 'var(--ttfb)' };
-    const lineageBadge = (r.isEphemeral && (r.lineageType === 'blocking' || r.lineageType === 'blocking_continuation'))
-      ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + blockingBadgeColors[r.lineageType] + ';color:var(--bg)">' + r.lineageType + '</span>'
-      : r.isEphemeral
-        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--blue);color:var(--bg)">ephemeral</span>'
-        : (r.lineageType ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + ({continuation:'var(--green)',compaction:'var(--yellow)',undo:'var(--purple)',diverged:'var(--red)',new:'var(--muted)'}[r.lineageType] || 'var(--muted)') + ';color:var(--bg)">' + r.lineageType + '</span>' : '');
+    const lineageBadge = r.lineageType
+      ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + (blockingBadgeColors[r.lineageType] || 'var(--muted)') + ';color:var(--bg)">' + r.lineageType + '</span>'
+      : '';
     const sessionShort = r.sdkSessionId ? r.sdkSessionId.slice(0, 8) : '—';
     const msgCount = r.messageCount != null ? r.messageCount : '?';
 
     html += '<tr>'
       + '<td class="mono">' + ago(r.timestamp) + '</td>'
-      + '<td>' + (r.adapter || '—') + '</td>'
       + '<td>' + (r.requestModel || r.model) + '<br><span style="font-size:10px;color:var(--muted)">' + r.model + '</span></td>'
       + '<td>' + r.mode + '</td>'
       + '<td class="mono">' + sessionShort + ' ' + lineageBadge + '<br><span style="font-size:10px;color:var(--muted)">' + msgCount + ' msgs</span></td>'

@@ -59,21 +59,16 @@ import {
   type BlockingSessionState,
 } from "../session/blockingPool"
 import { classifyQueryDirect, buildQueryDirectMessages } from "../session/queryDirect"
-import type { LineageResult } from "../session"
 
 function createPrebuiltBlockingPassthroughMcp(shared: SharedRequestContext, state: BlockingSessionState) {
-  const toolSet = resolvePassthroughToolSet({
-    tools: shared.body?.tools,
-    passthrough: shared.initialPassthrough,
-    blockingMode: true,
-  })
-  return toolSet.passthrough && toolSet.effectiveTools.length > 0
+  const toolSet = resolvePassthroughToolSet(shared.body?.tools)
+  return toolSet.effectiveTools.length > 0
     ? createBlockingPassthroughMcpServer(toolSet.effectiveTools, state)
     : undefined
 }
 
 export async function buildBlockingHandler(shared: SharedRequestContext): Promise<HandlerContext> {
-  const { workingDirectory, allMessages, model, outputFormat, requestMeta, agentSessionId } = shared
+  const { workingDirectory, allMessages, model, outputFormat, requestMeta } = shared
 
   const lastMsg = allMessages[allMessages.length - 1]
   const isContinuationShape = isToolResultOnlyUserMessage(lastMsg)
@@ -100,13 +95,11 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   // the round-0 `priorMessageHashes` we hand to `acquire`.
   const allMessageHashes = computeMessageHashes(allMessages, hashOptions)
 
-  // Session key: explicit header > fingerprint-style first-user hash.
-  // We deliberately avoid hashing `priorMessages` here because that grows
-  // every round; the first user-message hash is stable for the whole chat.
+  // Session key: hash of the first user message. Stable for the whole chat
+  // (we deliberately avoid hashing `priorMessages` because that grows every
+  // round). No client-supplied session id is consulted.
   const firstUserHash = allMessageHashes[0] ?? ""
-  const key: BlockingSessionKey = agentSessionId
-    ? { kind: "header", value: agentSessionId }
-    : { kind: "lineage", hash: firstUserHash }
+  const key: BlockingSessionKey = { kind: "lineage", hash: firstUserHash }
 
   // Fingerprint of the incoming request's tools array. Compared against the
   // matched sibling's stored fingerprint at continuation time — a change in
@@ -298,22 +291,12 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
               tool_results: verdict.toolResults.length,
             })
 
-            const lineageResult: LineageResult = { type: "ephemeral" }
             return {
-              isEphemeral: true,
-              lineageResult,
-              isResume: false,
-              isUndo: false,
-              cachedSession: undefined,
-              resumeSessionId: undefined,
-              undoRollbackUuid: undefined,
               lineageType: "blocking_continuation",
               messagesToConvert: [],            // unused on continuation path
               freshSessionId: undefined,
               freshMessageUuids: undefined,
-              useJsonlFresh: false,
               cleanup: async () => {},          // cleanup deferred to session terminate
-              blockingMode: true,
               isBlockingContinuation: true,
               blockingSessionKey: key,
               blockingState: state,
@@ -370,22 +353,12 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
       cleanup: queryDirectCleanup,
     })
     const prebuiltPassthroughMcpQd = createPrebuiltBlockingPassthroughMcp(shared, stateQd)
-    const lineageResultQd: LineageResult = { type: "ephemeral" }
     return {
-      isEphemeral: true,
-      lineageResult: lineageResultQd,
-      isResume: false,
-      isUndo: false,
-      cachedSession: undefined,
-      resumeSessionId: undefined,
-      undoRollbackUuid: undefined,
       lineageType: "blocking",
       messagesToConvert: [],
       freshSessionId: undefined,
       freshMessageUuids: undefined,
-      useJsonlFresh: false,
       cleanup: async () => {},
-      blockingMode: true,
       isBlockingContinuation: false,
       blockingSessionKey: key,
       blockingState: stateQd,
@@ -398,47 +371,30 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     }
   }
 
-  const passthroughForJsonl = shared.initialPassthrough
-  const useJsonlFresh = allMessages.length >= 1
-
-  let messagesToConvert: Array<{ role: string; content: any }> = allMessages
-  let freshSessionId: string | undefined
-  let freshMessageUuids: Array<string | null> | undefined
-
-  let effectiveUseJsonlFresh = useJsonlFresh
-  if (useJsonlFresh) {
-    try {
-      const prep = await prepareFreshSession(allMessages, workingDirectory, {
-        model,
-        toolPrefix: passthroughForJsonl ? PASSTHROUGH_MCP_PREFIX : undefined,
-        sessionId: ephemeralId,
-        outputFormat: !!outputFormat,
-        hasOtherTools: Array.isArray(shared.body?.tools) && shared.body.tools.length > 0,
-      })
-      // Only forward `freshSessionId` to the SDK as a resume target when the
-      // JSONL was actually written. Empty message inputs short-circuit
-      // transcript writes; resuming a non-existent session id would crash
-      // the SDK ("No conversation found").
-      freshSessionId = prep.wroteTranscript ? prep.sessionId : undefined
-      freshMessageUuids = prep.wroteTranscript ? prep.messageUuids : undefined
-      effectiveUseJsonlFresh = prep.wroteTranscript
-      messagesToConvert = [{ role: "user", content: prep.lastUserPrompt }]
-      claudeLog("session.jsonl_fresh", {
-        sessionId: prep.sessionId,
-        messageCount: allMessages.length,
-        wroteTranscript: prep.wroteTranscript,
-        ephemeral: true,
-        blocking: true,
-      })
-    } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e)
-      console.error(`[PROXY] ${requestMeta.requestId} jsonl_fresh_failed (blocking), fallback: ${errMsg}`)
-      claudeLog("session.jsonl_fresh_failed", { error: errMsg, ephemeral: true, blocking: true })
-      freshSessionId = undefined
-      freshMessageUuids = undefined
-      effectiveUseJsonlFresh = false
-    }
-  }
+  // Always run prepareFreshSession — blocking-MCP requires the JSONL
+  // transcript so the SDK can resume the conversation history. Errors here
+  // are unrecoverable: there is no flat-text fallback, since the prompt
+  // builder has no `<conversation_history>` path.
+  const prep = await prepareFreshSession(allMessages, workingDirectory, {
+    model,
+    toolPrefix: PASSTHROUGH_MCP_PREFIX,
+    sessionId: ephemeralId,
+    outputFormat: !!outputFormat,
+    hasOtherTools: Array.isArray(shared.body?.tools) && shared.body.tools.length > 0,
+  })
+  // Only forward `freshSessionId` to the SDK as a resume target when the
+  // JSONL was actually written. Empty message inputs short-circuit transcript
+  // writes; resuming a non-existent session id would crash the SDK.
+  const freshSessionId = prep.wroteTranscript ? prep.sessionId : undefined
+  const freshMessageUuids = prep.wroteTranscript ? prep.messageUuids : undefined
+  const messagesToConvert = [{ role: "user", content: prep.lastUserPrompt }]
+  claudeLog("session.jsonl_fresh", {
+    sessionId: prep.sessionId,
+    messageCount: allMessages.length,
+    wroteTranscript: prep.wroteTranscript,
+    ephemeral: true,
+    blocking: true,
+  })
 
   // Idempotent cleanup — only runs when session fully terminates (SDK done
   // or janitor timeout). Stashed on the pool state so both paths can trigger
@@ -483,24 +439,14 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   // Prebuild the blocking MCP server so hooks.ts uses it verbatim.
   const prebuiltPassthroughMcp = createPrebuiltBlockingPassthroughMcp(shared, state)
 
-  const lineageResult: LineageResult = { type: "ephemeral" }
   return {
-    isEphemeral: true,
-    lineageResult,
-    isResume: false,
-    isUndo: false,
-    cachedSession: undefined,
-    resumeSessionId: undefined,
-    undoRollbackUuid: undefined,
     lineageType: "blocking",
     messagesToConvert,
     freshSessionId,
     freshMessageUuids,
-    useJsonlFresh: effectiveUseJsonlFresh,
     // Cleanup is owned by the pool — the handler's cleanup is a no-op so
     // server.ts's outer finally doesn't double-fire.
     cleanup: async () => {},
-    blockingMode: true,
     isBlockingContinuation: false,
     blockingSessionKey: key,
     blockingState: state,
