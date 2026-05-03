@@ -28,7 +28,7 @@ import {
  * transcript output so the SDK treats the file as a legitimate resume source.
  * Kept as a single exported constant to make future bumps a one-line change.
  */
-export const TRANSCRIPT_VERSION = "2.1.112"
+export const TRANSCRIPT_VERSION = "2.1.126"
 
 /** Base62 alphabet matching Anthropic's message id payload. */
 const BASE62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
