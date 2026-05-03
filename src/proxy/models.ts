@@ -4,8 +4,6 @@
 
 import { exec as execCallback } from "child_process"
 import { existsSync } from "fs"
-import { fileURLToPath } from "url"
-import { join, dirname } from "path"
 import { promisify } from "util"
 
 const exec = promisify(execCallback)
@@ -154,33 +152,23 @@ let cachedClaudePathPromise: Promise<string> | null = null
 /**
  * Resolve the Claude executable path asynchronously (non-blocking).
  *
- * Uses a three-tier cache:
+ * Uses a two-tier cache:
  * 1. cachedClaudePath — resolved path, returned immediately on subsequent calls
  * 2. cachedClaudePathPromise — deduplicates concurrent calls during resolution
- * 3. Falls through to resolution logic (SDK cli.js → system `which claude`)
  *
  * The promise is cleared in `finally` to allow retry on failure while
  * cachedClaudePath prevents re-resolution on success.
+ *
+ * Only resolves the system-installed standalone `claude` binary — the SDK's
+ * bundled `cli.js` is intentionally not used (issue #203: cli.js +
+ * `--permission-mode bypassPermissions` under node exits with code 1).
  */
 export async function resolveClaudeExecutableAsync(): Promise<string> {
   if (cachedClaudePath) return cachedClaudePath
   if (cachedClaudePathPromise) return cachedClaudePathPromise
 
   cachedClaudePathPromise = (async () => {
-    // The SDK runs cli.js via bun or node depending on the current runtime:
-    //   getDefaultExecutable() → "bun" if process.versions.bun, else "node"
-    //
-    // When run via node (bun not installed/not the runtime), cli.js + the
-    // --permission-mode bypassPermissions flag exits with code 1. This is
-    // the root cause of issue #203.
-    //
-    // Resolution order:
-    //   1. System claude binary: standalone, no runtime dependency, always safe
-    //   2. If running under bun: cli.js works correctly — use it
-    //   3. Last resort: cli.js via node (may fail for some permission modes)
-    const runningUnderBun = typeof process.versions.bun !== "undefined"
-
-    // 1. System-installed claude binary (standalone — no runtime dependency)
+    // System-installed claude binary (standalone — no runtime dependency).
     // Use `where` on Windows (cmd.exe has no `which`); `which` elsewhere.
     // On Windows `where` can return multiple matches (claude.cmd + claude.exe);
     // prefer .exe because the .cmd wrapper can mis-forward signals / stdio
@@ -198,31 +186,12 @@ export async function resolveClaudeExecutableAsync(): Promise<string> {
       }
     } catch {}
 
-    // 2. SDK bundled cli.js — only when bun is the runtime
-    if (runningUnderBun) {
-      try {
-        const sdkPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
-        const sdkCliJs = join(dirname(sdkPath), "cli.js")
-        if (existsSync(sdkCliJs)) {
-          cachedClaudePath = sdkCliJs
-          return sdkCliJs
-        }
-      } catch {}
-    }
-
-    // 3. Last resort: SDK cli.js via node (limited — bypassPermissions may fail)
-    if (!runningUnderBun) {
-      try {
-        const sdkPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
-        const sdkCliJs = join(dirname(sdkPath), "cli.js")
-        if (existsSync(sdkCliJs)) {
-          cachedClaudePath = sdkCliJs
-          return sdkCliJs
-        }
-      } catch {}
-    }
-
-    throw new Error("Could not find Claude Code executable. Install via: npm install -g @anthropic-ai/claude-code")
+    const installHint = process.platform === "win32"
+      ? "irm https://claude.ai/install.ps1 | iex"
+      : "curl -fsSL https://claude.ai/install.sh | bash"
+    throw new Error(
+      `Could not find Claude Code executable on PATH. Install the standalone \`claude\` binary (https://docs.claude.com/en/docs/claude-code/setup): ${installHint}`,
+    )
   })()
 
   try {
