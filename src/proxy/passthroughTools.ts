@@ -105,19 +105,23 @@ export function createPassthroughMcpServer(
           ? (zodSchema as any).shape
           : { input: z.any() }
 
-      server.instance.tool(
+      server.instance.registerTool(
         mcpToolName,
-        tool.description || tool.name,
-        shape,
+        {
+          ...(tool.description ? { description: tool.description } : {}),
+          inputSchema: shape,
+        },
         async () => ({ content: [{ type: "text" as const, text: "passthrough" }] })
       )
       toolNames.push(fullToolName)
     } catch {
       // If schema conversion fails, register with permissive schema
-      server.instance.tool(
+      server.instance.registerTool(
         mcpToolName,
-        tool.description || tool.name,
-        { input: z.string().optional() },
+        {
+          ...(tool.description ? { description: tool.description } : {}),
+          inputSchema: { input: z.string().optional() },
+        },
         async () => ({ content: [{ type: "text" as const, text: "passthrough" }] })
       )
       toolNames.push(fullToolName)
