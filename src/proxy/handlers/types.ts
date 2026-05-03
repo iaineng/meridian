@@ -45,6 +45,16 @@ export interface HandlerContext {
   // --- Query-direct lone-user path (optional) ---
   isQueryDirect?: boolean
   directPromptMessages?: QueryDirectMessage[]
+
+  /**
+   * When true the JSONL prewrite skipped the synthetic assistant filler
+   * and `messagesToConvert` carries an empty-content sentinel that
+   * `buildPromptBundle` lowers to an immediately-closing AsyncIterable —
+   * no user frame reaches claude.exe stdin. The SDK is expected to
+   * consume the trailing JSONL user row as the next turn's prompt via
+   * `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`.
+   */
+  resumeInterruptedTurn?: boolean
 }
 
 export type TokenUsageBag = TokenUsage | undefined

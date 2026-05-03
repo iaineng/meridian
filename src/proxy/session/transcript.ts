@@ -72,22 +72,6 @@ export interface TranscriptOptions {
    * a previously-released UUID instead of minting a new one each request.
    */
   sessionId?: string
-  /**
-   * When true AND the synthetic "Continue from where you left off." path is taken (lone-user or
-   * trailing tool_use), augment the prompt with an explicit instruction
-   * to call the "StructuredOutput" tool so the model terminates via the
-   * structured-output tool call expected by outputFormat consumers.
-   */
-  outputFormat?: boolean
-  /**
-   * When true together with `outputFormat`, the client has also registered
-   * other callable tools (custom tools or web_search). In that case we must
-   * NOT force the model to call StructuredOutput immediately — it may still
-   * need another tool round — so the synthetic prompt becomes conditional:
-   * call StructuredOutput only when no further tool calls are required and
-   * the final result is ready. Ignored when `outputFormat` is false.
-   */
-  hasOtherTools?: boolean
 }
 
 export interface BuildJsonlResult {
@@ -103,6 +87,14 @@ export interface FreshSessionResult {
   lastUserPrompt: string | any[]
   messageUuids: Array<string | null>
   wroteTranscript: boolean
+  /** True when the prompt path defers to the SDK's CLAUDE_CODE_RESUME_INTERRUPTED_TURN
+   *  auto-resume — the JSONL ends on the trailing user message (no synthetic
+   *  assistant filler), `lastUserPrompt` is the empty-content sentinel that
+   *  `buildPromptBundle` lowers to an immediately-closing AsyncIterable so
+   *  no user frame reaches claude.exe stdin, and the SDK itself replays the
+   *  trailing user content as the next turn's prompt. Caller must wire
+   *  `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` into the SDK env. */
+  useSdkInterruptedResume: boolean
 }
 
 /**
@@ -131,21 +123,6 @@ export function getProjectSessionPath(cwd: string, sessionId: string): string {
 }
 
 export const JSONL_HISTORY_CACHE_CONTROL = { type: "ephemeral", ttl: "1h" } as const
-
-// Synthetic-tail fillers: each synthetic-tail path emits a paired
-// (assistant, user) turn with minimal neutral continuation text rather
-// than empty placeholder tokens. The texts are constant string literals
-// so the JSONL byte shape stays stable across requests (Anthropic
-// prompt-cache invariant). Two pairs are defined, keyed by which
-// synthetic path the request takes:
-//   - tool_result: trailing assistant has unresolved tool_use; the
-//     synthetic pair sits between the tool_result we just wrote and the
-//     model's next reasoning turn.
-//   - user_message: trailing user lacks an anchoring assistant (lone user
-//     turn 1, or consecutive [u1, u2]); the pair sits between that user
-//     and the model's next reply.
-const TOOL_RESULT_FILLER_ASSISTANT_TEXT = "No response requested."
-const USER_MESSAGE_FILLER_ASSISTANT_TEXT = "No response requested."
 
 // Runtime directive wrapper: the SDK forces us to send proxy-generated
 // prompts (prefill, StructuredOutput terminators) as ordinary user turns.
@@ -229,26 +206,6 @@ export function buildPrefillContinuePrompt(prefillContent: any): string {
     "next character. No preamble, no markdown fences."
   )
 }
-
-// Synthetic-tail user prompts (the "user" half of each filler pair).
-// Sent as the SDK prompt on the turn that emits a synthetic assistant
-// tail. Intentionally unwrapped — short neutral continuation phrases
-// that read like an ordinary user turn rather than a directive system
-// injection. The DEFAULT_CONTINUE_PROMPT fallback is effectively a dead
-// branch (reachable only when n === 0, which short-circuits earlier),
-// but we keep it as a single source aliased to the user_message variant.
-const TOOL_RESULT_CONTINUE_PROMPT = "Continue from where you left off."
-const USER_MESSAGE_CONTINUE_PROMPT = "Continue from where you left off."
-const DEFAULT_CONTINUE_PROMPT = USER_MESSAGE_CONTINUE_PROMPT
-
-// StructuredOutput terminators: when the caller has registered a
-// StructuredOutput tool and needs the response shaped through it, force the
-// model to terminate via that tool. The strict variant applies when no other
-// tool is available this turn (the only valid action is StructuredOutput);
-// the conditional variant defers to the model's judgment when other tools
-// are registered and a further tool round may still be needed.
-const STRUCTURED_OUTPUT_STRICT_PROMPT = wrapSystemReminder("Call the StructuredOutput tool immediately. Your entire response this turn MUST be exactly one StructuredOutput tool call — no preceding text, no trailing text, no reasoning output, no other tool calls. Invoke StructuredOutput now with the final structured result.")
-const STRUCTURED_OUTPUT_CONDITIONAL_PROMPT = wrapSystemReminder("If you do not need to call any other tool this turn and the final result is ready, your response MUST be exactly one StructuredOutput tool call with the final structured result and nothing else. Otherwise, continue using the other tools and do not call StructuredOutput yet.")
 
 export interface ClientUserBreakpoint {
   messageIndex: number
@@ -638,7 +595,6 @@ export function buildJsonlLines(
   const rawClass = classifyContinuation(messages)
   const includesLastUser = rawClass.includesLastUser
   const lastIsUser = rawClass.lastIsUser
-  const hasTrailingToolUse = rawClass.hasTrailingToolUse
   const sliceEnd = (lastIsUser && !includesLastUser) ? n - 1 : n
 
   if (sliceEnd === 0) {
@@ -688,39 +644,13 @@ export function buildJsonlLines(
   }
 
   // When the trailing JSONL row is a user message (balanced tool_result
-  // slicing, or a lone user at turn 1), append a synthetic assistant text
-  // message so the transcript always ends on assistant. This guarantees:
-  //   1. SDK's n6A never sees a "last" user row in the JSONL (stable byte
-  //      shape across requests — the same user is always "non-last" next
-  //      time).
-  //   2. The caller's "Continue from where you left off." prompt is a clean new turn on top of a
-  //      well-formed user→assistant chain.
-  //   3. applyJsonlHistoryBreakpoints can place the cache breakpoint on the
-  //      preceding user row, enabling first-call cache establishment.
-  if (lastIsUser && includesLastUser) {
-    const uuid = randomUUID()
-    const syntheticText = hasTrailingToolUse
-      ? TOOL_RESULT_FILLER_ASSISTANT_TEXT
-      : USER_MESSAGE_FILLER_ASSISTANT_TEXT
-    const syntheticAssistant = wrapAssistantMessage(
-      [{ type: "text", text: syntheticText }],
-      model
-    )
-    transcriptRows.push({
-      parentUuid,
-      isSidechain: false,
-      type: "assistant",
-      message: syntheticAssistant,
-      uuid,
-      timestamp,
-      userType: "external",
-      cwd,
-      sessionId,
-      version,
-      gitBranch,
-    })
-    // Not tracked in messageUuids — it does not correspond to an input message.
-  }
+  // slicing, or a lone user at turn 1), the SDK-driven
+  // CLAUDE_CODE_RESUME_INTERRUPTED_TURN path takes over: we leave the JSONL
+  // ending on the user row and the SDK's `uL9`/`kwq` classify the trailing
+  // user as `interrupted_turn` / `interrupted_prompt`, replaying the user
+  // content as the next turn's prompt. The only special case left in
+  // meridian is the prefill (last is assistant) path — see
+  // `prepareFreshSession`.
 
   applyJsonlHistoryBreakpoints(transcriptRows, clientBreakpoint)
 
@@ -795,16 +725,28 @@ export async function backupSessionTranscript(
 
 /**
  * High-level orchestrator. Generates a session UUID, builds JSONL lines,
- * writes them to disk (if any), and returns everything the caller needs.
+ * writes them to disk (if any), and returns the prompt + auto-resume signal
+ * the caller hands to the SDK.
  *
- * When at least one input message is present the transcript is always
- * written:
- *  - Lone user (n === 1): permission-mode + user + synthetic assistant tail,
- *    so the first call still establishes a JSONL-backed resume chain and
- *    the user row can carry the cache breakpoint.
- *  - Normal histories (n >= 2): standard slice (dropping the trailing user
- *    when it's the prompt, or appending a synthetic tail when the trailing
- *    assistant has an unresolved tool_use).
+ * Three prompt-path shapes:
+ *  - Prefill (last message is assistant): we own the prompt — emit the
+ *    `buildPrefillContinuePrompt` directive that instructs the model to
+ *    resume from the truncated assistant tail. The SDK does NOT auto-resume
+ *    (its `uL9` returns `kind:"none"` when the trailing JSONL row is
+ *    assistant). `useSdkInterruptedResume` is false.
+ *  - Trailing user with anchoring assistant (`[u1, a1, u2]`): JSONL is
+ *    sliced to `[u1, a1]` and the trailing user content is sent verbatim
+ *    as the SDK prompt. `useSdkInterruptedResume` is false.
+ *  - Trailing user without anchor (lone user, `[u1, u2]`, or tool_result-
+ *    tail): JSONL ends on the user row (no synthetic assistant filler), the
+ *    prompt is the empty-content sentinel (`buildPromptBundle` lowers it
+ *    to an immediately-closing AsyncIterable so claude.exe stdin sees no
+ *    user frame), and `useSdkInterruptedResume` is true so the caller
+ *    wires `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` into the SDK env. The
+ *    SDK's `uL9`/`kwq` then classify the trailing user as
+ *    `interrupted_turn`/`interrupted_prompt` and replay its content (and
+ *    for `interrupted_turn`, an injected "Continue from where you left off."
+ *    sibling) as the next turn.
  *
  * Only `messages.length === 0` short-circuits with `wroteTranscript: false`.
  */
@@ -818,51 +760,32 @@ export async function prepareFreshSession(
 
   const n = messages.length
   const lastMsg = messages[n - 1]
-  // Shared classifier — identical decision surface as buildJsonlLines so the
-  // prompt (here) and the JSONL tail (there) can never drift out of sync.
   const rawClass = classifyContinuation(messages)
   const lastIsUser = rawClass.lastIsUser
-  const hasTrailingToolUse = rawClass.hasTrailingToolUse
   const includesLastUser = rawClass.includesLastUser
 
-  // Apply the SAME crEncode we use when writing history to JSONL so that
+  // Apply the same crEncode used when writing history to JSONL so that
   // the u_N bytes on request N (prompt path) match u_N bytes on request N+1
   // (JSONL history). Without this, Anthropic's prompt cache breaks at every
-  // new user turn — only system/tools prefix stays stable.
-  //
-  // When outputFormat is enabled AND we are on the synthetic path, the
-  // caller is waiting for a StructuredOutput tool call — so replace the
-  // neutral continuation prompt with an explicit directive that forces the
-  // model to terminate via StructuredOutput rather than plain text.
-  //
-  // If other tools (custom tools or web_search) are also registered, the
-  // model may still need another tool round, so soften the directive:
-  // only call StructuredOutput when no further tool calls are needed and
-  // the final result is ready.
-  let continuePrompt: string
-  if (n > 0 && !lastIsUser) {
-    continuePrompt = buildPrefillContinuePrompt(lastMsg!.content)
-  } else if (opts?.outputFormat) {
-    continuePrompt = opts.hasOtherTools
-      ? STRUCTURED_OUTPUT_CONDITIONAL_PROMPT
-      : STRUCTURED_OUTPUT_STRICT_PROMPT
-  } else if (hasTrailingToolUse) {
-    continuePrompt = TOOL_RESULT_CONTINUE_PROMPT
-  } else if (lastIsUser && includesLastUser) {
-    continuePrompt = USER_MESSAGE_CONTINUE_PROMPT
+  // new user turn — only the system/tools prefix stays stable.
+  const useSdkInterruptedResume = lastIsUser && includesLastUser
+  let lastUserPrompt: string | any[]
+  if (useSdkInterruptedResume) {
+    lastUserPrompt = ""
+  } else if (lastIsUser && !includesLastUser) {
+    lastUserPrompt = normalizeUserContentForSdk(stripCacheControlDeep(lastMsg!.content))
+  } else if (n > 0 && !lastIsUser) {
+    lastUserPrompt = buildPrefillContinuePrompt(lastMsg!.content)
   } else {
-    continuePrompt = DEFAULT_CONTINUE_PROMPT
+    lastUserPrompt = ""
   }
-  const lastUserPrompt: string | any[] = (lastIsUser && !includesLastUser)
-    ? normalizeUserContentForSdk(stripCacheControlDeep(lastMsg!.content))
-    : continuePrompt
 
   if (lines.length === 0) {
-    return { sessionId, lastUserPrompt, messageUuids, wroteTranscript: false }
+    return { sessionId, lastUserPrompt, messageUuids, wroteTranscript: false, useSdkInterruptedResume: false }
   }
 
   await writeSessionTranscript(cwd, sessionId, lines)
-  return { sessionId, lastUserPrompt, messageUuids, wroteTranscript: true }
+  return { sessionId, lastUserPrompt, messageUuids, wroteTranscript: true, useSdkInterruptedResume }
 }
 
 /**

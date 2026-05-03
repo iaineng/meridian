@@ -68,7 +68,7 @@ function createPrebuiltBlockingPassthroughMcp(shared: SharedRequestContext, stat
 }
 
 export async function buildBlockingHandler(shared: SharedRequestContext): Promise<HandlerContext> {
-  const { workingDirectory, allMessages, model, outputFormat, requestMeta } = shared
+  const { workingDirectory, allMessages, model, requestMeta } = shared
 
   const lastMsg = allMessages[allMessages.length - 1]
   const isContinuationShape = isToolResultOnlyUserMessage(lastMsg)
@@ -379,8 +379,6 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     model,
     toolPrefix: PASSTHROUGH_MCP_PREFIX,
     sessionId: ephemeralId,
-    outputFormat: !!outputFormat,
-    hasOtherTools: Array.isArray(shared.body?.tools) && shared.body.tools.length > 0,
   })
   // Only forward `freshSessionId` to the SDK as a resume target when the
   // JSONL was actually written. Empty message inputs short-circuit transcript
@@ -394,6 +392,7 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     wroteTranscript: prep.wroteTranscript,
     ephemeral: true,
     blocking: true,
+    sdkInterruptedResume: prep.useSdkInterruptedResume,
   })
 
   // Idempotent cleanup — only runs when session fully terminates (SDK done
@@ -454,5 +453,6 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
     // Hand the relaxed-aware hashes to close_round so its priorMessageHashes
     // refresh stays consistent with the round-0 baseline above.
     allMessageHashes,
+    resumeInterruptedTurn: prep.useSdkInterruptedResume,
   }
 }

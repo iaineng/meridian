@@ -908,6 +908,7 @@ async function startSdkIterator(
     effort,
     taskBudget,
     abortController,
+    resumeInterruptedTurn: handler.resumeInterruptedTurn,
   })
 
   return query({ prompt, options })

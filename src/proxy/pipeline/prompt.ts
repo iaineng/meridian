@@ -44,6 +44,21 @@ export function buildPromptBundle(input: BuildPromptBundleInput): PromptBundle {
   // (text / image / document / file / tool_result). Pass through as-is so
   // multimodal blocks reach the SDK natively.
   const lastContent = messagesToConvert[0]?.content
+
+  // Empty-prompt sentinel: paired with `useSdkInterruptedResume` in
+  // `prepareFreshSession`. Hand the SDK an immediately-closing AsyncIterable
+  // so `streamInput` ends the SDK→claude.exe stdin without writing any
+  // user-message frame. Passing the literal string `""` doesn't work — the
+  // SDK's `yK` still serialises a `{type:"user", content:[{type:"text",
+  // text:""}]}` frame, which lands behind the m3-injected auto-resume in
+  // claude.exe's prompt queue and triggers a second turn whose empty text
+  // block fails the SDK's `addCacheBreakpoints` (cc-on-empty-text). With an
+  // empty iterable, only the m3-injected interrupted-turn prompt drives the
+  // agent.
+  if (lastContent === "") {
+    return { toolPrefix, makePrompt: () => (async function* () {})() }
+  }
+
   const content = typeof lastContent === "string"
     ? [{ type: "text", text: lastContent }]
     : (Array.isArray(lastContent)

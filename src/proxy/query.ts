@@ -54,6 +54,16 @@ export interface QueryContext {
    * rejecting pending MCP handlers.
    */
   abortController?: AbortController
+  /**
+   * When true, set `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the SDK env
+   * so the SDK auto-resumes the trailing JSONL user as the next prompt.
+   * Used in tandem with the synthetic-filler-skipping JSONL writer in
+   * `prepareFreshSession` and the empty-iterable shortcut in
+   * `buildPromptBundle`: meridian feeds the SDK an immediately-closing
+   * AsyncIterable so no spurious user frame reaches claude.exe stdin, and
+   * the SDK replays the trailing user content from the JSONL itself.
+   */
+  resumeInterruptedTurn?: boolean
 }
 
 /**
@@ -92,11 +102,6 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
   return {
     prompt,
     options: {
-      // Force Node as the executable. The claude-agent-sdk auto-detects Bun
-      // via process.versions.bun and defaults to spawning `bun cli.js`.
-      // Some hosts embed Bun, so the check fires even when `bun` is not in
-      // PATH — causing subprocess spawns to fail.
-      executable: "node" as const,
       // Blocking mode owns the turn budget. The session lives across many
       // HTTP rounds (suspended MCP handlers) and built-in tools like
       // WebSearch chain internal SDK turns within one round; 10_000 is the
@@ -135,6 +140,10 @@ export function buildQueryOptions(ctx: QueryContext): BuildQueryResult {
         ...(process.getuid?.() === 0 ? { IS_SANDBOX: "1" } : {}),
         // Prevent the CLI from overriding non-adaptive thinking to adaptive.
         ...(thinking?.type === "enabled" ? { CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1" } : {}),
+        // Hand the trailing-user JSONL row back to the SDK as the next
+        // prompt (paired with the empty-iterable prompt + synthetic-
+        // filler-free JSONL emitted by `prepareFreshSession`).
+        ...(ctx.resumeInterruptedTurn ? { CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1" } : {}),
       },
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       ...(sdkHooks ? { hooks: sdkHooks } : {}),
