@@ -76,7 +76,6 @@ The Claude Code SDK provides programmatic access to Claude. But your favorite co
 - **Streaming** — full SSE streaming with MCP tool filtering
 - **Concurrent sessions** — run parent and subagent requests in parallel
 - **Subagent model selection** — primary agents get 1M context; subagents get 200k, preserving rate-limit budget
-- **Auto token refresh** — expired OAuth tokens are refreshed automatically; requests continue without interruption
 - **Passthrough mode** — forward tool calls to the client instead of executing internally
 - **Multimodal** — images, documents, and file attachments pass through to Claude
 - **Multi-profile** — switch between Claude accounts instantly, no restart needed
@@ -331,7 +330,6 @@ src/proxy/
 ├── query.ts               ← SDK query options builder
 ├── errors.ts              ← Error classification
 ├── models.ts              ← Model mapping (sonnet/opus/haiku, agentMode)
-├── tokenRefresh.ts        ← Cross-platform OAuth token refresh
 ├── openai.ts              ← OpenAI ↔ Anthropic format translation (pure)
 ├── setup.ts               ← OpenCode plugin configuration
 ├── session/
@@ -410,7 +408,6 @@ Implement the `AgentAdapter` interface in `src/proxy/adapters/`. See [`adapters/
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions |
 | `GET /v1/models` | OpenAI-compatible model list |
 | `GET /health` | Auth status, mode, plugin status |
-| `POST /auth/refresh` | Manually refresh the OAuth token |
 | `GET /telemetry` | Performance dashboard |
 | `GET /telemetry/requests` | Recent request metrics (JSON) |
 | `GET /telemetry/summary` | Aggregate statistics (JSON) |
@@ -443,7 +440,6 @@ Health response example:
 | `meridian profile switch <name>` | Switch the active profile (requires running proxy) |
 | `meridian profile login <name>` | Re-authenticate an expired profile |
 | `meridian profile remove <name>` | Remove a profile and its credentials |
-| `meridian refresh-token` | Manually refresh the Claude OAuth token (exits 0/1) |
 
 ## Programmatic API
 
@@ -488,17 +484,7 @@ Meridian uses the official Claude Code SDK — the same SDK Anthropic publishes 
 API keys provide direct API access billed per token. Claude Max includes programmatic access through the Claude Code SDK. Meridian translates SDK responses into the standard Anthropic API format, allowing compatible tools to connect through Claude Code.
 
 **What happens if my OAuth token expires?**
-Tokens expire roughly every 8 hours. Meridian detects the expiry, refreshes the token automatically, and retries the request — so requests continue transparently. If the refresh fails (e.g. the refresh token has expired after weeks of inactivity), Meridian returns a clear error telling you to run `claude login`.
-
-**Can I trigger a token refresh manually?**
-
-```bash
-# CLI — works whether the proxy is running or not
-meridian refresh-token
-
-# HTTP — while the proxy is running
-curl -X POST http://127.0.0.1:3456/auth/refresh
-```
+Tokens expire roughly every 8 hours. Meridian does not refresh OAuth tokens — it surfaces the upstream error so the client can react. When the token expires you'll get a `401 authentication_error`; run `claude login` to re-authenticate.
 
 **I'm hitting rate limits on 1M context. What do I do?**
 Meridian defaults Sonnet to 200k context because Sonnet 1M is always billed as Extra Usage on Max plans — even when regular usage isn't exhausted. This is [Anthropic's intended billing model](https://code.claude.com/docs/en/model-config#extended-context), not a bug. Set `MERIDIAN_SONNET_MODEL=sonnet[1m]` to opt in if you have Extra Usage enabled and understand the billing implications. Opus defaults to 1M context, which is included with Max/Team/Enterprise subscriptions at no extra cost. Note: there is a [known upstream bug](https://github.com/anthropics/claude-code/issues/39841) where Claude Code incorrectly gates Opus 1M behind Extra Usage on Max — this is Anthropic's to fix.

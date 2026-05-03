@@ -92,7 +92,7 @@ server.ts (HTTP layer)
     │   ├── context.ts       ──► profiles.ts, models.ts, obfuscate.ts
     │   ├── prompt.ts        ──► messages.ts, obfuscate.ts, passthroughTools.ts
     │   ├── hooks.ts         ──► passthroughTools.ts
-    │   ├── executor.ts      ──► query.ts, errors.ts, models.ts, tokenRefresh.ts,
+    │   ├── executor.ts      ──► query.ts, errors.ts, models.ts,
     │   │                        pipeline/{context,prompt,hooks,telemetry,blockingStream}
     │   ├── blockingStream.ts ──► passthroughTools.ts, query.ts, session/blockingPool.ts
     │   └── telemetry.ts     ──► telemetry/ (types only)

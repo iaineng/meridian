@@ -16,7 +16,6 @@ import { randomUUID } from "crypto"
 import { diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import { createConcurrencyGate } from "./concurrency"
 import { classifyError, buildErrorEnvelope } from "./errors"
-import { refreshOAuthToken } from "./tokenRefresh"
 import { resolveClaudeExecutableAsync, getClaudeAuthStatusAsync, getAuthCacheInfo } from "./models"
 import { buildPromptBundle } from "./pipeline/prompt"
 import { buildSharedContext } from "./pipeline/context"
@@ -296,17 +295,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
     setActiveProfile(body.profile!)
     console.error(`[PROXY] Active profile switched to: ${body.profile}`)
     return c.json({ success: true, activeProfile: body.profile })
-  })
-
-  app.post("/auth/refresh", async (c) => {
-    const success = await refreshOAuthToken()
-    if (success) {
-      return c.json({ success: true, message: "OAuth token refreshed successfully" })
-    }
-    return c.json(
-      { success: false, message: "Token refresh failed. If the problem persists, run 'claude login'." },
-      500,
-    )
   })
 
   // Catch-all: log unhandled requests

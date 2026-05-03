@@ -75,7 +75,6 @@ kill $(lsof -ti :3456)
 | FC4 | [File Changes: Read-only (no summary)](#fc4-file-changes-read-only-no-summary) | Read-only operations produce no "Files changed" section | 2026-03-30 |
 | FC5 | [File Changes: Multiple ops](#fc5-file-changes-multiple-ops) | Multiple writes + edits listed in a single summary | 2026-03-30 |
 | FC6 | [File Changes: Multiple ops (stream)](#fc6-file-changes-multiple-ops-stream) | Multiple file changes emitted as a text block in SSE stream | 2026-03-30 |
-| E22 | [OAuth Token Refresh](#e22-oauth-token-refresh) | Expired access token auto-refreshed inline; request succeeds without manual `claude login` | 2026-04-02 |
 | E23 | [Subagent Model Selection](#e23-subagent-model-selection) | `x-opencode-agent-mode: subagent` header selects base model; primary gets 1M; proxy log shows `agent=subagent` | 2026-04-02 |
 | E24 | [Default Non-Streaming](#e24-default-non-streaming) | Omitting `stream` field returns JSON (not SSE), matching Anthropic API spec | - |
 | E25 | [OpenAI Compat: Non-Streaming](#e25-openai-compat-non-streaming) | `/v1/chat/completions` returns valid OpenAI completion shape | - |
@@ -866,124 +865,6 @@ print(f'Entries: {len(d)} (should be <= 3)')
 
 ---
 
-## E22: OAuth Token Refresh
-
-**Verifies:** When the Claude Code OAuth access token has expired, the proxy detects the 401, refreshes the token automatically, and retries the request — the caller sees a normal successful response.
-
-**Platform note:** The credential store is platform-specific. Run on the platform you want to verify:
-- **macOS** — credentials in Keychain (`/usr/bin/security`)
-- **Linux** — credentials in `~/.claude/.credentials.json`
-
-### macOS
-
-```bash
-# 1. Snapshot current expiry
-python3 -c "
-import subprocess, json
-creds = json.loads(subprocess.check_output(
-    ['/usr/bin/security', 'find-generic-password', '-s', 'Claude Code-credentials',
-     '-a', __import__('os').getlogin(), '-w']).decode())
-print('Current expiresAt:', creds['claudeAiOauth']['expiresAt'])
-"
-
-# 2. Artificially expire the token
-CREDS=$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w)
-EXPIRED=$(echo "$CREDS" | python3 -c "
-import json, sys
-d = json.loads(sys.stdin.read())
-d['claudeAiOauth']['expiresAt'] = 0   # epoch — definitely expired
-print(json.dumps(d, indent=2))
-")
-security add-generic-password -U -s "Claude Code-credentials" -a "$(whoami)" -w "$EXPIRED"
-echo "Token expired (expiresAt set to 0)"
-
-# 3. Make a request — proxy should refresh inline and succeed
-curl -s http://127.0.0.1:3456/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: dummy" \
-  -H "x-opencode-session: e2e-token-refresh-001" \
-  -d '{
-    "model": "claude-haiku-4-5-20251001",
-    "max_tokens": 20,
-    "stream": false,
-    "messages": [{"role": "user", "content": "Say: REFRESH_OK"}]
-  }'
-
-# 4. Verify token was refreshed
-python3 -c "
-import subprocess, json
-creds = json.loads(subprocess.check_output(
-    ['/usr/bin/security', 'find-generic-password', '-s', 'Claude Code-credentials',
-     '-a', __import__('os').getlogin(), '-w']).decode())
-exp = creds['claudeAiOauth']['expiresAt']
-import time
-print(f'New expiresAt: {exp} ({"VALID" if exp > time.time()*1000 else "STILL EXPIRED"})')
-"
-```
-
-### Linux
-
-```bash
-# 1. Snapshot current expiry
-python3 -c "
-import json, os
-creds = json.loads(open(os.path.expanduser('~/.claude/.credentials.json')).read())
-print('Current expiresAt:', creds['claudeAiOauth']['expiresAt'])
-"
-
-# 2. Artificially expire the token
-python3 -c "
-import json, os
-path = os.path.expanduser('~/.claude/.credentials.json')
-d = json.loads(open(path).read())
-d['claudeAiOauth']['expiresAt'] = 0
-open(path, 'w').write(json.dumps(d, indent=2))
-print('Token expired')
-"
-
-# 3. Make a request
-curl -s http://127.0.0.1:3456/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: dummy" \
-  -H "x-opencode-session: e2e-token-refresh-001" \
-  -d '{
-    "model": "claude-haiku-4-5-20251001",
-    "max_tokens": 20,
-    "stream": false,
-    "messages": [{"role": "user", "content": "Say: REFRESH_OK"}]
-  }'
-
-# 4. Verify token was refreshed
-python3 -c "
-import json, os, time
-path = os.path.expanduser('~/.claude/.credentials.json')
-d = json.loads(open(path).read())
-exp = d['claudeAiOauth']['expiresAt']
-print(f'New expiresAt: {exp} ({\"VALID\" if exp > time.time()*1000 else \"STILL EXPIRED\"})')
-"
-```
-
-**Pass criteria:**
-- Response: `"type": "message"` with text containing `REFRESH_OK` — request succeeded despite starting with an expired token
-- Proxy log: `[PROXY] <id> OAuth token expired — refreshed, retrying` appears before the successful response log line
-- Step 4 expiresAt: `VALID` (in the future — token was refreshed and written back)
-- No `authentication_error` in the response
-
-**What's being tested:** The `isExpiredTokenError()` detection in `errors.ts`, the `refreshOAuthToken()` cross-platform credential read/write in `tokenRefresh.ts`, and the inline retry loop in `server.ts`.
-
-### Bonus: manual refresh endpoint
-
-While the proxy is running with a valid token, you can also verify the `/auth/refresh` endpoint directly:
-
-```bash
-curl -s -X POST http://127.0.0.1:3456/auth/refresh
-# → {"success":true,"message":"OAuth token refreshed successfully"}
-```
-
-**Pass criteria:** `success: true` and the `expiresAt` in the credential store is updated to a new future timestamp.
-
----
-
 ## E23: Subagent Model Selection
 
 **Verifies:** When the `x-opencode-agent-mode: subagent` header is present, the proxy selects the base model (200k) instead of the 1M variant, conserving rate limit budget for the primary agent. The `meridian-agent-mode.ts` plugin sets this header automatically based on the agent's runtime `mode` field.
@@ -1342,8 +1223,7 @@ Which proxy modules each E2E test exercises:
 | `adapters/crush.ts` | C1, C2, C3, C4, C5 |
 | `adapters/detect.ts` | D1, D2, D3, D6, D7, D9, D10, C1, C5 |
 | *(default adapter — no Cline adapter needed)* | CL1–CL8 |
-| `errors.ts` | E16, E22 |
-| `tokenRefresh.ts` | E22 |
+| `errors.ts` | E16 |
 | `models.ts` | E14, E23 |
 | `messages.ts` | E4, E5, E6 (content normalization for hashing) |
 | `tools.ts` | E3, E17, E19 |

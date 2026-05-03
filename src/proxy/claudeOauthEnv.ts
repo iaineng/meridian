@@ -14,20 +14,87 @@
  *
  * Leaf module — no imports from server.ts, session/, pipeline/, or handlers/.
  *
- * Cache: keyed by configDir, TTL 30s. Invalidated explicitly from executor.ts
- * immediately after refreshOAuthToken() succeeds so the freshly-minted access
- * token is served on the retry rather than waiting for the TTL to expire.
+ * Cache: keyed by configDir, TTL 30s.
  *
  * Best-effort: any read/parse failure yields `undefined` for the affected key
  * (the env var is simply omitted). The module never throws — a misconfigured
  * host must not break the SDK call path.
  */
 
+import { execFile as execFileCb } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
-import { homedir } from "node:os"
+import { homedir, platform, userInfo } from "node:os"
 import { join } from "node:path"
+import { promisify } from "node:util"
 import { claudeLog } from "../logger"
-import { createPlatformCredentialStore, type CredentialStore } from "./tokenRefresh"
+
+const execFile = promisify(execFileCb)
+
+const KEYCHAIN_SERVICE = "Claude Code-credentials"
+const CREDENTIALS_FILE = `${homedir()}/.claude/.credentials.json`
+
+interface OAuthCredentials {
+  accessToken: string
+}
+
+interface CredentialsFile {
+  claudeAiOauth: OAuthCredentials
+  [key: string]: unknown
+}
+
+/** Read-only credential store interface — injectable for testing. */
+export interface CredentialStore {
+  read(): Promise<CredentialsFile | null>
+}
+
+function parseKeychainValue(raw: string): CredentialsFile | null {
+  const trimmed = raw.trim()
+  try {
+    return JSON.parse(trimmed) as CredentialsFile
+  } catch {}
+  try {
+    const decoded = Buffer.from(trimmed, "hex").toString("utf-8")
+    return JSON.parse(decoded) as CredentialsFile
+  } catch {}
+  return null
+}
+
+const macosStore: CredentialStore = {
+  async read() {
+    try {
+      const { stdout } = await execFile(
+        "/usr/bin/security",
+        ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", userInfo().username, "-w"],
+        { timeout: 5000 }
+      )
+      const parsed = parseKeychainValue(stdout)
+      if (!parsed) throw new Error("Could not parse keychain value as JSON or hex-encoded JSON")
+      return parsed
+    } catch (err) {
+      claudeLog("oauth_env.keychain_read_failed", { error: String(err) })
+      return null
+    }
+  },
+}
+
+const fileStore: CredentialStore = {
+  async read() {
+    try {
+      if (!existsSync(CREDENTIALS_FILE)) return null
+      return JSON.parse(readFileSync(CREDENTIALS_FILE, "utf-8")) as CredentialsFile
+    } catch (err) {
+      claudeLog("oauth_env.file_read_failed", { error: String(err) })
+      return null
+    }
+  },
+}
+
+/**
+ * Returns the appropriate credential store for the current platform.
+ */
+export function createPlatformCredentialStore(): CredentialStore {
+  return platform() === "darwin" ? macosStore : fileStore
+}
 
 export const CLAUDE_OAUTH_ENV_KEYS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
@@ -139,12 +206,4 @@ export async function resolveClaudeOauthEnv(
 
   cache.set(configDir, { env, readAt: now })
   return env
-}
-
-/**
- * Drop all cached OAuth env bundles. Call this after refreshOAuthToken()
- * succeeds so the retry path picks up the new access token immediately.
- */
-export function invalidateClaudeOauthEnvCache(): void {
-  cache.clear()
 }

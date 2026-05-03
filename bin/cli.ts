@@ -25,7 +25,6 @@ Usage: meridian [command] [options]
 Commands:
   (default)        Start the proxy server
   profile          Manage Claude account profiles (add, list, switch, remove)
-  refresh-token    Refresh the Claude Code OAuth token
 
 Options:
   -v, --version   Show version
@@ -52,18 +51,6 @@ if (args[0] === "profile") {
   else if (subcommand === "login" && profileId) profileLogin(profileId)
   else profileHelp()
   process.exit(0)
-}
-
-if (args[0] === "refresh-token") {
-  const { refreshOAuthToken } = await import("../src/proxy/tokenRefresh")
-  const success = await refreshOAuthToken()
-  if (success) {
-    console.log("Token refreshed successfully")
-    process.exit(0)
-  } else {
-    console.error("Token refresh failed. If the problem persists, run: claude login")
-    process.exit(1)
-  }
 }
 
 const exec = promisify(execCallback)
