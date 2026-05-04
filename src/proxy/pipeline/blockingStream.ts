@@ -478,6 +478,17 @@ export function translateBlockingMessage(
       return frames
     }
     frames.push(encoder.encode(`event: message_delta\ndata: ${JSON.stringify(event)}\n\n`))
+    if (stopReason === "max_tokens") {
+      // The user's `max_tokens` budget was hit. Honor the Anthropic API
+      // contract: terminate here with `stop_reason: "max_tokens"` instead of
+      // letting the SDK auto-continue across turns and silently coalesce
+      // the truncated tail into one merged client message with stop_reason
+      // "end_turn". Mark sdkEnded BEFORE aborting so spawnConsumer's catch
+      // sees the abort-induced throw as expected and preserves this reason.
+      state.sdkEnded = true
+      state.sdkEndReason = "max_tokens"
+      try { state.abort?.() } catch {}
+    }
     return frames
   }
 
@@ -652,6 +663,10 @@ async function spawnConsumer(
       // same call) had a chance to reach the client, so that frame would
       // get buffered and replayed at the start of the next HTTP round.
       maybeCloseRound(state)
+      // Translator may have flagged a terminal max_tokens (and aborted the
+      // SDK) — break before the next iteration so we don't process any
+      // further auto-continuation turns the SDK has already enqueued.
+      if (state.sdkEnded) break
     }
     if (!state.sdkEnded) {
       state.sdkEnded = true
@@ -659,14 +674,23 @@ async function spawnConsumer(
     }
   } catch (e) {
     if (isClosedControllerError(e)) return
-    state.sdkEnded = true
-    const errMsg = e instanceof Error ? e.message : String(e)
-    if (isMaxTurnsError(errMsg) || isMaxOutputTokensError(errMsg)) {
-      state.sdkEndReason = "end_turn"
+    // If the translator already set a terminal reason (e.g. max_tokens) and
+    // aborted the iterator, the resulting throw is expected — preserve the
+    // reason instead of overwriting it.
+    if (state.sdkEndReason) {
+      state.sdkEnded = true
     } else {
-      state.sdkEndReason = "error"
-      state.sdkError = e instanceof Error ? e : new Error(String(e))
-      pushEvent(state, { kind: "error", error: state.sdkError })
+      state.sdkEnded = true
+      const errMsg = e instanceof Error ? e.message : String(e)
+      if (isMaxTurnsError(errMsg)) {
+        state.sdkEndReason = "end_turn"
+      } else if (isMaxOutputTokensError(errMsg)) {
+        state.sdkEndReason = "max_tokens"
+      } else {
+        state.sdkEndReason = "error"
+        state.sdkError = e instanceof Error ? e : new Error(String(e))
+        pushEvent(state, { kind: "error", error: state.sdkError })
+      }
     }
   } finally {
     // Drain stragglers — if the very last SDK turn ran a built-in WebSearch
