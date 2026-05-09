@@ -8,24 +8,6 @@ import { promisify } from "util"
 
 const exec = promisify(execCallback)
 
-export interface ClaudeAuthStatus {
-  loggedIn?: boolean
-  subscriptionType?: string
-  email?: string
-}
-
-
-const AUTH_STATUS_CACHE_TTL_MS = 60_000
-/** Shorter TTL for failed auth checks — retry sooner to recover */
-const AUTH_STATUS_FAILURE_TTL_MS = 5_000
-
-let cachedAuthStatus: ClaudeAuthStatus | null = null
-/** Last successfully retrieved auth status — survives transient failures */
-let lastKnownGoodAuthStatus: ClaudeAuthStatus | null = null
-let cachedAuthStatusAt = 0
-let cachedAuthStatusIsFailure = false
-let cachedAuthStatusPromise: Promise<ClaudeAuthStatus | null> | null = null
-
 /**
  * Pass through the client model and append [1m] only for opus-4-6 / opus-4-7.
  * Those are the only models whose 1M context is included with Max; every other
@@ -49,99 +31,6 @@ export function stripExtendedContext(model: string): string {
 /** Check whether a model is using extended (1M) context. */
 export function hasExtendedContext(model: string): boolean {
   return model.endsWith("[1m]")
-}
-
-/** Per-profile auth status cache for multi-account support */
-interface AuthCache {
-  status: ClaudeAuthStatus | null
-  lastKnownGood: ClaudeAuthStatus | null
-  at: number
-  isFailure: boolean
-  promise: Promise<ClaudeAuthStatus | null> | null
-  lastSuccessAt: number
-}
-const profileAuthCaches = new Map<string, AuthCache>()
-
-/** Get the last successful auth check timestamp for a profile.
- * @param profileId - Profile ID to look up (uses default cache when omitted) */
-export function getAuthCacheInfo(profileId?: string): { lastCheckedAt: number; lastSuccessAt: number; isFailure: boolean } {
-  if (!profileId) {
-    return { lastCheckedAt: cachedAuthStatusAt, lastSuccessAt: cachedAuthStatusIsFailure ? 0 : cachedAuthStatusAt, isFailure: cachedAuthStatusIsFailure }
-  }
-  const cache = profileAuthCaches.get(profileId)
-  if (!cache) return { lastCheckedAt: 0, lastSuccessAt: 0, isFailure: false }
-  return { lastCheckedAt: cache.at, lastSuccessAt: cache.lastSuccessAt, isFailure: cache.isFailure }
-}
-
-function getAuthCache(key: string): AuthCache {
-  let cache = profileAuthCaches.get(key)
-  if (!cache) {
-    cache = { status: null, lastKnownGood: null, at: 0, isFailure: false, promise: null, lastSuccessAt: 0 }
-    profileAuthCaches.set(key, cache)
-  }
-  return cache
-}
-
-/**
- * @param profileId - Profile ID for per-profile cache keying (e.g. "work", "personal").
- *   When undefined, uses the default (global) auth context.
- * @param envOverrides - Optional env vars for per-profile auth (e.g. CLAUDE_CONFIG_DIR).
- */
-export async function getClaudeAuthStatusAsync(profileId?: string, envOverrides?: Record<string, string>): Promise<ClaudeAuthStatus | null> {
-  // Use per-profile cache when a profile ID is provided, else fall back to
-  // the legacy global cache for backward compatibility with existing tests.
-  const isDefault = !profileId
-  const cache = isDefault ? null : getAuthCache(profileId!)
-
-  // Read from the appropriate cache
-  const c_status = cache ? cache.status : cachedAuthStatus
-  const c_lastKnownGood = cache ? cache.lastKnownGood : lastKnownGoodAuthStatus
-  const c_at = cache ? cache.at : cachedAuthStatusAt
-  const c_isFailure = cache ? cache.isFailure : cachedAuthStatusIsFailure
-  let c_promise = cache ? cache.promise : cachedAuthStatusPromise
-
-  const ttl = c_isFailure ? AUTH_STATUS_FAILURE_TTL_MS : AUTH_STATUS_CACHE_TTL_MS
-  if (c_at > 0 && Date.now() - c_at < ttl) {
-    return c_status ?? c_lastKnownGood
-  }
-  if (c_promise) return c_promise
-
-  c_promise = (async () => {
-    try {
-      const { stdout } = await exec("claude auth status", {
-        timeout: 5000,
-        ...(envOverrides ? { env: { ...process.env, ...envOverrides } } : {}),
-      })
-      const parsed = JSON.parse(stdout) as ClaudeAuthStatus
-      if (cache) {
-        cache.status = parsed; cache.lastKnownGood = parsed
-        cache.at = Date.now(); cache.isFailure = false; cache.lastSuccessAt = Date.now()
-      } else {
-        cachedAuthStatus = parsed; lastKnownGoodAuthStatus = parsed
-        cachedAuthStatusAt = Date.now(); cachedAuthStatusIsFailure = false
-      }
-      return parsed
-    } catch {
-      if (cache) {
-        cache.isFailure = true; cache.at = Date.now(); cache.status = null
-        return cache.lastKnownGood
-      } else {
-        cachedAuthStatusIsFailure = true; cachedAuthStatusAt = Date.now()
-        cachedAuthStatus = null
-        return lastKnownGoodAuthStatus
-      }
-    }
-  })()
-
-  if (cache) cache.promise = c_promise
-  else cachedAuthStatusPromise = c_promise
-
-  try {
-    return await c_promise
-  } finally {
-    if (cache) cache.promise = null
-    else cachedAuthStatusPromise = null
-  }
 }
 
 // --- Claude Executable Resolution ---
@@ -205,28 +94,6 @@ export async function resolveClaudeExecutableAsync(): Promise<string> {
 export function resetCachedClaudePath(): void {
   cachedClaudePath = null
   cachedClaudePathPromise = null
-}
-
-/** Reset cached auth status — for testing only */
-export function resetCachedClaudeAuthStatus(): void {
-  cachedAuthStatus = null
-  lastKnownGoodAuthStatus = null
-  cachedAuthStatusAt = 0
-  cachedAuthStatusIsFailure = false
-  cachedAuthStatusPromise = null
-  profileAuthCaches.clear()
-}
-
-/** Expire the auth status cache without clearing lastKnownGoodAuthStatus — for testing only.
- *  This simulates the TTL expiring so the next call re-executes `claude auth status`,
- *  while preserving the "last known good" fallback state. */
-export function expireAuthStatusCache(): void {
-  cachedAuthStatusAt = 0
-  cachedAuthStatusPromise = null
-  for (const cache of profileAuthCaches.values()) {
-    cache.at = 0
-    cache.promise = null
-  }
 }
 
 /**

@@ -183,6 +183,28 @@ function readOauthAccount(configDir: string): ParsedOauthAccount {
   return {}
 }
 
+/**
+ * Synchronous setup-token-based auth status — the runtime source of truth.
+ *
+ * The proxy only needs CLAUDE_CODE_OAUTH_TOKEN to do its job, and that token
+ * is sourced from `<configDir>/setup-token` (with platform credential store
+ * as a non-runtime fallback). So presence of setup-token is the meaningful
+ * "healthy" signal — we deliberately do NOT shell out to `claude auth status`
+ * here, which would couple the proxy's health to a separate auth surface.
+ *
+ * `subscriptionType` is intentionally never populated — that field requires
+ * `claude auth status` and isn't load-bearing for any proxy code path.
+ */
+export function getSetupTokenAuthStatus(configDir?: string): {
+  loggedIn: boolean
+  email?: string
+} {
+  const dir = configDir ?? homedir()
+  if (readSetupToken(dir) === undefined) return { loggedIn: false }
+  const account = readOauthAccount(dir)
+  return { loggedIn: true, email: account.emailAddress }
+}
+
 export async function resolveClaudeOauthEnv(
   sources?: ClaudeOauthEnvSources,
 ): Promise<ClaudeOauthEnv> {

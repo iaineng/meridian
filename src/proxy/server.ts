@@ -16,7 +16,8 @@ import { randomUUID } from "crypto"
 import { diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import { createConcurrencyGate } from "./concurrency"
 import { classifyError, buildErrorEnvelope } from "./errors"
-import { resolveClaudeExecutableAsync, getClaudeAuthStatusAsync, getAuthCacheInfo } from "./models"
+import { resolveClaudeExecutableAsync } from "./models"
+import { getSetupTokenAuthStatus } from "./claudeOauthEnv"
 import { buildPromptBundle } from "./pipeline/prompt"
 import { buildSharedContext } from "./pipeline/context"
 import { buildHookBundle } from "./pipeline/hooks"
@@ -202,26 +203,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   // Telemetry dashboard and API
   app.route("/telemetry", createTelemetryRoutes())
 
-  // Health check endpoint — verifies auth status
-  app.get("/health", async (c) => {
+  // Health check endpoint — verifies setup-token presence.
+  // The proxy only needs CLAUDE_CODE_OAUTH_TOKEN at runtime, and that comes
+  // from <configDir>/setup-token. So setup-token presence is the source of
+  // truth — `claude auth status` is intentionally NOT consulted here.
+  app.get("/health", (c) => {
     try {
       const healthProfile = resolveProfile(finalConfig.profiles, finalConfig.defaultProfile)
-      const profileEnvOverrides = Object.keys(healthProfile.env).length > 0 ? healthProfile.env : undefined
-      const auth = await getClaudeAuthStatusAsync(
-        healthProfile.id !== "default" ? healthProfile.id : undefined,
-        profileEnvOverrides,
-      )
-      if (!auth) {
-        return c.json({
-          status: "degraded",
-          error: "Could not verify auth status",
-          mode: "passthrough",
-        })
-      }
+      const auth = getSetupTokenAuthStatus(healthProfile.env.CLAUDE_CONFIG_DIR)
       if (!auth.loggedIn) {
         return c.json({
           status: "unhealthy",
-          error: "Not logged in. Run: claude login",
+          error: "No setup-token found. Generate one with `claude setup-token` and write it to <configDir>/setup-token.",
           auth: { loggedIn: false },
         }, 503)
       }
@@ -230,14 +223,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         auth: {
           loggedIn: true,
           email: auth.email,
-          subscriptionType: auth.subscriptionType,
         },
         mode: "passthrough",
       })
     } catch {
       return c.json({
         status: "degraded",
-        error: "Could not verify auth status",
+        error: "Could not check setup-token",
         mode: "passthrough",
       })
     }
@@ -245,25 +237,20 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
   // --- Profile management routes ---
 
-  app.get("/profiles/list", async (c) => {
+  app.get("/profiles/list", (c) => {
     const profiles = listProfiles(finalConfig.profiles, finalConfig.defaultProfile)
-    const enriched = await Promise.all(profiles.map(async (p) => {
+    const enriched = profiles.map((p) => {
       const resolved = resolveProfile(finalConfig.profiles, finalConfig.defaultProfile, p.id)
-      const envOverrides = Object.keys(resolved.env).length > 0 ? resolved.env : undefined
-      const auth = await getClaudeAuthStatusAsync(
-        p.id !== "default" ? p.id : undefined,
-        envOverrides,
-      )
-      const cacheInfo = getAuthCacheInfo(p.id !== "default" ? p.id : undefined)
+      const auth = getSetupTokenAuthStatus(resolved.env.CLAUDE_CONFIG_DIR)
       return {
         ...p,
-        email: auth?.email || null,
-        subscriptionType: auth?.subscriptionType || null,
-        loggedIn: auth?.loggedIn ?? false,
-        lastCheckedAt: cacheInfo.lastCheckedAt || null,
-        lastSuccessAt: cacheInfo.lastSuccessAt || null,
+        email: auth.email || null,
+        subscriptionType: null,
+        loggedIn: auth.loggedIn,
+        lastCheckedAt: null,
+        lastSuccessAt: null,
       }
-    }))
+    })
     return c.json({
       profiles: enriched,
       activeProfile: getActiveProfileId() || finalConfig.defaultProfile || profiles[0]?.id || "default",
@@ -341,30 +328,10 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
     }
   })
 
-  // Background auth keepalive: periodically refresh auth status for all
-  // configured profiles so switching is instant (no stale token delay).
-  let authKeepaliveInterval: ReturnType<typeof setInterval> | undefined
-  const effectiveProfiles = getEffectiveProfiles(finalConfig.profiles)
-  if (effectiveProfiles.length > 0) {
-    const AUTH_KEEPALIVE_MS = 45_000 // 45s — well within the 60s TTL
-    authKeepaliveInterval = setInterval(async () => {
-      const currentProfiles = getEffectiveProfiles(finalConfig.profiles)
-      for (const profile of currentProfiles) {
-        const resolved = resolveProfile(finalConfig.profiles, finalConfig.defaultProfile, profile.id)
-        if (Object.keys(resolved.env).length > 0) {
-          getClaudeAuthStatusAsync(resolved.id, resolved.env).catch(() => {})
-        }
-      }
-      getClaudeAuthStatusAsync().catch(() => {})
-    }, AUTH_KEEPALIVE_MS)
-    if (authKeepaliveInterval.unref) authKeepaliveInterval.unref()
-  }
-
   return {
     server,
     config: finalConfig,
     async close() {
-      if (authKeepaliveInterval) clearInterval(authKeepaliveInterval)
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })

@@ -2,8 +2,7 @@
 
 import { createRequire } from "module"
 import { startProxyServer } from "../src/proxy/server"
-import { exec as execCallback } from "child_process"
-import { promisify } from "util"
+import { getSetupTokenAuthStatus } from "../src/proxy/claudeOauthEnv"
 
 const require = createRequire(import.meta.url)
 const { version } = require("../package.json")
@@ -53,8 +52,6 @@ if (args[0] === "profile") {
   process.exit(0)
 }
 
-const exec = promisify(execCallback)
-
 // Prevent SDK subprocess crashes from killing the proxy
 process.on("uncaughtException", (err) => {
   console.error(`[PROXY] Uncaught exception (recovered): ${err.message}`)
@@ -91,21 +88,14 @@ try {
 
 export async function runCli(
   start = startProxyServer,
-  runExec: typeof exec = exec
+  authCheck: (configDir?: string) => { loggedIn: boolean; email?: string } = getSetupTokenAuthStatus,
 ) {
-  // Pre-flight auth check
-  try {
-    const { stdout } = await runExec("claude auth status", { timeout: 5000 })
-    const auth = JSON.parse(stdout)
-    if (!auth.loggedIn) {
-      console.error("\x1b[31m✗ Not logged in to Claude.\x1b[0m Run: claude login")
-      process.exit(1)
-    }
-    if (auth.subscriptionType !== "max") {
-      console.error(`\x1b[33m⚠ Claude subscription: ${auth.subscriptionType || "unknown"} (Max recommended)\x1b[0m`)
-    }
-  } catch {
-    console.error("\x1b[33m⚠ Could not verify Claude auth status. If requests fail, run: claude login\x1b[0m")
+  // Pre-flight: setup-token presence is the runtime source of truth.
+  // We deliberately do NOT shell out to `claude auth status` — the proxy
+  // only needs CLAUDE_CODE_OAUTH_TOKEN, which is sourced from setup-token.
+  const auth = authCheck(process.env.CLAUDE_CONFIG_DIR)
+  if (!auth.loggedIn) {
+    console.error("\x1b[33m⚠ No Claude setup-token found. Generate one with `claude setup-token` and write it to <CLAUDE_CONFIG_DIR>/setup-token (or ~/setup-token).\x1b[0m")
   }
 
   // Enable disk auto-discovery when no MERIDIAN_PROFILES env var is set.
