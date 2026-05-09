@@ -27,8 +27,15 @@
 #   ./bin/deploy-vm.sh status                   # show status table
 #   ./bin/deploy-vm.sh shell                    # interactive shell
 #   ./bin/deploy-vm.sh migrate-tmpfs            # recreate with --tmpfs JSONL (preserves /app + auth via docker cp)
-#   ./bin/deploy-vm.sh delete                   # remove container (with confirmation)
+#   ./bin/deploy-vm.sh delete                   # remove container + home volume (with confirmation)
 #   ./bin/deploy-vm.sh list                     # list all meridian-vm containers
+#
+# Persistence:
+#   /home/claude (the in-container claude user's home) is backed by a named
+#   Docker volume `${CONTAINER_NAME}-home`, mounted at `create` / `deploy` /
+#   `migrate-tmpfs` time. Auth, the native Claude CLI install, and any other
+#   per-user state survive `delete` + `create` cycles unless `delete` is run
+#   (which now removes the volume too).
 #
 # Options:
 #   --id N[,N...]   Instance number(s). Comma-separated list runs each action
@@ -56,6 +63,13 @@
 #                   tmpfs size for --tmpfs-jsonl (default: 1g). Accepts
 #                   any `--tmpfs` size suffix (k, m, g).
 #   --force         Skip confirmations (for delete)
+#   --full-auth     For `auth`: run the full legacy flow — interactive
+#                   `claude` login + `claude auth status` verification —
+#                   *before* the setup-token step. Default behavior runs
+#                   only `claude setup-token`, which is sufficient when
+#                   the container is already authenticated (e.g. via a
+#                   persisted home volume). Pass this flag for first-time
+#                   auth on a fresh container.
 #
 # Environment variables:
 #   HTTP_PROXY / HTTPS_PROXY / ALL_PROXY  Network proxy (overridden by --proxy)
@@ -83,6 +97,7 @@ NETWORK_PROXY=""
 NETWORK_NO_PROXY=""
 TMPFS_JSONL=false
 TMPFS_JSONL_SIZE="1g"
+FULL_AUTH=false
 # JSONL session transcripts live under $HOME/.claude/projects for the in-
 # container claude user. When --tmpfs-jsonl is set, this path is mounted on
 # a tmpfs so transcripts never touch the container's writable layer.
@@ -135,6 +150,8 @@ while [[ $# -gt 0 ]]; do
       TMPFS_JSONL_SIZE="$2"; shift 2 ;;
     --force)
       FORCE=true; shift ;;
+    --full-auth)
+      FULL_AUTH=true; shift ;;
     --help|-h)
       # Print the leading comment block (everything from line 2 up to the
       # first non-comment, non-blank line). Self-updates as the header grows.
@@ -264,6 +281,20 @@ tmpfs_mount_args() {
   if [ "$TMPFS_JSONL" = true ]; then
     echo "--tmpfs ${TMPFS_JSONL_PATH}:rw,size=${TMPFS_JSONL_SIZE},mode=0700"
   fi
+}
+
+# Per-instance named Docker volume that backs /home/claude inside the
+# container. Persists Claude auth (.credentials.json, .claude.json), the
+# native claude CLI install (~/.claude/bin), shell history, and any other
+# state the claude user writes to its home — across `delete` + `create`
+# cycles. The tmpfs mount at /home/claude/.claude/projects (when enabled)
+# layers on top of this volume, so JSONL transcripts stay ephemeral.
+home_volume_name() {
+  echo "${CONTAINER_NAME}-home"
+}
+
+home_volume_args() {
+  echo "-v $(home_volume_name):/home/claude"
 }
 
 # Build proxy export string for injection into docker exec commands
@@ -426,12 +457,14 @@ cmd_deploy() {
       --name "$CONTAINER_NAME" \
       --runtime=runsc \
       -p "${HOST_PORT}:3456" \
+      $(home_volume_args) \
       $(tmpfs_mount_args) \
       "$BASE_IMAGE" \
       sleep infinity > /dev/null
+    docker exec "$CONTAINER_NAME" chown claude:claude /home/claude > /dev/null 2>&1
     [ "$TMPFS_JSONL" = true ] && docker exec "$CONTAINER_NAME" \
       chown claude:claude "$TMPFS_JSONL_PATH" > /dev/null 2>&1
-    echo "  Container created."
+    echo "  Container created (home volume: $(home_volume_name))."
   fi
   echo ""
 
@@ -472,15 +505,18 @@ cmd_create() {
     --name "$CONTAINER_NAME" \
     --runtime=runsc \
     -p "${HOST_PORT}:3456" \
+    $(home_volume_args) \
     $(tmpfs_mount_args) \
     "$BASE_IMAGE" \
     sleep infinity
 
+  docker exec "$CONTAINER_NAME" chown claude:claude /home/claude > /dev/null 2>&1
   [ "$TMPFS_JSONL" = true ] && docker exec "$CONTAINER_NAME" \
     chown claude:claude "$TMPFS_JSONL_PATH" > /dev/null 2>&1
 
   echo ""
   echo "  Container created."
+  echo "  Home volume:  $(home_volume_name) -> /home/claude"
   echo ""
   echo "  Next step: $0 setup --name $CONTAINER_NAME"
 }
@@ -537,6 +573,17 @@ cmd_setup() {
 cmd_auth() {
   require_container
 
+  if [ "$FULL_AUTH" != true ]; then
+    print_banner "Generating setup-token in: $CONTAINER_NAME"
+    echo "  (default mode — skipping interactive 'claude' login)"
+    echo "  Pass --full-auth for first-time auth on a fresh container."
+    echo ""
+    _cmd_auth_setup_token_flow
+    echo ""
+    echo "  Next step: $0 install --name $CONTAINER_NAME"
+    return
+  fi
+
   print_banner "Authenticating Claude in: $CONTAINER_NAME"
   echo ""
   echo "  Running 'claude' inside the container..."
@@ -563,55 +610,7 @@ cmd_auth() {
     email=$(echo "$auth_check" | grep -o '"email": "[^"]*"' | head -1 | sed 's/"email": "//;s/"//')
     echo "  Authenticated as: $email"
 
-    # Generate a setup-token inside the container, then write it to
-    # /home/claude/setup-token. The proxy reads this file as a source for
-    # the CLAUDE_CODE_OAUTH_TOKEN env injected into the SDK subprocess.
-    # Leave the token input blank to skip.
-    echo ""
-    echo "  Generating setup-token (used for CLAUDE_CODE_OAUTH_TOKEN env injection)."
-    echo "  Running 'claude setup-token' inside the container..."
-    echo "  Copy the token it prints, then paste it below."
-    echo ""
-    docker exec -it --user claude "$CONTAINER_NAME" bash -c "
-      $(proxy_env)
-      export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
-      claude setup-token
-    " || true
-
-    echo ""
-    echo "  Paste the token printed above (input hidden). Press Enter with empty input to skip."
-    local setup_token=""
-    # -s: silent (token stays off the screen). No timeout — user may need
-    # arbitrary time to complete the browser flow and copy the token.
-    read -r -s -p "  setup-token> " setup_token || true
-    echo ""
-
-    if [ -n "$setup_token" ]; then
-      # Pipe via stdin — token never touches argv or process listings.
-      printf '%s' "$setup_token" | docker exec -i --user claude "$CONTAINER_NAME" \
-        bash -c 'cat > /home/claude/setup-token && chmod 600 /home/claude/setup-token'
-      echo "  setup-token written to /home/claude/setup-token (mode 600)."
-    else
-      echo "  No setup-token provided (skipped)."
-    fi
-
-    # Patch hasCompletedOnboarding to suppress interactive prompts
-    docker exec --user claude "$CONTAINER_NAME" bash -c '
-      CLAUDE_JSON="/home/claude/.claude.json"
-      if [ -f "$CLAUDE_JSON" ]; then
-        if command -v node > /dev/null 2>&1; then
-          node -e "
-            const fs = require(\"fs\");
-            const f = \"$CLAUDE_JSON\";
-            try {
-              const d = JSON.parse(fs.readFileSync(f, \"utf8\"));
-              d.hasCompletedOnboarding = true;
-              fs.writeFileSync(f, JSON.stringify(d, null, 2));
-            } catch(e) {}
-          "
-        fi
-      fi
-    ' 2>/dev/null || true
+    _cmd_auth_setup_token_flow
 
     echo ""
     echo "  Next step: $0 install --name $CONTAINER_NAME"
@@ -620,6 +619,58 @@ cmd_auth() {
     echo "  Re-run '$0 auth --name $CONTAINER_NAME' to try again."
     exit 1
   fi
+}
+
+# Generate a setup-token inside the container, then write it to
+# /home/claude/setup-token. The proxy reads this file as a source for
+# the CLAUDE_CODE_OAUTH_TOKEN env injected into the SDK subprocess.
+# Leave the token input blank to skip.
+_cmd_auth_setup_token_flow() {
+  echo ""
+  echo "  Generating setup-token (used for CLAUDE_CODE_OAUTH_TOKEN env injection)."
+  echo "  Running 'claude setup-token' inside the container..."
+  echo "  Copy the token it prints, then paste it below."
+  echo ""
+  docker exec -it --user claude "$CONTAINER_NAME" bash -c "
+    $(proxy_env)
+    export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
+    claude setup-token
+  " || true
+
+  echo ""
+  echo "  Paste the token printed above (input hidden). Press Enter with empty input to skip."
+  local setup_token=""
+  # -s: silent (token stays off the screen). No timeout — user may need
+  # arbitrary time to complete the browser flow and copy the token.
+  read -r -s -p "  setup-token> " setup_token || true
+  echo ""
+
+  if [ -n "$setup_token" ]; then
+    # Pipe via stdin — token never touches argv or process listings.
+    printf '%s' "$setup_token" | docker exec -i --user claude "$CONTAINER_NAME" \
+      bash -c 'cat > /home/claude/setup-token && chmod 600 /home/claude/setup-token'
+    echo "  setup-token written to /home/claude/setup-token (mode 600)."
+  else
+    echo "  No setup-token provided (skipped)."
+  fi
+
+  # Patch hasCompletedOnboarding to suppress interactive prompts
+  docker exec --user claude "$CONTAINER_NAME" bash -c '
+    CLAUDE_JSON="/home/claude/.claude.json"
+    if [ -f "$CLAUDE_JSON" ]; then
+      if command -v node > /dev/null 2>&1; then
+        node -e "
+          const fs = require(\"fs\");
+          const f = \"$CLAUDE_JSON\";
+          try {
+            const d = JSON.parse(fs.readFileSync(f, \"utf8\"));
+            d.hasCompletedOnboarding = true;
+            fs.writeFileSync(f, JSON.stringify(d, null, 2));
+          } catch(e) {}
+        "
+      fi
+    fi
+  ' 2>/dev/null || true
 }
 
 cmd_install() {
@@ -879,18 +930,24 @@ cmd_migrate_tmpfs() {
   fi
   echo "  Done."
 
-  # Step 4: Recreate container from the original base image with tmpfs
+  # Step 4: Recreate container from the original base image with tmpfs.
+  # The home volume is reattached here too — its contents survived the
+  # `docker rm` in step 3, so /home/claude comes back populated even
+  # before the tar-restore in step 5 (the restore is now idempotent for
+  # containers that already had the volume).
   echo "── [4/6] Recreating with tmpfs ──────────────────────"
   if ! docker run -d \
     --name "$CONTAINER_NAME" \
     --runtime="$actual_runtime" \
     -p "${actual_port}:3456" \
+    $(home_volume_args) \
     $(tmpfs_mount_args) \
     "$actual_image" \
     sleep infinity > /dev/null; then
     echo "  Error: docker run failed. State staged at $stage_dir"
     exit 1
   fi
+  docker exec "$CONTAINER_NAME" chown claude:claude /home/claude > /dev/null 2>&1
   docker exec "$CONTAINER_NAME" chown claude:claude "$TMPFS_JSONL_PATH" > /dev/null 2>&1
   echo "  Done."
 
@@ -1129,7 +1186,12 @@ cmd_root_shell() {
 }
 
 cmd_delete() {
-  if ! container_exists; then
+  local vol_name
+  vol_name=$(home_volume_name)
+  local vol_exists=false
+  docker volume inspect "$vol_name" > /dev/null 2>&1 && vol_exists=true
+
+  if ! container_exists && [ "$vol_exists" = false ]; then
     echo "  Container '$CONTAINER_NAME' does not exist."
     exit 0
   fi
@@ -1137,7 +1199,8 @@ cmd_delete() {
   if [ "$FORCE" = false ]; then
     print_banner "Delete container: $CONTAINER_NAME"
     echo ""
-    echo "  WARNING: This removes the container and ALL data inside it,"
+    echo "  WARNING: This removes the container and the home volume"
+    echo "  '$vol_name', destroying ALL data inside —"
     echo "  including Claude auth credentials and sessions."
     echo ""
     read -r -p "  Type the container name to confirm: " CONFIRM
@@ -1147,9 +1210,17 @@ cmd_delete() {
     fi
   fi
 
-  echo "  Removing container '$CONTAINER_NAME'..."
-  docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1
-  echo "  Removed."
+  if container_exists; then
+    echo "  Removing container '$CONTAINER_NAME'..."
+    docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1
+    echo "  Container removed."
+  fi
+  if [ "$vol_exists" = true ]; then
+    echo "  Removing home volume '$vol_name'..."
+    docker volume rm "$vol_name" > /dev/null 2>&1 \
+      && echo "  Volume removed." \
+      || echo "  Warning: failed to remove volume '$vol_name' (may be in use by another container)."
+  fi
 }
 
 cmd_list() {
