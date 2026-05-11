@@ -11,8 +11,12 @@
  * round delivers a matching tool_result.
  */
 
-import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
-import { z } from "zod"
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  type Tool,
+} from "@modelcontextprotocol/sdk/types.js"
 import {
   PASSTHROUGH_MCP_NAME,
   PASSTHROUGH_MCP_PREFIX,
@@ -27,7 +31,6 @@ import type {
   PendingTool,
   ToolUseBinding,
   BindingSlot,
-  Deferred,
 } from "./session/blockingPool"
 import { defer } from "./session/blockingPool"
 import { claudeLog } from "../logger"
@@ -40,95 +43,77 @@ export {
   toPassthroughMcpFullToolName,
 }
 
-/**
- * Convert a JSON Schema object to a Zod schema (simplified).
- * Handles the common types clients send. Falls back to z.any() for complex types.
- */
-function jsonSchemaToZod(schema: any): z.ZodTypeAny {
-  if (!schema || typeof schema !== "object") return z.any()
+type ClientTool = { name: string; description?: string; input_schema?: any }
+type PassthroughHandler = (
+  mcpToolName: string,
+  clientToolName: string,
+  args: unknown,
+) => Promise<CallToolResult>
 
-  if (schema.type === "string") {
-    let s = z.string()
-    if (schema.description) s = s.describe(schema.description)
-    if (schema.enum) return z.enum(schema.enum as [string, ...string[]])
-    return s
-  }
-  if (schema.type === "number" || schema.type === "integer") {
-    let n = z.number()
-    if (schema.description) n = n.describe(schema.description)
-    return n
-  }
-  if (schema.type === "boolean") return z.boolean()
-  if (schema.type === "array") {
-    const items = schema.items ? jsonSchemaToZod(schema.items) : z.any()
-    return z.array(items)
-  }
-  if (schema.type === "object" && schema.properties) {
-    const shape: Record<string, z.ZodTypeAny> = {}
-    const required = new Set(schema.required || [])
-    for (const [key, propSchema] of Object.entries(schema.properties)) {
-      const zodProp = jsonSchemaToZod(propSchema as any)
-      shape[key] = required.has(key) ? zodProp : zodProp.optional()
-    }
-    return z.object(shape)
-  }
-
-  return z.any()
+function cloneJson<T>(value: T): T {
+  return value == null ? value : JSON.parse(JSON.stringify(value))
 }
 
-/**
- * Create an MCP server with tool definitions matching the client's request.
- */
-export function createPassthroughMcpServer(
-  tools: Array<{ name: string; description?: string; input_schema?: any }>
+function normalizeMcpInputSchema(schema: any): Tool["inputSchema"] {
+  if (!schema || typeof schema !== "object" || schema.type !== "object") {
+    return { type: "object", properties: {} }
+  }
+  return cloneJson(schema)
+}
+
+function createRawPassthroughMcpServer(
+  tools: ClientTool[],
+  handleToolCall: PassthroughHandler,
+  options?: { annotations?: Tool["annotations"] },
 ) {
-  const server = createSdkMcpServer({ name: PASSTHROUGH_MCP_NAME })
+  const instance = new McpServer(
+    { name: PASSTHROUGH_MCP_NAME, version: "1.0.0" },
+    { capabilities: { tools: { listChanged: true } } },
+  )
+  const server = { type: "sdk" as const, name: PASSTHROUGH_MCP_NAME, instance }
   const toolNames: string[] = []
   const clientNameByMcpToolName = new Map<string, string>()
   const clientNameByFullToolName = new Map<string, string>()
+  const listedTools: Tool[] = []
 
   for (const tool of tools) {
     const mcpToolName = normalizePassthroughMcpToolName(tool.name)
     const fullToolName = toPassthroughMcpFullToolName(tool.name)
     clientNameByMcpToolName.set(mcpToolName, tool.name)
     clientNameByFullToolName.set(fullToolName, tool.name)
-
-    try {
-      // Convert the client's JSON Schema to Zod for MCP registration
-      const zodSchema = tool.input_schema?.properties
-        ? jsonSchemaToZod(tool.input_schema)
-        : z.object({})
-
-      // The raw shape for the tool() call needs to be a record of Zod types
-      const shape: Record<string, z.ZodTypeAny> =
-        zodSchema instanceof z.ZodObject
-          ? (zodSchema as any).shape
-          : { input: z.any() }
-
-      server.instance.registerTool(
-        mcpToolName,
-        {
-          ...(tool.description ? { description: tool.description } : {}),
-          inputSchema: shape,
-        },
-        async () => ({ content: [{ type: "text" as const, text: "passthrough" }] })
-      )
-      toolNames.push(fullToolName)
-    } catch {
-      // If schema conversion fails, register with permissive schema
-      server.instance.registerTool(
-        mcpToolName,
-        {
-          ...(tool.description ? { description: tool.description } : {}),
-          inputSchema: { input: z.string().optional() },
-        },
-        async () => ({ content: [{ type: "text" as const, text: "passthrough" }] })
-      )
-      toolNames.push(fullToolName)
-    }
+    toolNames.push(fullToolName)
+    listedTools.push({
+      name: mcpToolName,
+      ...(tool.description ? { description: tool.description } : {}),
+      inputSchema: normalizeMcpInputSchema(tool.input_schema),
+      execution: { taskSupport: "forbidden" },
+      ...(options?.annotations ? { annotations: options.annotations } : {}),
+    })
   }
 
+  instance.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: cloneJson(listedTools),
+  }))
+  instance.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name
+    const clientToolName = clientNameByMcpToolName.get(toolName)
+    if (!clientToolName) {
+      return { content: [{ type: "text", text: `Tool ${toolName} not found` }], isError: true }
+    }
+    return await handleToolCall(toolName, clientToolName, request.params.arguments ?? {})
+  })
+
   return { server, toolNames, clientNameByMcpToolName, clientNameByFullToolName }
+}
+
+/**
+ * Create an MCP server with tool definitions matching the client's request.
+ */
+export function createPassthroughMcpServer(tools: ClientTool[]) {
+  return createRawPassthroughMcpServer(
+    tools,
+    async () => ({ content: [{ type: "text", text: "passthrough" }] }),
+  )
 }
 
 /**
@@ -148,9 +133,9 @@ export function stripMcpPrefix(toolName: string): string {
  *   2. Every expected `tool_use_id` is present in `state.pendingTools` —
  *      i.e. every handler has entered and registered its resolver.
  *
- * Safe to call from either edge: `translateBlockingMessage` calls it when
- * the `message_delta` arrives; the MCP handler calls it after registering
- * its `PendingTool`. Whichever edge is last wins.
+ * Safe to call from either edge: the consumer calls it after translating a
+ * `message_delta`, and the MCP handler calls it after registering its
+ * `PendingTool`. Whichever edge is last wins.
  */
 export function maybeCloseRound(state: BlockingSessionState): void {
   if (state.status === "terminated") return
@@ -159,6 +144,7 @@ export function maybeCloseRound(state: BlockingSessionState): void {
   for (const id of gate.expectedIds) {
     if (!state.pendingTools.has(id)) return
   }
+  const frames = gate.frames
   state.pendingRoundClose = null
   state.status = "awaiting_results"
   // The current round is over — the next time the SDK iterator emits a
@@ -177,7 +163,7 @@ export function maybeCloseRound(state: BlockingSessionState): void {
   state.outputFormatLastDelta = undefined
   state.outputFormatTerminalForwarded = false
   const sink = state.activeSink
-  const evt = { kind: "close_round" as const, stopReason: "tool_use" as const }
+  const evt = { kind: "close_round" as const, stopReason: "tool_use" as const, frames }
   if (sink) sink(evt)
   else state.eventBuffer.push(evt)
 }
@@ -227,43 +213,17 @@ export function registerToolUseBinding(
  * tool definition carries `annotations: { readOnlyHint: true }` so the
  * Anthropic API treats them as safe to interleave with thinking.
  *
- * This uses the SDK's `tool()` helper + `createSdkMcpServer({ tools: [...] })`
- * predeclared form (rather than `.instance.tool()`), which is the recommended
- * path for tools carrying annotations.
+ * We implement the public MCP `tools/list` / `tools/call` handlers directly
+ * so the client's JSON Schema is exposed verbatim, including nested
+ * `description` fields that Zod-based registration may otherwise drop.
  */
 export function createBlockingPassthroughMcpServer(
-  tools: Array<{ name: string; description?: string; input_schema?: any }>,
+  tools: ClientTool[],
   state: BlockingSessionState,
 ) {
-  // Lazy-require `tool` so test suites that mock `@anthropic-ai/claude-agent-sdk`
-  // do not need to stub it — the mock replaces the module object at eval time
-  // and static imports of un-stubbed names fail at link time.
-  const sdk = require("@anthropic-ai/claude-agent-sdk") as { tool: (...args: any[]) => any }
-  const makeTool = sdk.tool
-  const toolNames: string[] = []
-  const defs: any[] = []
-  const clientNameByMcpToolName = new Map<string, string>()
-  const clientNameByFullToolName = new Map<string, string>()
-
-  for (const t of tools) {
-    const mcpToolName = normalizePassthroughMcpToolName(t.name)
-    const clientToolName = t.name
-    const fullToolName = toPassthroughMcpFullToolName(t.name)
-    clientNameByMcpToolName.set(mcpToolName, clientToolName)
-    clientNameByFullToolName.set(fullToolName, clientToolName)
-    let shape: Record<string, z.ZodTypeAny>
-    try {
-      const zodSchema = t.input_schema?.properties
-        ? jsonSchemaToZod(t.input_schema)
-        : z.object({})
-      shape = zodSchema instanceof z.ZodObject
-        ? (zodSchema as any).shape
-        : { input: z.any() }
-    } catch {
-      shape = { input: z.string().optional() }
-    }
-
-    const handler = async (_args: unknown, _extra: unknown): Promise<CallToolResult> => {
+  const passthrough = createRawPassthroughMcpServer(
+    tools,
+    async (mcpToolName, clientToolName): Promise<CallToolResult> => {
       if (state.status === "terminated") {
         return { content: [{ type: "text", text: "blocking session terminated" }], isError: true }
       }
@@ -302,24 +262,12 @@ export function createBlockingPassthroughMcpServer(
         })
         maybeCloseRound(state)
       })
-    }
+    },
+    { annotations: { readOnlyHint: true } },
+  )
 
-    defs.push(makeTool(
-      mcpToolName,
-      t.description || mcpToolName,
-      shape,
-      handler,
-      { annotations: { readOnlyHint: true } },
-    ))
-    toolNames.push(fullToolName)
-  }
+  state.clientNameByMcpToolName = passthrough.clientNameByMcpToolName
+  state.clientNameByFullToolName = passthrough.clientNameByFullToolName
 
-  state.clientNameByMcpToolName = clientNameByMcpToolName
-  state.clientNameByFullToolName = clientNameByFullToolName
-
-  const server = createSdkMcpServer({
-    name: PASSTHROUGH_MCP_NAME,
-    tools: defs,
-  })
-  return { server, toolNames, clientNameByMcpToolName, clientNameByFullToolName }
+  return passthrough
 }
