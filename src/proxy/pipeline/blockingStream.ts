@@ -15,10 +15,10 @@
  *     the active HTTP sink or to an internal buffer when detached.
  *   - Each HTTP round corresponds to exactly one SDK internal turn. The
  *     SDK's native `message_start` / `message_delta` frames carry real
- *     `msg_id`, `model`, and `usage` and are forwarded verbatim. Only
- *     `message_stop` is suppressed and re-emitted synthetically after the
- *     two-gate round closer fires — meridian needs the HTTP to stay open
- *     until every MCP handler has registered its PendingTool.
+ *     `msg_id`, `model`, and `usage`. Terminal tool_use deltas are held
+ *     until the two-gate round closer fires so they can be emitted together
+ *     with the synthetic `message_stop` — meridian needs the HTTP to stay
+ *     open until every MCP handler has registered its PendingTool.
  *   - The round closer in `passthroughTools.ts:maybeCloseRound` flushes a
  *     `close_round` event when the API emits `message_delta(stop_reason:
  *     "tool_use")` AND every expected handler has entered (its PendingTool
@@ -197,6 +197,47 @@ function pushEvent(state: BlockingSessionState, evt: BufferedEvent): void {
   else state.eventBuffer.push(evt)
 }
 
+function parseSseFrame(frame: Uint8Array): { type: string; data: any } | null {
+  const text = FRAME_PEEK_DECODER.decode(frame)
+  if (!text.startsWith("event: ")) return null
+  const nl = text.indexOf("\n", 7)
+  if (nl < 0) return null
+  const type = text.slice(7, nl)
+  const dataPrefix = "data: "
+  const dataStart = text.indexOf(dataPrefix, nl + 1)
+  if (dataStart < 0) return null
+  const jsonStart = dataStart + dataPrefix.length
+  const jsonEnd = text.indexOf("\n\n", jsonStart)
+  try {
+    return { type, data: JSON.parse(text.slice(jsonStart, jsonEnd < 0 ? undefined : jsonEnd)) }
+  } catch {
+    return null
+  }
+}
+
+function isToolUseMessageDeltaFrame(frame: Uint8Array): boolean {
+  const parsed = parseSseFrame(frame)
+  return parsed?.type === "message_delta"
+    && parsed.data?.delta?.stop_reason === "tool_use"
+}
+
+function discardAcknowledgedRoundTail(state: BlockingSessionState): void {
+  if (state.eventBuffer.length === 0) return
+  const before = state.eventBuffer.length
+  state.eventBuffer = state.eventBuffer.filter((evt) => {
+    if (evt.kind === "close_round") return false
+    if (evt.kind !== "sse") return true
+    return !isToolUseMessageDeltaFrame(evt.frame)
+  })
+  const dropped = before - state.eventBuffer.length
+  if (dropped > 0) {
+    claudeLog("blocking.buffer.dropped_acknowledged_round_tail", {
+      key: stringifyBlockingKey(state.key),
+      dropped,
+    })
+  }
+}
+
 /**
  * Apply a continuation request to a live blocking session: route the
  * incoming `tool_result`s to their suspended MCP handlers and refresh the
@@ -223,6 +264,11 @@ export function applyContinuation(
 ): void {
   const orderedRoundIds = state.currentRoundToolIds.slice()
   const results = handler.pendingToolResults ?? []
+  // A returned tool_result proves the client already accepted the previous
+  // tool_use round. Drop any terminal tail left behind by a cancelled or
+  // detached HTTP so it cannot be replayed before the next message_start.
+  if (results.length > 0) discardAcknowledgedRoundTail(state)
+
   for (let i = 0; i < results.length; i++) {
     const tr = results[i]!
     let pending = (typeof tr.tool_use_id === "string")
@@ -268,8 +314,10 @@ export function applyContinuation(
 // internal turn (the next turn cannot begin until the client delivers the
 // tool_result that resolves this turn's pending MCP handlers). Every SDK
 // turn already emits its own `message_start` (with real `msg_id`, `model`,
-// and `usage`) and `message_delta` (with real `output_tokens` + stop_reason),
-// so meridian forwards them verbatim.
+// and `usage`) and `message_delta` (with real `output_tokens` + stop_reason).
+// Non-terminal deltas are forwarded immediately; terminal tool_use deltas are
+// held until close_round so the client receives the delta and `message_stop`
+// as one ordered tail.
 //
 // The only SDK event meridian has to withhold is `message_stop`: the SDK
 // emits it as soon as the API marks the turn complete, but meridian cannot
@@ -407,13 +455,11 @@ export function translateBlockingMessage(
     // closer. `expectedIds` is the set of tool_use ids observed in the
     // turn's content_block_start events (passthrough-prefixed only — the
     // built-in WebSearch tool_uses we suppress never enter
-    // `state.toolUseIdBySdkIdx`). close_round will fire as soon as every
-    // handler has registered its PendingTool (whichever gate edge
-    // completes last) — the caller runs `maybeCloseRound` AFTER pushing
-    // these frames to the sink. Calling it here would race: if handlers
-    // are already pending, close_round would fire first, detach the sink,
-    // then the message_delta frame returned from this function would miss
-    // it and land in the buffer → delivered at the start of the next HTTP.
+    // `state.toolUseIdBySdkIdx`). Hold the terminal message_delta until
+    // close_round so the active sink can write it atomically with the
+    // synthetic message_stop. Emitting it as ordinary SSE first is racy:
+    // a close_round from the handler edge can detach the HTTP immediately
+    // after, leaving the delta orphaned in the next round.
     const stopReason = event.delta?.stop_reason as string | undefined
     if (stopReason === "tool_use") {
       const expectedIds = new Set<string>()
@@ -421,19 +467,21 @@ export function translateBlockingMessage(
       if (expectedIds.size === 0 && state.structuredOutputIndices.size > 0) {
         // Terminal StructuredOutput: the only "tool_use" this turn was the
         // schema-conformant payload, which we already translated to a
-        // text block. The SDK will end shortly; rewrite stop_reason to
-        // `end_turn` so the client treats this as the final response and
-        // does NOT try to send back a tool_result. Round-close is NOT
-        // armed — the natural SDK `end` event drives HTTP teardown. The
-        // `outputFormatTerminalForwarded` flag suppresses the consumer's
-        // synthetic finally-block frame so the client never sees two
-        // terminal deltas.
+        // text block. Rewrite stop_reason to `end_turn` so the client
+        // treats this as the final response and does NOT try to send back
+        // a tool_result. Claude Code still has hidden StructuredOutput
+        // bookkeeping to do after this, but that work is no longer part of
+        // the client-visible SSE message; mark the SDK stream ended so the
+        // consumer emits synthetic `message_stop` immediately and releases
+        // the blocking session before any hidden follow-up turn can buffer.
         const rewritten = {
           ...event,
           delta: { ...event.delta, stop_reason: "end_turn" },
         }
         frames.push(encoder.encode(`event: message_delta\ndata: ${JSON.stringify(rewritten)}\n\n`))
         state.outputFormatTerminalForwarded = true
+        state.sdkEnded = true
+        state.sdkEndReason = "end_turn"
         return frames
       }
       if (expectedIds.size === 0
@@ -448,7 +496,8 @@ export function translateBlockingMessage(
         // real terminal stop_reason.
         return frames
       }
-      state.pendingRoundClose = { expectedIds }
+      const terminalFrame = encoder.encode(`event: message_delta\ndata: ${JSON.stringify(event)}\n\n`)
+      state.pendingRoundClose = { expectedIds, frames: [terminalFrame] }
       // Snapshot the assistant turn's tool_use blocks for the next
       // continuation's drift check. Only tool_use is tracked — text and
       // thinking blocks don't affect tool routing or SDK in-memory state,
@@ -463,6 +512,7 @@ export function translateBlockingMessage(
           if (raw) { try { input = JSON.parse(raw) } catch {} }
           return { type: "tool_use" as const, name: tu.toolName, input }
         })
+      return frames
     } else if (state.outputFormatActive
                && state.structuredOutputIndices.size === 0) {
       // outputFormat retry path: the SDK will (a) detect the model failed
@@ -645,28 +695,50 @@ function makeMessageStopFrame(encoder: TextEncoder): Uint8Array {
   return MESSAGE_STOP_FRAME
 }
 
+function concatFrames(frames: Uint8Array[]): Uint8Array {
+  if (frames.length === 1) return frames[0]!
+  const total = frames.reduce((n, f) => n + f.length, 0)
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const f of frames) {
+    out.set(f, offset)
+    offset += f.length
+  }
+  return out
+}
+
 async function spawnConsumer(
   state: BlockingSessionState,
   iterator: AsyncIterable<unknown>,
   encoder: TextEncoder,
 ): Promise<void> {
+  let endPushed = false
+  const pushEnd = (reason: "end_turn" | "max_tokens" | "error") => {
+    if (endPushed) return
+    endPushed = true
+    pushEvent(state, { kind: "end", reason })
+  }
+
   try {
     for await (const msg of iterator) {
       if (state.status === "terminated") break
       const frames = translateBlockingMessage(msg, state, encoder)
       for (const f of frames) pushEvent(state, { kind: "sse", frame: f })
-      // Check the round-closer gate AFTER pushing this iteration's frames
-      // to the sink. translateBlockingMessage only arms `pendingRoundClose`
-      // when it sees `message_delta(stop_reason:"tool_use")`; calling
-      // maybeCloseRound inside translate would let close_round detach the
-      // sink before the SDK's own message_delta frame (returned by this
-      // same call) had a chance to reach the client, so that frame would
-      // get buffered and replayed at the start of the next HTTP round.
+      // Check the round-closer gate after ordinary frames have been pushed.
+      // For tool_use stops, translateBlockingMessage stores the terminal
+      // message_delta on `pendingRoundClose`; maybeCloseRound emits that
+      // tail together with the close event once both gates are satisfied.
       maybeCloseRound(state)
-      // Translator may have flagged a terminal max_tokens (and aborted the
-      // SDK) — break before the next iteration so we don't process any
-      // further auto-continuation turns the SDK has already enqueued.
-      if (state.sdkEnded) break
+      // Translator may have flagged a client-visible terminal condition
+      // (max_tokens or StructuredOutput-as-text). Emit the synthetic end
+      // before breaking the for-await loop: AsyncIterator.return() cleanup
+      // can take noticeable time, and the client should not wait for hidden
+      // SDK bookkeeping once its Anthropic SSE message is complete.
+      if (state.sdkEnded) {
+        pushEnd(state.sdkEndReason ?? "end_turn")
+        try { state.abort?.() } catch {}
+        break
+      }
     }
     if (!state.sdkEnded) {
       state.sdkEnded = true
@@ -693,33 +765,35 @@ async function spawnConsumer(
       }
     }
   } finally {
-    // Drain stragglers — if the very last SDK turn ran a built-in WebSearch
-    // and then `end_turn`-ed without opening another internal turn, the
-    // hook's capture would otherwise be stranded in the buffer. Inject the
-    // synthetic frames into the round before the terminal `end` event so
-    // the client's final message includes the full WebSearch trail.
-    const trailing = drainWebSearchToFrames(state, encoder)
-    for (const f of trailing) pushEvent(state, { kind: "sse", frame: f })
-    // outputFormat: the translator buffered every intermediate
-    // `message_delta` whose stop_reason was non-tool_use (SDK retry
-    // attempts) so the client never saw a premature `end_turn`. If we
-    // also never reached the StructuredOutput-emission rewrite that
-    // forwards a terminal frame on its own (`outputFormatTerminalForwarded`),
-    // synthesise one here from the buffered delta so the client always
-    // gets exactly one terminal `end_turn`. Mirrors executor.ts:996-1009.
-    if (state.outputFormatActive && !state.outputFormatTerminalForwarded) {
-      const buffered = state.outputFormatLastDelta
-      const usage = (buffered && (buffered as Record<string, unknown>).usage)
-        ?? { output_tokens: 0 }
-      const synthFrame = encoder.encode(`event: message_delta\ndata: ${JSON.stringify({
-        type: "message_delta",
-        delta: { stop_reason: "end_turn", stop_sequence: null },
-        usage,
-      })}\n\n`)
-      pushEvent(state, { kind: "sse", frame: synthFrame })
-      state.outputFormatTerminalForwarded = true
+    if (!endPushed) {
+      // Drain stragglers — if the very last SDK turn ran a built-in WebSearch
+      // and then `end_turn`-ed without opening another internal turn, the
+      // hook's capture would otherwise be stranded in the buffer. Inject the
+      // synthetic frames into the round before the terminal `end` event so
+      // the client's final message includes the full WebSearch trail.
+      const trailing = drainWebSearchToFrames(state, encoder)
+      for (const f of trailing) pushEvent(state, { kind: "sse", frame: f })
+      // outputFormat: the translator buffered every intermediate
+      // `message_delta` whose stop_reason was non-tool_use (SDK retry
+      // attempts) so the client never saw a premature `end_turn`. If we
+      // also never reached the StructuredOutput-emission rewrite that
+      // forwards a terminal frame on its own (`outputFormatTerminalForwarded`),
+      // synthesise one here from the buffered delta so the client always
+      // gets exactly one terminal `end_turn`. Mirrors executor.ts:996-1009.
+      if (state.outputFormatActive && !state.outputFormatTerminalForwarded) {
+        const buffered = state.outputFormatLastDelta
+        const usage = (buffered && (buffered as Record<string, unknown>).usage)
+          ?? { output_tokens: 0 }
+        const synthFrame = encoder.encode(`event: message_delta\ndata: ${JSON.stringify({
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage,
+        })}\n\n`)
+        pushEvent(state, { kind: "sse", frame: synthFrame })
+        state.outputFormatTerminalForwarded = true
+      }
+      pushEnd(state.sdkEndReason ?? "end_turn")
     }
-    pushEvent(state, { kind: "end", reason: state.sdkEndReason ?? "end_turn" })
   }
 }
 
@@ -813,7 +887,8 @@ export function runBlockingStream(
           return
         }
         if (evt.kind === "close_round") {
-          safeEnqueue(makeMessageStopFrame(encoder))
+          for (const f of evt.frames) frameTelemetry.observe(f)
+          safeEnqueue(concatFrames([...evt.frames, makeMessageStopFrame(encoder)]))
           recordTelemetry()
           closeHttp()
           detachSink(state)
@@ -1016,6 +1091,10 @@ export async function runBlockingNonStream(
         return
       }
       if (evt.kind === "close_round") {
+        for (const frame of evt.frames) {
+          frameTelemetry.observe(frame)
+          aggregator.consumeSseFrame(frame)
+        }
         finalize()
         return
       }

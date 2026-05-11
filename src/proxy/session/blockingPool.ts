@@ -88,7 +88,7 @@ export type BlockingSessionStatus =
 
 export type BufferedEvent =
   | { kind: "sse"; frame: Uint8Array }
-  | { kind: "close_round"; stopReason: "tool_use" }
+  | { kind: "close_round"; stopReason: "tool_use"; frames: Uint8Array[] }
   | { kind: "end"; reason: "end_turn" | "max_tokens" | "error" }
   | { kind: "error"; error: Error }
 
@@ -171,9 +171,12 @@ export interface BlockingSessionState {
    * (from the turn's `content_block_start` events). close_round fires
    * precisely when every expected id is present in `pendingTools` — i.e.
    * every handler has entered and is ready to receive its tool_result.
+   * `frames` holds the terminal `message_delta(stop_reason:"tool_use")`
+   * until close_round so it can be emitted atomically with the synthetic
+   * `message_stop` in the active HTTP sink.
    * Cleared on close_round and on continuation.
    */
-  pendingRoundClose: { expectedIds: Set<string> } | null
+  pendingRoundClose: { expectedIds: Set<string>; frames: Uint8Array[] } | null
 
   /** Input-json accumulator per SDK block index, for tool_use bindings. */
   inputJsonAccum: Map<number, string>
