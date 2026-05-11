@@ -11,11 +11,13 @@ import { mkdirSync, existsSync, rmSync, readFileSync, writeFileSync } from "node
 import { join } from "node:path"
 import { execSync, spawnSync } from "node:child_process"
 import { homedir } from "node:os"
+import { request as httpRequest } from "node:http"
 import type { ProfileConfig } from "./profiles"
 import { setSetting } from "./settings"
 
 const PROFILES_DIR = join(homedir(), ".config", "meridian", "profiles")
 const CONFIG_FILE = join(homedir(), ".config", "meridian", "profiles.json")
+type ProfileSwitchResponse = { success?: boolean; error?: string }
 
 function ensureProfilesDir(): void {
   mkdirSync(PROFILES_DIR, { recursive: true })
@@ -38,6 +40,34 @@ function loadProfileConfig(): ProfileConfig[] {
 function saveProfileConfig(profiles: ProfileConfig[]): void {
   ensureProfilesDir()
   writeFileSync(CONFIG_FILE, JSON.stringify(profiles, null, 2) + "\n", { mode: 0o600 })
+}
+
+function postJson<T>(url: string, body: unknown, timeoutMs = 5000): Promise<T> {
+  const payload = JSON.stringify(body)
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+      timeout: timeoutMs,
+    }, (res) => {
+      let raw = ""
+      res.setEncoding("utf8")
+      res.on("data", (chunk: string) => { raw += chunk })
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(raw || "{}") as T)
+        } catch (err) {
+          reject(err)
+        }
+      })
+    })
+    req.on("timeout", () => req.destroy(new Error("request timed out")))
+    req.on("error", reject)
+    req.end(payload)
+  })
 }
 
 function getAuthStatus(configDir: string): { loggedIn: boolean; email?: string; subscriptionType?: string } {
@@ -191,13 +221,10 @@ export async function profileSwitch(id: string): Promise<void> {
   const host = process.env.MERIDIAN_HOST ?? process.env.CLAUDE_PROXY_HOST ?? "127.0.0.1"
 
   try {
-    const res = await fetch(`http://${host}:${port}/profiles/active`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile: id }),
-      signal: AbortSignal.timeout(5000),
-    })
-    const body = await res.json() as { success?: boolean; error?: string }
+    const body = await postJson<ProfileSwitchResponse>(
+      `http://${host}:${port}/profiles/active`,
+      { profile: id },
+    )
     if (body.success) {
       // Also persist locally so it survives proxy restarts
       setSetting("activeProfile", id)
