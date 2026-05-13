@@ -2,12 +2,7 @@
  * Conversation fingerprinting.
  */
 
-import { xxh64 as xxh64BigInt } from "@node-rs/xxhash"
-
-/** 64-bit xxHash → 16-char hex string. */
-function xxh64(data: string): string {
-  return xxh64BigInt(data).toString(16).padStart(16, "0")
-}
+import { xxh64 } from "./hash"
 
 /**
  * Hash the leading user messages + working directory to fingerprint a conversation.
