@@ -11,10 +11,13 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-# Auto-detect: compiled dist (Docker/npm) or TypeScript source (local dev).
-# Pure-bun project — bun is the only supported runtime.
-if [ -f dist/cli.js ]; then
-  PROXY_CMD="bun dist/cli.js"
+# Auto-detect: compiled single-file binary (release) or TypeScript source (local dev).
+# Build emits dist/meridian (Unix) or dist/meridian.exe (Windows) via
+# `bun build --compile --bytecode --format=esm`.
+if [ -f dist/meridian.exe ]; then
+  PROXY_CMD="./dist/meridian.exe"
+elif [ -f dist/meridian ]; then
+  PROXY_CMD="./dist/meridian"
 else
   PROXY_CMD="bun run ./bin/cli.ts"
 fi

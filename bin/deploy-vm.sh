@@ -697,16 +697,15 @@ cmd_install() {
   exec_as_claude "cd /app && bun install 2>&1 | tail -10"
   echo "  Done."
 
-  # Step 3: Build
+  # Step 3: Build (delegates to `bun run build` in package.json — produces
+  # the single-file binary dist/meridian via --compile --bytecode).
+  # `set -o pipefail` surfaces build failures through the `| tail -5`
+  # pipeline; otherwise tail's success would mask a broken build.
   echo "  [3/3] Building project..."
-  exec_as_claude "
-    cd /app
-    rm -rf dist
-    bun build bin/cli.ts src/proxy/server.ts \
-      --outdir dist --target bun --splitting \
-      --external @anthropic-ai/claude-agent-sdk \
-      --entry-naming '[name].js' 2>&1 | tail -5
-  "
+  if ! exec_as_claude "set -o pipefail; cd /app && bun run build 2>&1 | tail -5"; then
+    echo "  Error: build failed. Re-run '$0 install --name $CONTAINER_NAME' once the issue is fixed."
+    exit 1
+  fi
   echo "  Done."
 
   # Fix supervisor script line endings (Windows CRLF -> LF)
@@ -731,20 +730,18 @@ cmd_update() {
   local proxy_was_running=false
   proxy_running && proxy_was_running=true
 
-  # Steps 1–3 run while the proxy keeps serving. Bun holds loaded modules
-  # in memory, so tar-overwriting /app and mutating node_modules does not
-  # affect the running process. `--unlink-first` gives us rename semantics
-  # so any file an active shell (e.g. the supervisor) reads from keeps its
-  # old inode.
+  # Steps 1–2 run live. Bun holds loaded modules in memory and the compiled
+  # binary is mmapped, so tar-overwriting /app and mutating node_modules
+  # does not affect the running process. `--unlink-first` gives us rename
+  # semantics so any file an active shell (e.g. the supervisor) reads from
+  # keeps its old inode.
 
   # Step 1: Sync project files (live)
-  echo "  [1/4] Syncing project files..."
+  echo "  [1/3] Syncing project files..."
   tar -C "$PROJECT_DIR" \
     --exclude='.git' \
     --exclude='node_modules' \
     --exclude='dist' \
-    --exclude='dist.new' \
-    --exclude='dist.old' \
     --exclude='.env*' \
     -czf - . \
     | docker exec -i "$CONTAINER_NAME" bash -c \
@@ -752,46 +749,64 @@ cmd_update() {
   echo "  Done."
 
   # Step 2: Reinstall deps (live)
-  echo "  [2/4] Installing dependencies..."
+  echo "  [2/3] Installing dependencies..."
   exec_as_claude "cd /app && bun install 2>&1 | tail -5"
   echo "  Done."
 
-  # Step 3: Build to dist.new (live — running proxy still reads from dist/).
-  # If the proxy happens to crash during this window, the supervisor
-  # restarts it from the unchanged dist/ and stays healthy.
+  # Step 3: Stop the proxy, rebuild via `bun run build` (which writes
+  # dist/meridian directly), then start. We stop before building so the
+  # supervisor's restart loop doesn't trip on the brief window where
+  # the new binary is being written. Downtime is bounded by build time
+  # (~1-2 s in-container) plus restart.
   #
-  # Prep dist.new as root to wipe any stale copy (gVisor sometimes leaves
-  # root-owned leftovers that survive `chown -R /app`).
-  echo "  [3/4] Building to dist.new..."
-  exec_as_root "rm -rf /app/dist.new && mkdir -p /app/dist.new && chown claude:claude /app/dist.new"
-  exec_as_claude "
-    cd /app
-    bun build bin/cli.ts src/proxy/server.ts \
-      --outdir dist.new --target bun --splitting \
-      --external @anthropic-ai/claude-agent-sdk \
-      --entry-naming '[name].js' 2>&1 | tail -5
-  "
-  echo "  Done."
-
-  # Fix supervisor script line endings (safe — sed -i uses rename)
-  exec_as_root "
-    sed -i 's/\r$//' /app/bin/claude-proxy-supervisor.sh 2>/dev/null || true
-    chmod +x /app/bin/claude-proxy-supervisor.sh
-  "
-
-  # Step 4: Short downtime window — stop, swap dist, start.
-  # Done as root so we are immune to any lingering ownership skew.
-  echo "  [4/4] Swapping dist and restarting..."
+  # The build script no longer does `rm -rf dist` — it just `mkdir -p
+  # dist && bun build --outfile=dist/meridian`, so it does not need a
+  # clean directory. We still attempt a best-effort cleanup of stale
+  # multi-file artifacts (cli.js, server.js, *.jsc) so dist/ does not
+  # accumulate cruft from old build shapes. Failure to clean is
+  # diagnosed but does not block the build.
+  #
+  # `set -o pipefail` ensures `bun build | tail -5` reports the build's
+  # exit code, not tail's — otherwise a build failure would be silently
+  # swallowed and the supervisor would restart on the stale binary.
+  echo "  [3/3] Rebuilding and restarting..."
   if [ "$proxy_was_running" = true ]; then
     stop_quiet
   fi
   exec_as_root "
-    cd /app
-    rm -rf dist.old
-    [ -d dist ] && mv dist dist.old
-    mv dist.new dist
-    chown -R claude:claude dist
-    rm -rf dist.old
+    if [ -e /app/dist ]; then
+      # Drop immutable attribute and add write/exec for owner — covers
+      # chattr +i and mode-stripped directories left by previous flows.
+      chattr -R -i /app/dist 2>/dev/null || true
+      chmod -R u+rwX /app/dist 2>/dev/null || true
+      rm -rf /app/dist 2>/dev/null
+      if [ -e /app/dist ]; then
+        # Last resort: leaf-first delete via find. If this also fails,
+        # report state and continue — the build can still overwrite
+        # dist/meridian even with stale siblings around.
+        find /app/dist -depth -delete 2>/dev/null || true
+      fi
+      if [ -e /app/dist ]; then
+        echo '  [warn] /app/dist could not be wiped — build will overwrite dist/meridian in-place. Diagnostics:'
+        ls -la /app/dist 2>&1 | head -10 | sed 's/^/    /'
+        mount | grep ' /app' 2>/dev/null | sed 's/^/    mount: /' || true
+        lsattr -d /app/dist 2>/dev/null | sed 's/^/    lsattr: /' || true
+      fi
+    fi
+    mkdir -p /app/dist
+    chown claude:claude /app/dist
+  "
+  if ! exec_as_claude "set -o pipefail; cd /app && bun run build 2>&1 | tail -5"; then
+    echo "  Error: build failed."
+    if [ "$proxy_was_running" = true ]; then
+      echo "  Restarting proxy on the previous binary so the container stays healthy."
+      start_quiet
+    fi
+    exit 1
+  fi
+  exec_as_root "
+    sed -i 's/\r$//' /app/bin/claude-proxy-supervisor.sh 2>/dev/null || true
+    chmod +x /app/bin/claude-proxy-supervisor.sh
   "
   if [ "$proxy_was_running" = true ]; then
     start_quiet

@@ -12,9 +12,11 @@ This is a **pure-Bun project.** Bun is the only supported runtime — no Node.js
 
 ```bash
 bun run test     # Typecheck (tsc --noEmit)
-bun run build    # Build with bun build (--target=bun) + tsc
+bun run build    # Compile to a single-file binary (bun build --compile --bytecode --format=esm)
 bun start        # Start the proxy server (via claude-proxy-supervisor.sh)
 ```
+
+The build emits **one** artifact: `dist/meridian` (Unix) or `dist/meridian.exe` (Windows). The Bun runtime and JSC bytecode are embedded in the binary. No `dist/cli.js` / `dist/server.js` / `dist/*.jsc` are produced; the package no longer exposes a library entry.
 
 ## Code Rules
 
@@ -70,13 +72,16 @@ session/
 
 ## Stable API Contract
 
-External plugins depend on these interfaces. **Do not change without project owner approval.**
+Meridian no longer ships a JS library entry — the build emits a single
+compiled binary (`dist/meridian` / `dist/meridian.exe`) only. Library
+exports (`startProxyServer`, `ProxyInstance`, `ProxyConfig`) remain as
+internal source-level symbols for tests and `bin/cli.ts`, but they are
+NOT part of the public surface and may change without notice.
+
+The HTTP / process-level contracts below are still stable. **Do not change without project owner approval.**
 
 | Interface | Location | Used by |
 |-----------|----------|---------|
-| `startProxyServer(config)` → `ProxyInstance` | `server.ts` | Hosts that spawn proxy instances |
-| `ProxyInstance.close()` | `types.ts` | Hosts for graceful shutdown |
-| `ProxyConfig` type | `types.ts` | Embed configuration |
 | `x-meridian-profile` header | `server.ts`, `profiles.ts` | Per-request profile selection (only header consulted) |
 | `GET /health` response shape | `server.ts` | Health checks |
 | `POST /v1/messages` request/response format | `server.ts` | Anthropic API contract |
