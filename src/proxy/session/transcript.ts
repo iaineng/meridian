@@ -13,7 +13,6 @@
  * Pure logic lives in buildJsonlLines / sanitizeCwdForProjectDir; the only
  * I/O is in writeSessionTranscript and prepareFreshSession's write call.
  */
-import { randomUUID, randomBytes } from "node:crypto"
 import { promises as fs } from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -35,7 +34,7 @@ const BASE62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 /** Generate a random base62 string of the given length. */
 function randomBase62(len: number): string {
-  const buf = randomBytes(len)
+  const buf = crypto.getRandomValues(new Uint8Array(len))
   let out = ""
   for (let i = 0; i < len; i++) out += BASE62[buf[i]! % 62]
   return out
@@ -617,7 +616,7 @@ export function buildJsonlLines(
   let parentUuid: string | null = null
   for (let i = 0; i < sliceEnd; i++) {
     const m = messages[i]!
-    const uuid = randomUUID()
+    const uuid = Bun.randomUUIDv7()
     const role = m.role === "assistant" ? "assistant" : "user"
     const cleaned = stripCacheControlDeep(m.content)
 
@@ -660,7 +659,7 @@ export function buildJsonlLines(
     sessionId,
   }), ...transcriptRows.map(row => JSON.stringify(row))]
 
-  // Sanity: UUID format must be valid (randomUUID() always produces valid UUIDs;
+  // Sanity: UUID format must be valid (Bun.randomUUIDv7() always produces valid UUIDs;
   // this guards against accidental misuse from tests)
   for (const u of messageUuids) {
     if (u !== null && !isUuid(u)) {
@@ -687,41 +686,6 @@ export async function writeSessionTranscript(
   await fs.writeFile(filePath, body, { encoding: "utf8", mode: 0o600 })
 }
 
-/**
- * Delete the JSONL transcript for a session. Silently ignores ENOENT so
- * callers can invoke it in a cleanup finally without first checking.
- */
-export async function deleteSessionTranscript(
-  cwd: string,
-  sessionId: string
-): Promise<void> {
-  const filePath = getProjectSessionPath(cwd, sessionId)
-  try {
-    await fs.unlink(filePath)
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e
-  }
-}
-
-/**
- * Atomically rename the JSONL transcript to a uniquely-suffixed `.bak` so
- * every request keeps its own backup (the ephemeral UUID pool reuses ids,
- * so a fixed `<file>.bak` would be overwritten on the next request). Used
- * by the ephemeral path when MERIDIAN_EPHEMERAL_JSONL_BACKUP is enabled.
- */
-export async function backupSessionTranscript(
-  cwd: string,
-  sessionId: string
-): Promise<void> {
-  const filePath = getProjectSessionPath(cwd, sessionId)
-  const ts = new Date().toISOString().replace(/[:.]/g, "-")
-  const rand = randomBytes(3).toString("hex")
-  try {
-    await fs.rename(filePath, `${filePath}.${ts}-${rand}.bak`)
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e
-  }
-}
 
 /**
  * High-level orchestrator. Generates a session UUID, builds JSONL lines,
@@ -755,7 +719,7 @@ export async function prepareFreshSession(
   cwd: string,
   opts?: TranscriptOptions
 ): Promise<FreshSessionResult> {
-  const sessionId = opts?.sessionId ?? randomUUID()
+  const sessionId = opts?.sessionId ?? Bun.randomUUIDv7()
   const { lines, messageUuids } = buildJsonlLines(messages, sessionId, cwd, opts)
 
   const n = messages.length

@@ -11,7 +11,6 @@ import { claudeLog, withClaudeLogContext } from "../logger"
 import { tmpdir } from "node:os"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
-import { randomUUID } from "crypto"
 
 import { diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import { createConcurrencyGate } from "./concurrency"
@@ -185,7 +184,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
   }
 
   const handleWithQueue = async (c: Context, endpoint: string) => {
-    const requestId = c.req.header("x-request-id") || randomUUID()
+    const requestId = c.req.header("x-request-id") || Bun.randomUUIDv7()
     const queueEnteredAt = Date.now()
     claudeLog("request.enter", { requestId, endpoint })
     await sessionGate.acquire()

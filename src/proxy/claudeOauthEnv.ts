@@ -205,6 +205,28 @@ export function getSetupTokenAuthStatus(configDir?: string): {
   return { loggedIn: true, email: account.emailAddress }
 }
 
+/**
+ * Pick a stable per-profile seed for deriving deterministic ephemeral session
+ * UUIDs. Same priority chain as `resolveClaudeOauthEnv`:
+ *
+ *   1. `oauthAccount.emailAddress` from `<configDir>/.claude.json` — the most
+ *      stable identifier (does not rotate with auth).
+ *   2. `<configDir>/setup-token` content — present whenever the profile is
+ *      logged in via the file-based setup flow; rotates if the user re-runs
+ *      `claude auth`, but that's fine: a new seed merely starts a fresh per-
+ *      seed UUID series, the old JSONL files just sit on disk untouched.
+ *
+ * Synchronous and tiny — the file probes happen on every blocking handler
+ * acquire, so avoid I/O cost growth. Returns `undefined` when neither source
+ * is available (e.g. profile not yet logged in); callers fall back to a
+ * non-deterministic random pool.
+ */
+export function getProfileSeed(configDir: string): string | undefined {
+  const account = readOauthAccount(configDir)
+  if (account.emailAddress) return account.emailAddress
+  return readSetupToken(configDir)
+}
+
 export async function resolveClaudeOauthEnv(
   sources?: ClaudeOauthEnvSources,
 ): Promise<ClaudeOauthEnv> {

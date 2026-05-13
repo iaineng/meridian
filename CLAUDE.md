@@ -45,9 +45,13 @@ bun start        # Start the proxy server (via claude-proxy-supervisor.sh)
 
 The blocking-MCP + passthrough + ephemeral-JSONL path is now the **only** path — those env switches no longer exist. The remaining knobs:
 
-- `MERIDIAN_EPHEMERAL_JSONL_BACKUP=1` — Rename the JSONL to `.<timestamp>.bak` instead of deleting on cleanup.
 - `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1` — Relax both the blocking-continuation drift check AND the prefix-hash lookup to ignore `tool_use` inputs (and ids), enforcing only count + per-position name equality. Escape hatch for clients that semantically rewrite tool inputs between rounds. Off by default.
-- `MERIDIAN_DISABLE_BLOCKING_CONTINUE=1` — Disable the in-memory blocking continuation path. Each HTTP round behaves as a one-shot: the handler skips pool lookup for tool_result-tail requests and always rebuilds the full JSONL transcript via `prepareFreshSession`, spawning a fresh SDK iterator. As soon as `close_round` fires the live sibling is released (SDK subprocess aborted, suspended MCP handlers rejected, JSONL deleted) — the proxy never waits for the client to deliver tool_results into the same iterator. Trades interleaved-thinking signature preservation and prompt-cache continuity for a simpler stateless flow. Off by default.
+- `MERIDIAN_DISABLE_BLOCKING_CONTINUE=1` — Disable the in-memory blocking continuation path. Each HTTP round behaves as a one-shot: the handler skips pool lookup for tool_result-tail requests and always rebuilds the full JSONL transcript via `prepareFreshSession`, spawning a fresh SDK iterator. As soon as `close_round` fires the live sibling is released (SDK subprocess aborted, suspended MCP handlers rejected, ephemeral UUID returned to the pool for reuse) — the proxy never waits for the client to deliver tool_results into the same iterator. Trades interleaved-thinking signature preservation and prompt-cache continuity for a simpler stateless flow. Off by default.
+
+### Ephemeral session UUID lifecycle
+
+- `session/ephemeralPool.ts` holds **per-profile** pools, keyed by seed: `email > setup-token > profile.id` (see `getProfileSeed` in `claudeOauthEnv.ts`). With a seed present the pool mints UUIDs deterministically via `sha256(seed || counter)`, so the JSONL paths (`<configDir>/projects/<cwd>/<uuid>.jsonl`) are stable across restarts. Without a seed it falls back to `randomUUID()`.
+- Cleanup **does not delete** the JSONL. `blockingPool.release` only flips an AbortSignal and rejects pending handlers; the Claude subprocess exits asynchronously and may still hold the transcript file open. The cleanup closure therefore only calls `ephemeralSessionIdPool.release(id)`, which puts the id into a 5s quarantine. After the quarantine the id becomes acquirable again, and the next request's `writeSessionTranscript` overwrites the stale bytes via `fs.writeFile` — atomic, no race with the dying subprocess.
 
 ## Architecture Quick Reference
 

@@ -30,16 +30,14 @@
  * signature chain.
  */
 
+import { homedir } from "node:os"
 import { claudeLog } from "../../logger"
 import { envBool } from "../../env"
 import type { SharedRequestContext } from "../pipeline/context"
 import type { HandlerContext } from "./types"
-import {
-  prepareFreshSession,
-  deleteSessionTranscript,
-  backupSessionTranscript,
-} from "../session/transcript"
+import { prepareFreshSession } from "../session/transcript"
 import { ephemeralSessionIdPool } from "../session/ephemeralPool"
+import { getProfileSeed } from "../claudeOauthEnv"
 import {
   PASSTHROUGH_MCP_PREFIX,
   createBlockingPassthroughMcpServer,
@@ -336,11 +334,21 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   }
 
   // --- Initial path ---
-  const ephemeralBackup = envBool("EPHEMERAL_JSONL_BACKUP")
-  let ephemeralId: string | undefined = ephemeralSessionIdPool.acquire()
+  // Seed the ephemeral pool per profile. Cleanup no longer deletes the JSONL
+  // on disk (the previous race between `state.abort` and `fs.unlink` could
+  // catch an in-flight SDK subprocess that still held the transcript open).
+  // Instead, the 5s release quarantine + deterministic seed-keyed UUIDs let
+  // the *next* request on the same profile naturally overwrite the transcript
+  // via `fs.writeFile`: same path, fresh contents, no destructive step in
+  // between. `email > setup-token > profile.id` gives a stable identifier for
+  // both logged-in and offline profiles.
+  const profileConfigDir = shared.profile.env.CLAUDE_CONFIG_DIR ?? homedir()
+  const profileSeed = getProfileSeed(profileConfigDir) ?? shared.profile.id
+  let ephemeralId: string | undefined = ephemeralSessionIdPool.acquire(profileSeed)
   claudeLog("session.ephemeral.acquired", {
     sessionId: ephemeralId,
     poolStats: ephemeralSessionIdPool.stats(),
+    seeded: profileSeed !== undefined,
     blocking: true,
   })
 
@@ -424,21 +432,21 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   // Idempotent cleanup — only runs when session fully terminates (SDK done
   // or janitor timeout). Stashed on the pool state so both paths can trigger
   // it via blockingPool.release.
+  //
+  // Deliberately NOT deleting the JSONL: `blockingPool.release` only triggers
+  // `state.abort?.()` (a non-blocking AbortSignal flip), so when this cleanup
+  // runs the Claude subprocess may still be tearing down and holding the
+  // transcript file open. The old code's `fs.unlink` would race that teardown
+  // and, on Windows, occasionally fail with EBUSY/EPERM. With the new
+  // overwrite-on-reuse model the transcript path is owned by a single
+  // (profile, ephemeral-uuid) pair; the 5s reuse quarantine lets the
+  // subprocess exit, and the next acquirer's `fs.writeFile` truncates the
+  // stale bytes atomically.
   let cleanupDone = false
   const capturedId = ephemeralId
   const cleanup = async () => {
     if (cleanupDone || !capturedId) return
     cleanupDone = true
-    try {
-      if (ephemeralBackup) await backupSessionTranscript(workingDirectory, capturedId)
-      else await deleteSessionTranscript(workingDirectory, capturedId)
-    } catch (e) {
-      claudeLog("session.ephemeral.cleanup_failed", {
-        sessionId: capturedId,
-        error: e instanceof Error ? e.message : String(e),
-        blocking: true,
-      })
-    }
     ephemeralSessionIdPool.release(capturedId)
     claudeLog("session.ephemeral.released", {
       sessionId: capturedId,
