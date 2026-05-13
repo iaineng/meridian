@@ -409,6 +409,7 @@ start_quiet() {
     export MERIDIAN_PORT=3456
     export MERIDIAN_MAX_CONCURRENT=-1
     export MERIDIAN_OBFUSCATION=cr
+    export MERIDIAN_DISABLE_BLOCKING_CONTINUE=1
     export PATH=\"/home/claude/.claude/bin:/home/claude/.local/bin:/usr/local/bin:\$PATH\"
     cd /app
     nohup ./bin/claude-proxy-supervisor.sh > /tmp/meridian.log 2>&1 &
