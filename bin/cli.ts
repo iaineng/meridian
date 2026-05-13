@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 
-import { createRequire } from "module"
 import { startProxyServer } from "../src/proxy/server"
 import { getSetupTokenAuthStatus } from "../src/proxy/claudeOauthEnv"
+import pkg from "../package.json" with { type: "json" }
 
-const require = createRequire(import.meta.url)
-const { version } = require("../package.json")
+const { version } = pkg
 
 const args = process.argv.slice(2)
 
@@ -38,7 +37,7 @@ See https://github.com/rynfar/meridian for full documentation.`)
   process.exit(0)
 }
 
-if (args[0] === "profile") {
+async function runProfileCommand(): Promise<void> {
   const { profileAdd, profileList, profileRemove, profileSwitch, profileLogin, profileHelp } = await import("../src/proxy/profileCli")
   const subcommand = args[1]
   const profileId = args[2]
@@ -49,7 +48,6 @@ if (args[0] === "profile") {
   else if (subcommand === "switch" && profileId) await profileSwitch(profileId)
   else if (subcommand === "login" && profileId) profileLogin(profileId)
   else profileHelp()
-  process.exit(0)
 }
 
 // Prevent SDK subprocess crashes from killing the proxy
@@ -115,6 +113,17 @@ export async function runCli(
   })
 }
 
-if (import.meta.main) {
+async function main(): Promise<void> {
+  if (args[0] === "profile") {
+    await runProfileCommand()
+    process.exit(0)
+  }
   await runCli()
+}
+
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(err)
+    process.exit(1)
+  })
 }
