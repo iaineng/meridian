@@ -1,7 +1,7 @@
 FROM debian:13
 
 # Pre-baked base image for deploy-vm.sh
-# Contains: system packages, Node.js 22, Bun, claude user
+# Contains: system packages, Bun, claude user
 # Does NOT contain: Claude Code CLI, project files
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -12,12 +12,7 @@ RUN apt-get update -qq \
        curl git build-essential ca-certificates gnupg unzip procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Bun
+# Bun (sole runtime — no Node.js)
 RUN curl -fsSL https://bun.sh/install | bash \
     && cp /root/.bun/bin/bun /usr/local/bin/bun \
     && chmod +x /usr/local/bin/bun

@@ -6,8 +6,8 @@ This guide covers everything you need to update when upgrading from `opencode-cl
 
 ## Quick Checklist
 
-- [ ] Install the new package: `npm install -g @rynfar/meridian`
-- [ ] Uninstall the old package: `npm uninstall -g opencode-claude-max-proxy`
+- [ ] Install the new package (requires Bun ≥ 1.3 — Meridian is now a pure-Bun runtime): `bun install -g @rynfar/meridian`
+- [ ] Uninstall the old package (it was npm-published, so use npm): `npm uninstall -g opencode-claude-max-proxy`
 - [ ] Update LaunchD plist (if using background service)
 - [ ] Update environment variables (old `CLAUDE_PROXY_*` still work, but `MERIDIAN_*` is preferred)
 - [ ] Update import paths in any plugins (if using the programmatic API)
@@ -19,13 +19,13 @@ This guide covers everything you need to update when upgrading from `opencode-cl
 ## 1. Install the New Package
 
 ```bash
-# Install new
-npm install -g @rynfar/meridian
+# Install new (requires Bun ≥ 1.3 — Meridian is now a pure-Bun runtime)
+bun install -g @rynfar/meridian
 
 # Verify
 meridian --version
 
-# Remove old (when ready)
+# Remove old (the old package was npm-published, so use npm to remove it)
 npm uninstall -g opencode-claude-max-proxy
 ```
 

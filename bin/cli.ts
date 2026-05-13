@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 import { createRequire } from "module"
 import { startProxyServer } from "../src/proxy/server"

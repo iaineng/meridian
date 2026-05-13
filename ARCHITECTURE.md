@@ -410,7 +410,7 @@ Tests that need `clearSessionCache` or `createProxyServer` import from `../proxy
 Every change must pass all existing unit and integration tests:
 
 ```bash
-npm test    # runs: bun test
+bun run test    # runs: tsc --noEmit (typecheck only — no runtime tests yet)
 ```
 
 E2E tests (`E2E.md`) should be run before releases or after major refactors.

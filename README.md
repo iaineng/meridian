@@ -39,8 +39,8 @@ Meridian bridges the Claude Code SDK to the standard Anthropic API. No OAuth int
 ## Quick Start
 
 ```bash
-# 1. Install
-npm install -g @rynfar/meridian
+# 1. Install (requires Bun ≥ 1.3 — Meridian is a pure-Bun runtime)
+bun install -g @rynfar/meridian
 
 # 2. Authenticate (one time)
 claude login
@@ -465,8 +465,8 @@ docker run -v ~/.claude:/home/claude/.claude -p 3456:3456 meridian
 ## Testing
 
 ```bash
-npm test       # unit + integration tests
-npm run build  # build with bun + tsc
+bun run test    # unit + integration tests (tsc --noEmit)
+bun run build   # build with bun + tsc
 ```
 
 | Tier | What | Speed |

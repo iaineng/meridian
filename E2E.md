@@ -10,7 +10,7 @@ Live tests against the real proxy + Claude Max SDK. These verify the full reques
 
 ```bash
 # 1. Build and start the proxy
-npm run build
+bun run build
 CLAUDE_PROXY_PORT=3456 bun run ./bin/cli.ts &
 
 # 2. Wait for ready
@@ -2286,7 +2286,7 @@ Verifies that Claude's `thinking` content blocks and the SDK's internal Turn 2 p
 
 ```bash
 # Proxy must be running in passthrough mode
-MERIDIAN_PASSTHROUGH=1 MERIDIAN_PORT=3457 npm start &
+MERIDIAN_PASSTHROUGH=1 MERIDIAN_PORT=3457 bun start &
 sleep 3
 curl -s http://127.0.0.1:3457/health | jq .mode   # → "passthrough"
 

@@ -13,10 +13,10 @@
 #         → id 0: update, migrate-tmpfs; then id 1: update, migrate-tmpfs
 #
 #   ./bin/deploy-vm.sh                          # show status (default)
-#   ./bin/deploy-vm.sh build                    # build base image (Node/Bun pre-installed)
+#   ./bin/deploy-vm.sh build                    # build base image (Bun pre-installed)
 #   ./bin/deploy-vm.sh deploy                   # full deploy: build+create+setup+auth+install+start
 #   ./bin/deploy-vm.sh create                   # create VM container
-#   ./bin/deploy-vm.sh setup                    # install Node/Bun/Claude in container
+#   ./bin/deploy-vm.sh setup                    # install Bun/Claude in container
 #   ./bin/deploy-vm.sh auth                     # authenticate with Claude
 #   ./bin/deploy-vm.sh install                  # copy project + build
 #   ./bin/deploy-vm.sh update                   # re-sync project + rebuild (preserves auth)
@@ -427,7 +427,7 @@ cmd_build() {
 
   echo ""
   echo "  Base image built: $VM_IMAGE_NAME"
-  echo "  Contains: system packages, Node.js 22, Bun"
+  echo "  Contains: system packages, Bun"
   echo ""
   echo "  Next step: $0 create"
 }
@@ -659,8 +659,8 @@ _cmd_auth_setup_token_flow() {
   docker exec --user claude "$CONTAINER_NAME" bash -c '
     CLAUDE_JSON="/home/claude/.claude.json"
     if [ -f "$CLAUDE_JSON" ]; then
-      if command -v node > /dev/null 2>&1; then
-        node -e "
+      if command -v bun > /dev/null 2>&1; then
+        bun -e "
           const fs = require(\"fs\");
           const f = \"$CLAUDE_JSON\";
           try {
@@ -703,9 +703,8 @@ cmd_install() {
     cd /app
     rm -rf dist
     bun build bin/cli.ts src/proxy/server.ts \
-      --outdir dist --target node --splitting \
+      --outdir dist --target bun --splitting \
       --external @anthropic-ai/claude-agent-sdk \
-      --external @node-rs/xxhash \
       --entry-naming '[name].js' 2>&1 | tail -5
   "
   echo "  Done."
@@ -732,7 +731,7 @@ cmd_update() {
   local proxy_was_running=false
   proxy_running && proxy_was_running=true
 
-  # Steps 1–3 run while the proxy keeps serving. Node holds loaded modules
+  # Steps 1–3 run while the proxy keeps serving. Bun holds loaded modules
   # in memory, so tar-overwriting /app and mutating node_modules does not
   # affect the running process. `--unlink-first` gives us rename semantics
   # so any file an active shell (e.g. the supervisor) reads from keeps its
@@ -768,9 +767,8 @@ cmd_update() {
   exec_as_claude "
     cd /app
     bun build bin/cli.ts src/proxy/server.ts \
-      --outdir dist.new --target node --splitting \
+      --outdir dist.new --target bun --splitting \
       --external @anthropic-ai/claude-agent-sdk \
-      --external @node-rs/xxhash \
       --entry-naming '[name].js' 2>&1 | tail -5
   "
   echo "  Done."
@@ -1149,10 +1147,10 @@ cmd_status() {
 
   echo ""
   echo "  Commands:"
-  echo "    $0 build            Build base image (Node/Bun)"
+  echo "    $0 build            Build base image (Bun)"
   echo "    $0 deploy           Full deploy (build+create+setup+auth+install+start)"
   echo "    $0 create           Create new VM container"
-  echo "    $0 setup            Install Node/Bun/Claude"
+  echo "    $0 setup            Install Bun/Claude"
   echo "    $0 auth             Authenticate with Claude"
   echo "    $0 install          Copy project + build"
   echo "    $0 update           Re-sync + rebuild"

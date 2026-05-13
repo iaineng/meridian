@@ -8,10 +8,12 @@ A proxy that exposes any Anthropic API client to Claude Max via the Claude Agent
 
 ## Commands
 
+This is a **pure-Bun project.** Bun is the only supported runtime — no Node.js installation required (or used) anywhere in the build, runtime, or VM deploy path.
+
 ```bash
-npm test          # Run all tests (bun test)
-npm run build     # Build with tsup
-npm start         # Start the proxy server
+bun run test     # Typecheck (tsc --noEmit)
+bun run build    # Build with bun build (--target=bun) + tsc
+bun start        # Start the proxy server (via claude-proxy-supervisor.sh)
 ```
 
 ## Code Rules
@@ -87,24 +89,16 @@ If you need to modify any of these, open an issue first — breaking changes aff
 
 ## Releasing
 
-**Do NOT run `npm version`, `git push --tags`, or `npm publish` manually.**
+The previous `.github/workflows/*` (Release Please, CI, Docker) were
+removed during the pure-Bun migration and will be rewritten. Until the
+new pipeline lands there is **no automated release path** — do not
+attempt to publish manually without explicit project-owner sign-off.
 
-Releases are handled automatically by [Release Please](https://github.com/googleapis/release-please):
+`.release-please-manifest.json` and `release-please-config.json` remain
+on disk so the next release workflow can pick up the version anchor.
 
-1. Merge PRs to `main` (use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`, `fix:`, etc.)
-2. Release Please auto-creates/updates a release PR that batches all changes since the last release
-3. Review and merge the release PR when you're ready to ship
-4. Merging the release PR automatically:
-   - Bumps `package.json` and `CHANGELOG.md`
-   - Creates a git tag and GitHub Release
-   - Runs tests, builds, and publishes to npm with provenance
+When the new pipeline is added, expect it to:
 
-Multiple PRs get batched into a single release. Never publish manually.
-
-### Release config files
-
-- **`.release-please-manifest.json`** — tracks the current released version. Release Please updates this automatically when a release PR is merged. **Do not edit manually** unless resetting the version anchor.
-- **`release-please-config.json`** — defines the release type (`node`), component name, and changelog section mapping.
-- **`.github/workflows/release-please.yml`** — the workflow that runs on every push to `main`. It creates/updates the release PR and publishes to npm when merged.
-
-There is **no manual release workflow**. The old `release.yml` (workflow_dispatch) was removed because it conflicted with branch protection and duplicated Release Please's job.
+- Run `bun install`, `bun run typecheck`, `bun run build`.
+- Use `bun publish` (the project no longer ships a `node`/`npm` toolchain).
+- Be triggered by Conventional Commits on `main`.

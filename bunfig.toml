@@ -1,0 +1,9 @@
+# Bun installer settings.
+# https://bun.sh/docs/runtime/bunfig
+
+[install]
+# Skip `optionalDependencies` during `bun install` — we don't rely on any
+# optional packages, and skipping them avoids pulling in platform-specific
+# native binaries (e.g. unused @anthropic-ai/claude-agent-sdk-* prebuilts)
+# during fresh installs and CI builds.
+optional = false

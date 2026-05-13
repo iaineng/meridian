@@ -16,22 +16,21 @@
     }
   },
   "engines": {
-    "node": ">=22"
+    "bun": ">=1.3"
   },
   "scripts": {
     "start": "./bin/claude-proxy-supervisor.sh",
     "proxy": "./bin/claude-proxy-supervisor.sh",
-    "build": "rm -rf dist && bun build bin/cli.ts src/proxy/server.ts --outdir dist --target node --splitting --external @anthropic-ai/claude-agent-sdk --external @node-rs/xxhash --entry-naming [name].js && tsc -p tsconfig.build.json",
-    "postbuild": "node --check dist/cli.js && node --check dist/server.js && test -f dist/proxy/server.d.ts",
+    "build": "rm -rf dist && bun build bin/cli.ts src/proxy/server.ts --outdir dist --target bun --splitting --external @anthropic-ai/claude-agent-sdk --entry-naming [name].js && tsc -p tsconfig.build.json",
+    "postbuild": "test -f dist/cli.js && test -f dist/server.js && test -f dist/proxy/server.d.ts",
     "prepublishOnly": "bun run build",
     "test": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "proxy:direct": "bun run ./bin/cli.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.2.138",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@node-rs/xxhash": "^1.7.6"
+    "@anthropic-ai/claude-agent-sdk": "0.2.140",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@hono/node-server": "^1.19.11",
