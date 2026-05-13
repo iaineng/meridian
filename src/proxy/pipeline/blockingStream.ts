@@ -892,6 +892,20 @@ export function runBlockingStream(
           recordTelemetry()
           closeHttp()
           detachSink(state)
+          // `MERIDIAN_DISABLE_BLOCKING_CONTINUE`: tear down the live sibling
+          // as soon as the round closes instead of holding the SDK iterator
+          // suspended for a continuation that will never arrive. The next
+          // HTTP rebuilds JSONL from scratch and starts a fresh blocking
+          // initial. `release` aborts the SDK subprocess (so the suspended
+          // MCP handlers don't ship error CallToolResults to the API) and
+          // deletes the JSONL transcript.
+          if (envBool("DISABLE_BLOCKING_CONTINUE")) {
+            claudeLog("blocking.one_shot.release_after_close_round", {
+              requestId: shared.requestMeta.requestId,
+              pending: state.pendingTools.size,
+            })
+            void blockingPool.release(state, "one_shot_after_close_round")
+          }
           return
         }
         if (evt.kind === "end") {
@@ -1096,6 +1110,17 @@ export async function runBlockingNonStream(
           aggregator.consumeSseFrame(frame)
         }
         finalize()
+        // `MERIDIAN_DISABLE_BLOCKING_CONTINUE`: same one-shot teardown as
+        // `runBlockingStream` — release the sibling so the next HTTP round
+        // rebuilds JSONL from scratch instead of resolving suspended
+        // handlers on this state.
+        if (envBool("DISABLE_BLOCKING_CONTINUE")) {
+          claudeLog("blocking.one_shot.release_after_close_round", {
+            requestId: shared.requestMeta.requestId,
+            pending: state.pendingTools.size,
+          })
+          void blockingPool.release(state, "one_shot_after_close_round")
+        }
         return
       }
       if (evt.kind === "end") {

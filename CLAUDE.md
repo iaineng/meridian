@@ -45,6 +45,7 @@ The blocking-MCP + passthrough + ephemeral-JSONL path is now the **only** path �
 
 - `MERIDIAN_EPHEMERAL_JSONL_BACKUP=1` — Rename the JSONL to `.<timestamp>.bak` instead of deleting on cleanup.
 - `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1` — Relax both the blocking-continuation drift check AND the prefix-hash lookup to ignore `tool_use` inputs (and ids), enforcing only count + per-position name equality. Escape hatch for clients that semantically rewrite tool inputs between rounds. Off by default.
+- `MERIDIAN_DISABLE_BLOCKING_CONTINUE=1` — Disable the in-memory blocking continuation path. Each HTTP round behaves as a one-shot: the handler skips pool lookup for tool_result-tail requests and always rebuilds the full JSONL transcript via `prepareFreshSession`, spawning a fresh SDK iterator. As soon as `close_round` fires the live sibling is released (SDK subprocess aborted, suspended MCP handlers rejected, JSONL deleted) — the proxy never waits for the client to deliver tool_results into the same iterator. Trades interleaved-thinking signature preservation and prompt-cache continuity for a simpler stateless flow. Off by default.
 
 ## Architecture Quick Reference
 

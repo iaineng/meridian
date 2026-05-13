@@ -73,6 +73,21 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   const lastMsg = allMessages[allMessages.length - 1]
   const isContinuationShape = isToolResultOnlyUserMessage(lastMsg)
 
+  // `MERIDIAN_DISABLE_BLOCKING_CONTINUE=1` opts the request out of the
+  // in-memory continuation path. Every tool_result-tail request is rerouted
+  // through the fresh-initial branch below, which means:
+  //   1. `prepareFreshSession` rebuilds the full JSONL transcript (prior
+  //      assistant tool_use + the new user tool_result are written as
+  //      ordinary history rows), and
+  //   2. a brand new SDK iterator is spawned per HTTP round.
+  // Paired with the one-shot release hook in `pipeline/blockingStream.ts`,
+  // the suspended MCP handlers are torn down as soon as `close_round`
+  // fires — the proxy never waits for the next HTTP to deliver tool_results
+  // into the same iterator. Escape hatch for clients that don't preserve
+  // enough state to reliably match a live sibling but still need correct
+  // multi-round semantics via JSONL replay.
+  const disableContinue = envBool("DISABLE_BLOCKING_CONTINUE")
+
   // `MERIDIAN_BLOCKING_DRIFT_NAME_ONLY=1` relaxes both the drift check
   // (`verifyEmittedAssistant({skipInputCheck:true})`) AND the prefix-hash
   // lookup (drop tool_use id+input from the per-message hash). They have
@@ -119,7 +134,18 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   const incomingSystemFingerprint = computeSystemFingerprint(shared.body?.system)
 
   // --- Continuation path ---
-  if (isContinuationShape) {
+  // `disableContinue` short-circuits the lookup: even if the request shape
+  // is a tool_result tail, we skip the live-sibling routing and fall
+  // through to the fresh-initial branch below. The previous round's
+  // sibling (if any) has already been released by the close_round hook in
+  // blockingStream.ts.
+  if (isContinuationShape && disableContinue) {
+    claudeLog("blocking.continuation.disabled", {
+      requestId: requestMeta.requestId,
+      reason: "env_disable_blocking_continue",
+    })
+  }
+  if (isContinuationShape && !disableContinue) {
     // Prefix-aware lookup: among siblings sharing this conversation-identity
     // key, pick the one whose stored priors are the longest strict prefix of
     // the incoming. Siblings model forked branches — the longest-prefix
