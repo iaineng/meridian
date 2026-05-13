@@ -409,10 +409,18 @@ export async function buildBlockingHandler(shared: SharedRequestContext): Promis
   // transcript so the SDK can resume the conversation history. Errors here
   // are unrecoverable: there is no flat-text fallback, since the prompt
   // builder has no `<conversation_history>` path.
+  //
+  // `preserveOriginalShape` propagates `MERIDIAN_DISABLE_BLOCKING_CONTINUE`
+  // into the JSONL builder. In one-shot mode the sibling SDK iterator is
+  // released at `close_round`, so the transcript never feeds an MCP
+  // CallToolResult — there's no reason to textualize `tool_reference`
+  // blocks or collapse `tool_result` array content. Forwarding the original
+  // Anthropic shape keeps the API request byte-faithful to the caller.
   const prep = await prepareFreshSession(allMessages, workingDirectory, {
     model,
     toolPrefix: PASSTHROUGH_MCP_PREFIX,
     sessionId: ephemeralId,
+    preserveOriginalShape: disableContinue,
   })
   // Only forward `freshSessionId` to the SDK as a resume target when the
   // JSONL was actually written. Empty message inputs short-circuit transcript

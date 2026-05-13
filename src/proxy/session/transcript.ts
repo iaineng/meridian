@@ -71,6 +71,22 @@ export interface TranscriptOptions {
    * a previously-released UUID instead of minting a new one each request.
    */
   sessionId?: string
+  /**
+   * When true, skip every shape transform that exists only to keep the JSONL
+   * compatible with the blocking-MCP CallToolResult pipeline:
+   *   - `tool_reference` blocks are passed through instead of collapsed into a
+   *     `text` block.
+   *   - `tool_result` blocks keep the caller's original Anthropic shape
+   *     (including the array form for `is_error` content and string-form
+   *     `content`), with `crEncode` still applied to every text payload so
+   *     obfuscation stays consistent across rounds.
+   *
+   * Used by the `MERIDIAN_DISABLE_BLOCKING_CONTINUE=1` one-shot path: the
+   * sibling SDK iterator is torn down at `close_round`, so the JSONL never
+   * needs to feed an MCP handler — and the round-trip would otherwise lose
+   * structure that the API can still consume verbatim.
+   */
+  preserveOriginalShape?: boolean
 }
 
 export interface BuildJsonlResult {
@@ -316,6 +332,16 @@ function applyJsonlHistoryBreakpoints(
   }
 }
 
+export interface NormalizeUserContentOpts {
+  /**
+   * Skip blocking-MCP shape alignment. See `TranscriptOptions.preserveOriginalShape`
+   * for the full contract — `tool_reference` is passed through verbatim and
+   * `tool_result` keeps the caller's Anthropic shape (with `crEncode` still
+   * applied to text payloads).
+   */
+  preserveOriginalShape?: boolean
+}
+
 /**
  * Apply crEncode to textual fields of a user-side content value while
  * normalizing to an array shape at the top level.
@@ -336,12 +362,12 @@ function applyJsonlHistoryBreakpoints(
  * Exported so the query-direct path (queryDirect.ts) can produce SDK input
  * bytes identical to what buildJsonlLines writes for the same message.
  */
-export function normalizeUserContentForSdk(content: any): any {
+export function normalizeUserContentForSdk(content: any, opts?: NormalizeUserContentOpts): any {
   if (content == null) return content
   if (typeof content === "string") return [{ type: "text", text: crEncode(content) }]
-  if (Array.isArray(content)) return content.map(crEncodeUserBlock)
+  if (Array.isArray(content)) return content.map((block) => crEncodeUserBlock(block, opts))
   if (typeof content !== "object") return content
-  return crEncodeUserBlock(content)
+  return crEncodeUserBlock(content, opts)
 }
 
 /**
@@ -352,9 +378,9 @@ export function normalizeUserContentForSdk(content: any): any {
  * Always returns an array — the SDK AsyncIterable path expects user
  * `message.content` to be an array of blocks.
  */
-export function normalizeUserContentForSdkPath(content: any): any[] {
+export function normalizeUserContentForSdkPath(content: any, opts?: NormalizeUserContentOpts): any[] {
   const stripped = stripCacheControlDeep(content)
-  const normalized = normalizeUserContentForSdk(stripped)
+  const normalized = normalizeUserContentForSdk(stripped, opts)
   return Array.isArray(normalized) ? normalized : []
 }
 
@@ -367,21 +393,61 @@ type SdkToolResultContentBlock =
   | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
 
 /** Per-block variant for user-side SDK input. */
-function crEncodeUserBlock(block: any): any {
+function crEncodeUserBlock(block: any, opts?: NormalizeUserContentOpts): any {
   if (block == null || typeof block !== "object") return block
   if (block.type === "text" && typeof block.text === "string") {
     return { ...block, text: crEncode(block.text) }
   }
   if (block.type === "tool_result") {
-    return normalizeToolResultBlockForSdk(block)
+    return opts?.preserveOriginalShape
+      ? preserveToolResultBlock(block)
+      : normalizeToolResultBlockForSdk(block)
   }
   // Non-standard `tool_reference` block (some clients emit it inside
   // tool_result.content to nudge the model toward a related tool). Anthropic
   // does not accept `tool_reference` as a valid tool_result inner type, so
-  // collapse it to a text block. Format matches `serializeToolResultContentToText`
-  // in messages.ts so the textual prompt path and the JSONL/MCP path agree.
+  // collapse it to a text block by default. Format matches
+  // `serializeToolResultContentToText` in messages.ts so the textual prompt
+  // path and the JSONL/MCP path agree. In `preserveOriginalShape` mode (the
+  // `DISABLE_BLOCKING_CONTINUE` one-shot path) we pass the block through
+  // unchanged — that path never feeds an MCP CallToolResult, and the user
+  // explicitly opted out of helpful rewrites in favour of byte-faithful
+  // forwarding to the API.
   if (block.type === "tool_reference" && typeof block.tool_name === "string") {
+    if (opts?.preserveOriginalShape) return block
     return { type: "text", text: crEncode(`tool_reference: ${block.tool_name}`) }
+  }
+  return block
+}
+
+/**
+ * One-shot variant of `normalizeToolResultBlockForSdk`: keep the caller's
+ * original tool_result block shape (`is_error`, array-form content, string
+ * content, image source shape) and only apply `crEncode` to every text
+ * payload. Used when `preserveOriginalShape` is enabled — the blocking-MCP
+ * round-trip is bypassed, so the API receives the client's content verbatim
+ * (modulo obfuscation).
+ */
+function preserveToolResultBlock(block: any): any {
+  const content = block?.content
+  if (typeof content === "string") {
+    return { ...block, content: crEncode(content) }
+  }
+  if (Array.isArray(content)) {
+    return { ...block, content: content.map(crEncodeToolResultInnerBlock) }
+  }
+  return block
+}
+
+/**
+ * Per-block variant for `tool_result.content` arrays in `preserveOriginalShape`
+ * mode. Only text payloads are obfuscated; image, document, and any other
+ * blocks (including non-standard `tool_reference`) are returned unchanged.
+ */
+function crEncodeToolResultInnerBlock(block: any): any {
+  if (block == null || typeof block !== "object") return block
+  if (block.type === "text" && typeof block.text === "string") {
+    return { ...block, text: crEncode(block.text) }
   }
   return block
 }
@@ -610,6 +676,9 @@ export function buildJsonlLines(
   const gitBranch = opts?.gitBranch ?? ""
   const model = opts?.model
   const toolPrefix = opts?.toolPrefix
+  const userOpts: NormalizeUserContentOpts | undefined = opts?.preserveOriginalShape
+    ? { preserveOriginalShape: true }
+    : undefined
 
   const transcriptRows: Array<Record<string, any>> = []
 
@@ -622,7 +691,7 @@ export function buildJsonlLines(
 
     const message = role === "assistant"
       ? wrapAssistantMessage(applyToolPrefixToAssistant(cleaned, toolPrefix), model)
-      : { role: "user", content: normalizeUserContentForSdk(cleaned) }
+      : { role: "user", content: normalizeUserContentForSdk(cleaned, userOpts) }
 
     transcriptRows.push({
       parentUuid,
@@ -733,11 +802,14 @@ export async function prepareFreshSession(
   // (JSONL history). Without this, Anthropic's prompt cache breaks at every
   // new user turn — only the system/tools prefix stays stable.
   const useSdkInterruptedResume = lastIsUser && includesLastUser
+  const userOpts: NormalizeUserContentOpts | undefined = opts?.preserveOriginalShape
+    ? { preserveOriginalShape: true }
+    : undefined
   let lastUserPrompt: string | any[]
   if (useSdkInterruptedResume) {
     lastUserPrompt = ""
   } else if (lastIsUser && !includesLastUser) {
-    lastUserPrompt = normalizeUserContentForSdk(stripCacheControlDeep(lastMsg!.content))
+    lastUserPrompt = normalizeUserContentForSdk(stripCacheControlDeep(lastMsg!.content), userOpts)
   } else if (n > 0 && !lastIsUser) {
     lastUserPrompt = buildPrefillContinuePrompt(lastMsg!.content)
   } else {
